@@ -1,5 +1,32 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.1.5-recovered - 2026-05-07
+
+### Fixed
+- Restored missing runtime scripts after repo migration:
+  - recon_discord_bot.sh
+  - recon_discovery.sh
+  - recon_validate.sh
+  - recon_hot_seed.sh
+  - recon_scope_watch.sh
+  - recon_takeover_hunter.sh
+- Restored functional supervisor daemon wiring.
+- Restored Discord bot command handling for health, queue, status, logs, mode, and control commands.
+- Restored live recon loops for validation, discovery, hot-seed, scope-watch, takeover-watch, CVE, nuclei, and schedule tasks.
+- Recreated home-directory compatibility symlinks for scripts still expecting ~/recon_*.sh paths.
+
+### Verified
+- Bash syntax checks passed for restored scripts.
+- Daemon started successfully.
+- Discord bot responded to !help, !queue, !status, and !health.
+- Elasticsearch health returned green.
+- Repo tagged as v2.1.5-recovered.
+
+### Notes
+- Root cause was an incomplete repo migration where newer helper scripts were present, but required runtime scripts and Discord bot wiring were missing.
+- Do not remove compatibility symlinks yet because some scripts still call the old flat ~/recon_*.sh paths.
+
+
 ---
 
 ## [v2.1.4] — Schedule-based mode switching + stop fix
