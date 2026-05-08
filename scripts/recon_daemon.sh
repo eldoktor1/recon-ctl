@@ -19,8 +19,6 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="$BASE_DIR/state"
@@ -46,12 +44,6 @@ fi
 # Setup:
 #   1. Add to /etc/proxychains4.conf:  localnet 127.0.0.0/255.0.0.0
 #   2. Configure your proxy list in /etc/proxychains4.conf
-#   3. Enable: export USE_PROXYCHAINS=1  (or set in Task Scheduler env)
-USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
-if [[ "$USE_PROXYCHAINS" == "1" ]] && ! command -v proxychains4 >/dev/null 2>&1; then
-  echo "WARNING: USE_PROXYCHAINS=1 but proxychains4 not found — running unproxied" >&2
-  USE_PROXYCHAINS=0
-fi
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
