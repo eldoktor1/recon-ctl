@@ -28,3 +28,10 @@ Thumbs.db
 *.swp
 *~
 *:Zone.Identifier
+
+# recon recovery/runtime safety
+.recovery_backups/
+recon_recovery_pack/
+*.log
+*.pid
+*.lock
