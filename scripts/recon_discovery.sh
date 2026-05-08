@@ -11,6 +11,27 @@ log()  { printf '[%s DISC] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s DISC WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s DISC FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
+# Network command wrapper.
+# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
+# Fail closed if proxychains/Tor is not available.
+proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
+
+ensure_proxy_ready() {
+  proxy_required || return 0
+  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
+  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
+}
+
+run_net() {
+  ensure_proxy_ready
+  if proxy_required; then
+    proxychains4 -q "$@"
+  else
+    "$@"
+  fi
+}
+
+
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="$BASE_DIR/state"
 CACHE_DIR="$BASE_DIR/cache"
@@ -58,7 +79,7 @@ refresh_chaos() {
   fi
   log "Refreshing Chaos"
   local tmp; tmp="$(mktemp -d)"; trap "rm -rf $tmp" RETURN
-  if ! timeout 60 wget -q "https://chaos-data.projectdiscovery.io/index.json" -O "$tmp/index.json"; then
+  if ! run_net timeout 60 wget -q "https://chaos-data.projectdiscovery.io/index.json" -O "$tmp/index.json"; then
     warn "Chaos index fetch failed"; return
   fi
   [[ -f "$CHAOS_INDEX" ]] || echo '[]' > "$CHAOS_INDEX"
@@ -77,7 +98,7 @@ refresh_chaos() {
     while IFS=$'\t' read -r name url; do
       [[ -z "$name" ]] && continue
       local safe="${name//\//_}"
-      timeout 90 wget -q "$url" -O "$tmp/zips/${safe}.zip" || continue
+      run_net timeout 90 wget -q "$url" -O "$tmp/zips/${safe}.zip" || continue
       local outdir="$CACHE_DIR/programs/${safe}"
       rm -rf "$outdir"; mkdir -p "$outdir"
       unzip -oq "$tmp/zips/${safe}.zip" -d "$outdir" 2>/dev/null || rm -rf "$outdir"
@@ -113,7 +134,7 @@ refresh_subfinder() {
   fi
   log "Running subfinder ($(wc -l < "$ROOT_DOMAINS") roots)"
   local tmp; tmp="$(mktemp)"
-  if timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
+  if run_net timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
     tr '[:upper:]' '[:lower:]' < "$tmp" | sed -E 's#[[:space:]]##g' \
       | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$SUB_CACHE.new"
     mv "$SUB_CACHE.new" "$SUB_CACHE"
@@ -130,7 +151,7 @@ refresh_assetfinder() {
   : > "$ASSET_CACHE.new"
   while IFS= read -r d; do
     [[ -z "$d" ]] && continue
-    timeout 60 assetfinder --subs-only "$d" 2>/dev/null >> "$ASSET_CACHE.new" || true
+    run_net timeout 60 assetfinder --subs-only "$d" 2>/dev/null >> "$ASSET_CACHE.new" || true
   done < "$ROOT_DOMAINS"
   tr '[:upper:]' '[:lower:]' < "$ASSET_CACHE.new" | sed -E 's#[[:space:]]##g' \
     | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$ASSET_CACHE.tmp" \

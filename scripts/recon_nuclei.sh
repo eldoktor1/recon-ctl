@@ -29,6 +29,27 @@ log()  { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s ERROR] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
+# Network command wrapper.
+# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
+# Fail closed if proxychains/Tor is not available.
+proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
+
+ensure_proxy_ready() {
+  proxy_required || return 0
+  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
+  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
+}
+
+run_net() {
+  ensure_proxy_ready
+  if proxy_required; then
+    proxychains4 -q "$@"
+  else
+    "$@"
+  fi
+}
+
+
 for c in jq curl; do command -v "$c" >/dev/null || die "missing: $c"; done
 command -v nuclei >/dev/null || die "nuclei not installed"
 
@@ -221,7 +242,7 @@ scan_one() {
 
   # Run nuclei with strict params
   log "  scanning $host (CVEs: $cves)"
-  timeout 300 nuclei \
+  run_net timeout 300 nuclei \
     -target "$url" \
     "${templates[@]}" \
     -severity critical,high \
