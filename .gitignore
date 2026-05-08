@@ -1,0 +1,29 @@
+# Secrets
+.recon_es_pass
+.recon_discord
+.recon_mode
+*.env
+.env
+
+# Runtime state
+recon/state/
+recon/cache/
+recon/logs/
+recon/triage/
+recon/archive/
+recon/spool/
+recon/runs/
+
+# Artifacts
+*.lock
+*.pid
+*.epoch
+*.jsonl
+httpx_chunks/
+httpx_parts/
+
+# OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
