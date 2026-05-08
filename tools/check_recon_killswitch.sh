@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "== nft rule =="
+sudo nft list chain inet recon_killswitch output
+
+echo
+echo "== direct should fail =="
+sudo -u reconrun curl -s --max-time 5 https://ifconfig.me || echo "OK direct blocked"
+
+echo
+echo "== Tor should work =="
+sudo -u reconrun curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://ifconfig.me; echo
+
+echo
+echo "== local ES should work =="
+sudo -u reconrun curl -s --max-time 5 -u "elastic:$(tr -d '[:space:]' < ~/.recon_es_pass)" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'
