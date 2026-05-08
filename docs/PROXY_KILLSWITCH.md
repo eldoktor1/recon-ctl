@@ -189,3 +189,28 @@ Verified:
 Important:
 - The Windows task must call `recon-start`.
 - Do not configure Windows Task Scheduler to call `recon_daemon.sh` directly.
+
+## Hidden Windows ReconWatchdog Final Setup
+
+`ReconWatchdog` now runs hidden through a Windows Script Host wrapper.
+
+Windows task action:
+
+    wscript.exe C:\recon\start_recon_hidden.vbs
+
+The wrapper file is stored on Windows at:
+
+    C:\recon\start_recon_hidden.vbs
+
+The wrapper runs:
+
+    C:\Windows\System32\wsl.exe -d kali-linux -u d0k -- bash -lc "/home/d0k/recon-pipeline/tools/start_recon_safe.sh"
+
+This keeps the task hidden while still using the safe startup path.
+
+Validated:
+- `ReconWatchdog` runs with LastTaskResult 0.
+- No visible console/window is shown.
+- The task does not call `recon_daemon.sh` directly.
+- Startup still goes through `tools/start_recon_safe.sh`.
+- The safe preflight verifies the kill switch, Tor SOCKS, and local Elasticsearch before recon starts.
