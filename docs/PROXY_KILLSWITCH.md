@@ -214,3 +214,38 @@ Validated:
 - The task does not call `recon_daemon.sh` directly.
 - Startup still goes through `tools/start_recon_safe.sh`.
 - The safe preflight verifies the kill switch, Tor SOCKS, and local Elasticsearch before recon starts.
+
+## Final Sanity Log
+
+Final validated state:
+
+- Git checkpoint: `v2.1.6-killswitch`
+- Windows task `ReconWatchdog` runs hidden through `wscript.exe C:\recon\start_recon_hidden.vbs`
+- Hidden wrapper calls WSL and runs `tools/start_recon_safe.sh`
+- `tools/start_recon_safe.sh` runs `/usr/local/sbin/recon-safe-preflight`
+- Preflight reapplies the nftables kill switch before recon starts
+- Direct outbound from `reconrun` is blocked
+- Tor SOCKS on `127.0.0.1:9050` works
+- Local Elasticsearch on `127.0.0.1:9200` works
+- Scanner-heavy processes run under `reconrun`
+- No scanner-heavy processes should run under `d0k`
+- `ReconElastic` remains responsible for local Elasticsearch Docker startup
+- `ReconWatchdog` must not call `recon_daemon.sh` directly
+
+Mode switching:
+
+- Source of truth: `~/.recon_mode`
+- Discord `!mode`, CLI `recon_ctl mode`, and scheduler all use the same mode file
+- Schedule uses Pacific Time
+- Browse mode: 5:30 PM to 11:30 PM PT
+- Night mode: all other scheduled hours
+- Scheduler loop checks mode regularly through the daemon
+- Already-running batches may finish with the mode they started with; new cycles use the updated mode
+
+Operational rule:
+
+Use either the hidden Windows task or:
+
+    recon-start
+
+Do not start target-facing recon with plain `~/recon_ctl.sh start` unless the kill switch has already been verified.
