@@ -19,6 +19,9 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="$BASE_DIR/state"
 LOG_DIR="$BASE_DIR/logs"
@@ -27,6 +30,14 @@ LOG_FILE="$LOG_DIR/recon_daemon.log"
 MODE_FILE="$HOME/.recon_mode"
 
 AUTO_RECON="${AUTO_RECON:-$REPO_ROOT/scripts/auto_recon.sh}"
+
+# Proxychains — set USE_PROXYCHAINS=1 to route scan traffic via proxy
+# Requires: localnet 127.0.0.0/255.0.0.0 in /etc/proxychains4.conf
+USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
+if [[ "$USE_PROXYCHAINS" == "1" ]] && ! command -v proxychains4 >/dev/null 2>&1; then
+  echo "WARNING: proxychains4 not found — running unproxied" >&2
+  USE_PROXYCHAINS=0
+fi
 
 # ---- Proxychains ----------------------------------------------------------
 # Wraps all external traffic (httpx, subfinder, curl to targets) through proxy.
