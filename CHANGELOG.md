@@ -1,5 +1,31 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.1.6-killswitch final hardening notes
+
+### Added
+- Hidden Windows `ReconWatchdog` startup through `wscript.exe C:\recon\start_recon_hidden.vbs`.
+- Noninteractive safe startup through `tools/start_recon_safe.sh`.
+- Root-owned preflight script `/usr/local/sbin/recon-safe-preflight`.
+- Narrow sudoers rule allowing only the root-owned preflight script without a password.
+- Final sanity documentation for IP leak prevention and startup safety.
+
+### Changed
+- Windows startup now uses the safe preflight path instead of calling `recon_daemon.sh` directly.
+- Target-facing scanner paths run under the locked `reconrun` user.
+
+### Verified
+- Windows `ReconWatchdog` returns `Last Result: 0`.
+- Task runs hidden through `wscript.exe`.
+- `reconrun` direct outbound traffic is blocked.
+- Tor SOCKS on `127.0.0.1:9050` works.
+- Local Elasticsearch on `127.0.0.1:9200` works.
+- No scanner-heavy processes are owned by `d0k`.
+- Discord `!mode`, CLI mode, and scheduler all use `~/.recon_mode`.
+
+### Operational Rule
+Use the hidden Windows task or `recon-start`. Do not start target-facing recon with plain `~/recon_ctl.sh start` unless the kill switch has already been verified.
+
+
 ## v2.1.6-killswitch - 2026-05-07
 
 ### Fixed
