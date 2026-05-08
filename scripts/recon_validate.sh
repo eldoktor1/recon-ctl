@@ -130,7 +130,8 @@ process_batch() {
   log "Processing $batch_name ($count hosts) threads=$HTTPX_THREADS rate=$HTTPX_RATE timeout=${HTTPX_MAX_RUNTIME}s"
 
   # ---- httpx with HARD timeout ----
-  if ! run_net timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
+  if ! timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
+        -http-proxy "$PROXY_URL" \
         -l "$batch" -silent -nc -json \
         -tech-detect -status-code -title -web-server \
         -content-type -content-length \

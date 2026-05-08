@@ -242,7 +242,8 @@ scan_one() {
 
   # Run nuclei with strict params
   log "  scanning $host (CVEs: $cves)"
-  run_net timeout 300 nuclei \
+  timeout 300 nuclei \
+    -proxy "$PROXY_URL" \
     -target "$url" \
     "${templates[@]}" \
     -severity critical,high \
