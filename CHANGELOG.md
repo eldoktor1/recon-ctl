@@ -1,5 +1,20 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.1.6-proxy-safe - 2026-05-07
+
+### Fixed
+- Enforced proxychains wrapping for target-facing recon tools when USE_PROXYCHAINS=1.
+- Added fail-closed proxy checks for proxychains4 and Tor SOCKS listener on 127.0.0.1:9050.
+- Wrapped httpx, subfinder, assetfinder, nuclei, and external scope/feed fetches through the network wrapper.
+
+### Verified
+- Direct and proxychains outbound IPs differed.
+- Live httpx, subfinder, and nuclei child processes showed LD_PRELOAD with libproxychains mapped.
+
+### Notes
+- Parent shell processes may not show libproxychains; verify the actual scanner child processes.
+
+
 ## v2.1.5-recovered - 2026-05-07
 
 ### Fixed
