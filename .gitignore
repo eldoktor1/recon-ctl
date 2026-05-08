@@ -27,3 +27,4 @@ httpx_parts/
 Thumbs.db
 *.swp
 *~
+*:Zone.Identifier
