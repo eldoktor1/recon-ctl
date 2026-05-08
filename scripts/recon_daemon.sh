@@ -7,7 +7,7 @@
 # - Sleeps based on mode (browse=longer pause, night=shorter)
 # - One PID, one log, graceful shutdown via SIGTERM
 # - Auto-detects laptop battery → forces browse mode if unplugged
-# - Proxy: set USE_PROXYCHAINS=1 to route external traffic via proxychains4
+# - Proxy: set USE_PROXYCHAINS=1 to route external traffic via proxychains
 #
 # Started by Windows Task Scheduler on user logon. Never run manually.
 # =============================================================================
@@ -30,20 +30,20 @@ MODE_FILE="$HOME/.recon_mode"
 AUTO_RECON="${AUTO_RECON:-$REPO_ROOT/scripts/auto_recon.sh}"
 
 # Proxychains — set USE_PROXYCHAINS=1 to route scan traffic via proxy
-# Requires: localnet 127.0.0.0/255.0.0.0 in /etc/proxychains4.conf
+# Requires: localnet 127.0.0.0/255.0.0.0 in /etc/proxychains.conf
 USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
-if [[ "$USE_PROXYCHAINS" == "1" ]] && ! command -v proxychains4 >/dev/null 2>&1; then
-  echo "WARNING: proxychains4 not found — running unproxied" >&2
+if [[ "$USE_PROXYCHAINS" == "1" ]] && ! command -v proxychains >/dev/null 2>&1; then
+  echo "WARNING: proxychains not found — running unproxied" >&2
   USE_PROXYCHAINS=0
 fi
 
 # ---- Proxychains ----------------------------------------------------------
 # Wraps all external traffic (httpx, subfinder, curl to targets) through proxy.
-# ES/localhost traffic bypassed automatically via proxychains4.conf localnet rule.
+# ES/localhost traffic bypassed automatically via proxychains.conf localnet rule.
 #
 # Setup:
-#   1. Add to /etc/proxychains4.conf:  localnet 127.0.0.0/255.0.0.0
-#   2. Configure your proxy list in /etc/proxychains4.conf
+#   1. Add to /etc/proxychains.conf:  localnet 127.0.0.0/255.0.0.0
+#   2. Configure your proxy list in /etc/proxychains.conf
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
@@ -134,11 +134,11 @@ export PATH="$PATH:$HOME/go/bin:/usr/local/bin:/usr/local/go/bin"
 # All child processes spawned by auto_recon.sh (httpx, subfinder, assetfinder,
 # curl to external targets) inherit the proxychains wrapper.
 # ES bulk ingest to 127.0.0.1 is bypassed via the localnet directive in
-# /etc/proxychains4.conf — it never touches the proxy.
+# /etc/proxychains.conf — it never touches the proxy.
 run_auto_recon() {
   if [[ "$USE_PROXYCHAINS" == "1" ]]; then
-    log "Proxy: enabled via proxychains4"
-    proxychains4 -q bash "$AUTO_RECON"
+    log "Proxy: enabled via proxychains"
+    proxychains -q bash "$AUTO_RECON"
   else
     bash "$AUTO_RECON"
   fi
