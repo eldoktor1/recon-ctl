@@ -1,5 +1,26 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.1.6-killswitch - 2026-05-07
+
+### Fixed
+- Added `run_scanner` daemon path to launch target-facing scanner tasks under locked user `reconrun`.
+- Hardened scanner execution against IP exposure using an nftables kill switch.
+- Added native SOCKS proxy flags for httpx, subfinder, and nuclei.
+- Skipped assetfinder in proxy-safe mode because it lacks a trusted native proxy flag.
+
+### Verified
+- Direct outbound traffic from `reconrun` is blocked.
+- Tor SOCKS via `127.0.0.1:9050` works.
+- Local Elasticsearch via `127.0.0.1:9200` works.
+- No scanner processes are owned by `d0k`.
+- httpx and subfinder run under `reconrun`.
+- nuclei daemon path uses `run_scanner` when triggered.
+
+### Notes
+- nftables rules may need to be restored after WSL restart.
+- The kill switch, not proxychains alone, is the fail-closed control.
+
+
 ## v2.1.6-proxy-safe - 2026-05-07
 
 ### Fixed
