@@ -8,6 +8,28 @@
 set -uo pipefail
 log()  { printf '[%s SCOPE] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s SCOPE WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
+die()  { printf '[%s SCOPE FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
+# Network command wrapper.
+# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
+# Fail closed if proxychains/Tor is not available.
+proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
+
+ensure_proxy_ready() {
+  proxy_required || return 0
+  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
+  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
+}
+
+run_net() {
+  ensure_proxy_ready
+  if proxy_required; then
+    proxychains4 -q "$@"
+  else
+    "$@"
+  fi
+}
+
+
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 INBOX="$BASE_DIR/queue/inbox"
@@ -28,7 +50,7 @@ touch "$PREV_SCOPE"
 main() {
   log "=== scope_watch cycle ==="
   local tmp; tmp="$(mktemp)"
-  if ! timeout 60 curl -fsS "$ARK_URL" -o "$tmp" 2>/dev/null; then
+  if ! run_net timeout 60 curl -fsS "$ARK_URL" -o "$tmp" 2>/dev/null; then
     warn "Failed to fetch arkadiyt scope"
     rm -f "$tmp"; exit 0
   fi
@@ -61,7 +83,7 @@ main() {
 
   if command -v subfinder >/dev/null 2>&1; then
     log "Enriching new scope with rapid subfinder (max 5min total)"
-    timeout 300 subfinder -dL "$new_domains" -silent -nc -timeout 15 -t 50 \
+    run_net timeout 300 subfinder -dL "$new_domains" -silent -nc -timeout 15 -t 50 \
       -all -o "$enriched" 2>/dev/null || warn "subfinder enrichment timed out"
   fi
 

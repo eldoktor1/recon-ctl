@@ -16,6 +16,27 @@ log()  { printf '[%s VAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s VAL WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s VAL FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
+# Network command wrapper.
+# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
+# Fail closed if proxychains/Tor is not available.
+proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
+
+ensure_proxy_ready() {
+  proxy_required || return 0
+  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
+  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
+}
+
+run_net() {
+  ensure_proxy_ready
+  if proxy_required; then
+    proxychains4 -q "$@"
+  else
+    "$@"
+  fi
+}
+
+
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="$BASE_DIR/state"
 QUEUE_DIR="$BASE_DIR/queue"
@@ -109,7 +130,7 @@ process_batch() {
   log "Processing $batch_name ($count hosts) threads=$HTTPX_THREADS rate=$HTTPX_RATE timeout=${HTTPX_MAX_RUNTIME}s"
 
   # ---- httpx with HARD timeout ----
-  if ! timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
+  if ! run_net timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
         -l "$batch" -silent -nc -json \
         -tech-detect -status-code -title -web-server \
         -content-type -content-length \
