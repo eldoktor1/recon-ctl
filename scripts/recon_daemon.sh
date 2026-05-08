@@ -33,6 +33,22 @@ HOT_SEED="${HOT_SEED:-$HOME/recon_hot_seed.sh}"
 SCOPE_WATCH="${SCOPE_WATCH:-$HOME/recon_scope_watch.sh}"
 TAKEOVER="${TAKEOVER:-$HOME/recon_takeover_hunter.sh}"
 
+
+SCANNER_USER="${SCANNER_USER:-reconrun}"
+PROXY_URL="${PROXY_URL:-socks5://127.0.0.1:9050}"
+USE_PROXYCHAINS="${USE_PROXYCHAINS:-1}"
+
+run_scanner() {
+  sudo -u "$SCANNER_USER" env \
+    HOME="$HOME" \
+    BASE_DIR="$BASE_DIR" \
+    ES_URL="${ES_URL:-http://127.0.0.1:9200}" \
+    INDEX_NAME="${INDEX_NAME:-recon_alive}" \
+    USE_PROXYCHAINS="$USE_PROXYCHAINS" \
+    PROXY_URL="$PROXY_URL" \
+    "$@"
+}
+
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
 log() { printf '[%s DAEMON] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
@@ -191,7 +207,7 @@ run_nuclei_v21() {
   if [[ "${disk_gb:-100}" -lt 5 ]]; then
     log "[nuclei-v21] SKIP (disk ${disk_gb}GB)"; return 0
   fi
-  bash "$V21_NUCLEI"
+  run_scanner bash "$V21_NUCLEI"
 }
 # V21_BLOCK_END
 
@@ -202,15 +218,15 @@ run_schedule() {
   [[ -x "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
 }
 # V214_SCHED_END
-run_validate()    { bash "$VALIDATE";    }
-run_discovery()   { bash "$DISCOVERY";   }
+run_validate()    { run_scanner bash "$VALIDATE";    }
+run_discovery()   { run_scanner bash "$DISCOVERY";   }
 run_hot_seed()    { bash "$HOT_SEED";    }
-run_scope_watch() { bash "$SCOPE_WATCH"; }
+run_scope_watch() { run_scanner bash "$SCOPE_WATCH"; }
 
 # Takeover watch is long-running; supervise differently
 run_takeover_watch() {
   log "[takeover-watch] launching watch mode"
-  bash "$TAKEOVER" watch
+  run_scanner bash "$TAKEOVER" watch
 }
 
 BOT_SCRIPT="${BOT_SCRIPT:-$HOME/recon_discord_bot.sh}"

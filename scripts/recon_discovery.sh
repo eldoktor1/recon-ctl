@@ -134,7 +134,7 @@ refresh_subfinder() {
   fi
   log "Running subfinder ($(wc -l < "$ROOT_DOMAINS") roots)"
   local tmp; tmp="$(mktemp)"
-  if run_net timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
+  if timeout 1800 subfinder -proxy "$PROXY_URL" -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
     tr '[:upper:]' '[:lower:]' < "$tmp" | sed -E 's#[[:space:]]##g' \
       | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$SUB_CACHE.new"
     mv "$SUB_CACHE.new" "$SUB_CACHE"
@@ -147,6 +147,11 @@ refresh_subfinder() {
 refresh_assetfinder() {
   command -v assetfinder >/dev/null 2>&1 || return
   [[ -s "$ROOT_DOMAINS" ]] || return
+  if proxy_required; then
+    warn "Skipping assetfinder because USE_PROXYCHAINS=1 and assetfinder has no trusted native proxy flag"
+    : > "$ASSET_CACHE"
+    return 0
+  fi
   log "Running assetfinder"
   : > "$ASSET_CACHE.new"
   while IFS= read -r d; do

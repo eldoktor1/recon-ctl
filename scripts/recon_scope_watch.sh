@@ -83,7 +83,7 @@ main() {
 
   if command -v subfinder >/dev/null 2>&1; then
     log "Enriching new scope with rapid subfinder (max 5min total)"
-    run_net timeout 300 subfinder -dL "$new_domains" -silent -nc -timeout 15 -t 50 \
+    timeout 300 subfinder -proxy "$PROXY_URL" -dL "$new_domains" -silent -nc -timeout 15 -t 50 \
       -all -o "$enriched" 2>/dev/null || warn "subfinder enrichment timed out"
   fi
 
