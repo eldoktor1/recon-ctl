@@ -147,3 +147,45 @@ Use this command after opening Kali/WSL:
 This command enables the nftables kill switch, verifies direct outbound from `reconrun` is blocked, verifies Tor SOCKS and local Elasticsearch, then starts recon safely.
 
 Do not use plain `~/recon_ctl.sh start` for target-facing recon unless the kill switch has already been verified.
+
+## Final Noninteractive Startup
+
+Final reliable startup flow:
+
+    Windows ReconWatchdog task
+    -> wsl.exe -d kali-linux -u d0k -- zsh -lc "source ~/.zshrc; recon-start"
+    -> recon-start alias
+    -> tools/start_recon_safe.sh
+    -> sudo -n /usr/local/sbin/recon-safe-preflight
+    -> ~/recon_ctl.sh start
+
+A root-owned preflight script was installed at:
+
+    /usr/local/sbin/recon-safe-preflight
+
+The preflight script:
+- reapplies the nftables kill switch for `reconrun`
+- verifies direct outbound from `reconrun` is blocked
+- verifies Tor SOCKS on `127.0.0.1:9050`
+- verifies local Elasticsearch on `127.0.0.1:9200`
+- exits before recon starts if any safety check fails
+
+A narrow sudoers rule was added:
+
+    d0k ALL=(root) NOPASSWD: /usr/local/sbin/recon-safe-preflight
+
+This allows the Windows scheduled task to run safely without hanging on a sudo password prompt.
+
+Only this fixed root-owned preflight script is passwordless. General sudo access still requires a password.
+
+Verified:
+- `sudo -k && recon-start` completed without a sudo password prompt.
+- Preflight enabled the kill switch.
+- Direct outbound from `reconrun` was blocked.
+- Tor SOCKS worked.
+- Local Elasticsearch worked.
+- Recon started safely or reported the daemon was already running.
+
+Important:
+- The Windows task must call `recon-start`.
+- Do not configure Windows Task Scheduler to call `recon_daemon.sh` directly.
