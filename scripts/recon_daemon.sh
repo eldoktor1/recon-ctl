@@ -30,7 +30,7 @@ MODE_FILE="$HOME/.recon_mode"
 AUTO_RECON="${AUTO_RECON:-$REPO_ROOT/scripts/auto_recon.sh}"
 
 # Proxychains — set USE_PROXYCHAINS=1 to route scan traffic via proxy
-# Requires: localnet 127.0.0.0/255.0.0.0 in /etc/proxychains.conf
+# Requires: localnet 127.0.0.0/255.0.0.0 in /etc/proxychains4.conf
 USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
 if [[ "$USE_PROXYCHAINS" == "1" ]] && ! command -v proxychains >/dev/null 2>&1; then
   echo "WARNING: proxychains not found — running unproxied" >&2
@@ -42,8 +42,8 @@ fi
 # ES/localhost traffic bypassed automatically via proxychains.conf localnet rule.
 #
 # Setup:
-#   1. Add to /etc/proxychains.conf:  localnet 127.0.0.0/255.0.0.0
-#   2. Configure your proxy list in /etc/proxychains.conf
+#   1. Add to /etc/proxychains4.conf:  localnet 127.0.0.0/255.0.0.0
+#   2. Configure your proxy list in /etc/proxychains4.conf
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 
@@ -134,7 +134,7 @@ export PATH="$PATH:$HOME/go/bin:/usr/local/bin:/usr/local/go/bin"
 # All child processes spawned by auto_recon.sh (httpx, subfinder, assetfinder,
 # curl to external targets) inherit the proxychains wrapper.
 # ES bulk ingest to 127.0.0.1 is bypassed via the localnet directive in
-# /etc/proxychains.conf — it never touches the proxy.
+# /etc/proxychains4.conf — it never touches the proxy.
 run_auto_recon() {
   if [[ "$USE_PROXYCHAINS" == "1" ]]; then
     log "Proxy: enabled via proxychains"
