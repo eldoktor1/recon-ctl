@@ -129,3 +129,21 @@ Before running target-facing recon, always confirm:
     sudo nft list chain inet recon_killswitch output
 
 and confirm direct outbound from `reconrun` is blocked.
+
+## Shell Alias
+
+A convenience alias was added to `~/.zshrc`:
+
+    alias recon-start='cd ~/recon-pipeline && tools/start_recon_safe.sh'
+
+This alias is not stored directly in Git because it lives in the user's shell config, but the script it runs is stored in Git:
+
+    tools/start_recon_safe.sh
+
+Use this command after opening Kali/WSL:
+
+    recon-start
+
+This command enables the nftables kill switch, verifies direct outbound from `reconrun` is blocked, verifies Tor SOCKS and local Elasticsearch, then starts recon safely.
+
+Do not use plain `~/recon_ctl.sh start` for target-facing recon unless the kill switch has already been verified.
