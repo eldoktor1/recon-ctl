@@ -11,7 +11,7 @@ FB_DIR="$BASE_DIR/firstblood"
 LOG_DIR="$BASE_DIR/logs"
 TRIAGE_DIR="$BASE_DIR/triage"
 MODE_FILE="$HOME/.recon_mode"
-DAEMON="$HOME/recon_daemon.sh"
+DAEMON="$HOME/recon-pipeline/scripts/recon_daemon.sh"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
