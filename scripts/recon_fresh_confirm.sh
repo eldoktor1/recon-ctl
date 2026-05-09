@@ -121,6 +121,9 @@ verify_one() {
   [[ -z "$url" || "$url" == "null" ]] && url="https://$host"
   kind="$(jq -r '.fresh_kinds | join(",")' <<< "$line")"
   key="$(printf '%s|%s' "$host" "$kind" | sha256sum | awk '{print $1}')"
+  if grep -qxF "$key" "$SEEN_FILE" 2>/dev/null; then
+    return 0
+  fi
   marker="$FRESH_DIR/.last_$key"
   now="$(date +%s)"
   if [[ -f "$marker" ]]; then
@@ -145,6 +148,7 @@ verify_one() {
     --arg headers "$headers" --arg body "$body" \
     '. + {confirmed_at:$run, verified_url:$url, verify_status:($status|tonumber? // 0),
           verify_title:$title, evidence_files:{headers:$headers, body_sample:$body}}' <<< "$line" >> "$OUT_JSONL"
+  echo "$key" >> "$SEEN_FILE"
 }
 
 notify_discord() {

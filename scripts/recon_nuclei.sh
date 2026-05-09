@@ -220,8 +220,14 @@ RUN_DIR="$RESULTS_DIR/run_$RUN_TS"
 mkdir -p "$RUN_DIR"
 
 CONFIRMED_FILE="$NUCLEI_DIR/confirmed.jsonl"
+CONFIRMED_SEEN_FILE="$NUCLEI_DIR/.confirmed_seen"
 FP_LIST="$FP_DIR/known_fp.txt"
-touch "$FP_LIST"
+touch "$CONFIRMED_FILE" "$CONFIRMED_SEEN_FILE" "$FP_LIST"
+if [[ ! -s "$CONFIRMED_SEEN_FILE" && -s "$CONFIRMED_FILE" ]]; then
+  jq -r '[.host // "", ."template-id" // ""] | @tsv' "$CONFIRMED_FILE" 2>/dev/null \
+    | awk -F'\t' '$1 != "" && $2 != "" {print $1 "|" $2}' \
+    | sort -u > "$CONFIRMED_SEEN_FILE" 2>/dev/null || true
+fi
 
 scan_one() {
   local target_json="$1"
@@ -276,6 +282,13 @@ scan_one() {
   if [[ -s "$out_file" ]]; then
     while IFS= read -r finding; do
       [[ -z "$finding" ]] && continue
+      local template key
+      template="$(echo "$finding" | jq -r '."template-id" // empty')"
+      [[ -z "$template" ]] && continue
+      key="${host}|${template}"
+      if grep -qxF "$key" "$CONFIRMED_SEEN_FILE" 2>/dev/null; then
+        continue
+      fi
       enriched="$(echo "$finding" | jq -c \
         --arg program "$program" \
         --arg platform "$platform" \
@@ -283,6 +296,7 @@ scan_one() {
         --arg signal "$matched_signal" \
         '. + {scope: {program: $program, platform: $platform, pays: $pays}, matched_signal: $signal}')"
       echo "$enriched" >> "$CONFIRMED_FILE"
+      echo "$key" >> "$CONFIRMED_SEEN_FILE"
 
       # Update ES doc with confirmation
       es_update_confirmed "$host" "$enriched"

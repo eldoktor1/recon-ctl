@@ -28,6 +28,7 @@ Thumbs.db
 *.swp
 *~
 *:Zone.Identifier
+*Zone.Identifier
 
 # recon recovery/runtime safety
 .recovery_backups/

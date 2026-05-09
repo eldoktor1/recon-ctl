@@ -250,8 +250,15 @@ retry_failed_spool() {
 }
 
 prune_done() {
-  # Keep only last 24h of done/ to avoid disk bloat (takeover hunter has marker)
-  find "$DONE" -type f -mmin +1440 -delete 2>/dev/null || true
+  # Keep active done/ small, but preserve old httpx evidence for later review.
+  local archive_root="$BASE_DIR/archive/auto_done_$(date -u +%Y%m%d)"
+  local f rel dest_dir
+  while IFS= read -r -d '' f; do
+    rel="${f#$BASE_DIR/}"
+    dest_dir="$archive_root/$(dirname "$rel")"
+    mkdir -p "$dest_dir"
+    mv "$f" "$dest_dir/" 2>/dev/null || true
+  done < <(find "$DONE" -type f -mmin +1440 -print0 2>/dev/null)
 }
 
 main() {

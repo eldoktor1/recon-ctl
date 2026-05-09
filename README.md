@@ -20,6 +20,22 @@ docker/
 ~/recon_ctl.sh logs
 ```
 
+## Clean active views safely
+Routine cleanup now archives stale runtime files instead of deleting useful
+evidence:
+
+```bash
+~/recon_ctl.sh clean
+```
+
+For a clean active dashboard without losing useful findings, stop the daemon and
+archive the current active result/log views:
+
+```bash
+~/recon_ctl.sh stop
+~/recon_ctl.sh clean-start --yes
+```
+
 ## Proxy / IP safety
 Default startup is fail-closed. Use `tools/start_recon_safe.sh`, which requires the
 root preflight, Tor SOCKS on `127.0.0.1:9050`, and the `reconrun` nftables kill

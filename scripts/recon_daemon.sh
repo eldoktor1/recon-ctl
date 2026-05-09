@@ -63,6 +63,16 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 
 log() { printf '[%s DAEMON] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+archive_file() {
+  local archive_root="$1" file="$2"
+  [[ -f "$file" ]] || return 0
+  local rel dest_dir
+  rel="${file#$BASE_DIR/}"
+  dest_dir="$archive_root/$(dirname "$rel")"
+  mkdir -p "$dest_dir"
+  mv "$file" "$dest_dir/" 2>/dev/null || true
+}
+
 # ---- Single instance ----
 if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   log "Daemon already running (pid $(cat "$PID_FILE"))" >> "$LOG_FILE"
@@ -133,6 +143,7 @@ load_profile() {
 
 # ---- Periodic cleanup ----
 auto_cleanup() {
+  local archive_root="$BASE_DIR/archive/auto_cleanup_$(date -u +%Y%m%d)"
   # Prune archive runs
   find "$BASE_DIR/archive" -maxdepth 1 -type d -name 'run_*' -mtime +3 -exec rm -rf {} + 2>/dev/null || true
   # Rotate own log if > 50MB
@@ -142,12 +153,18 @@ auto_cleanup() {
       tail -n 10000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
     fi
   fi
-  # Clean sent spool > 7d
-  find "$BASE_DIR/spool/sent" -type f -mtime +7 -delete 2>/dev/null || true
+  # Archive sent spool > 7d
+  local sent
+  while IFS= read -r -d '' sent; do
+    archive_file "$archive_root" "$sent"
+  done < <(find "$BASE_DIR/spool/sent" -type f -mtime +7 -print0 2>/dev/null)
   # Prune old triage reports — keep 10
   local cnt; cnt="$(ls -t "$BASE_DIR/triage/report_"*.md 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "${cnt:-0}" -gt 10 ]]; then
-    ls -t "$BASE_DIR/triage/report_"*.md 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
+    local report
+    while IFS= read -r report; do
+      archive_file "$archive_root" "$report"
+    done < <(ls -t "$BASE_DIR/triage/report_"*.md 2>/dev/null | tail -n +11)
   fi
 }
 
