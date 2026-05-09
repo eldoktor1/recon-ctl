@@ -1,5 +1,39 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.3.1-clean-start - 2026-05-09 - Stale-output cleanup and archive-safe reset
+
+### Fixed
+- Stopped stale high-priority triage findings from re-polluting Discord by
+  requiring recent `first_seen` age for alerts and using a stable
+  host/classes/KEV dedup key instead of `host:score`.
+- Preserved shared triage seen history when falling back to a per-uid seen file,
+  preventing daemon/user ownership drift from resetting Discord dedup state.
+- Made `recon_fresh_confirm.sh` actually enforce `.seen_keys`, so the same
+  host/kind does not repeatedly confirm and notify after cooldown.
+- Added nuclei confirmed-finding dedup via `.confirmed_seen`, seeded from
+  existing `confirmed.jsonl`, to avoid repeated host/template alerts and result
+  pollution.
+- Ignored WSL/Windows `Zone.Identifier` metadata files that were cluttering git
+  status.
+
+### Changed
+- `recon_ctl clean`, daemon cleanup, and validation `done/` pruning now archive
+  stale files under `~/recon/archive/` instead of deleting evidence.
+- `recon_ctl reset-queue` now archives queue files before clearing the active
+  queue.
+
+### Added
+- `recon_ctl clean-start --yes` to archive active stale views/logs/results while
+  preserving useful state: scope/CVE DBs, submissions, known/alive hosts,
+  false-positive lists, and seen/dedup files.
+- Discord bot `!clean` command for safe stale spool/done archival.
+- README clean-start runbook.
+
+### Verified
+- `bash -n` clean across all shell scripts in `scripts/` and `tools/`.
+- `git diff --check` clean.
+- `recon_ctl help` and `recon_ctl clean-start` dry-run output checked.
+
 ## v2.3.0-brain — 2026-05-09 — Payout & KEV-aware triage
 
 Major upgrade to the post-discovery "brain". Triage now factors in scope payout

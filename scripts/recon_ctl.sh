@@ -29,6 +29,81 @@ mkdir -p "$STATE_DIR"
 c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
 hdr() { printf '\n\033[1;36m== %s ==\033[0m\n' "$1"; }
 
+new_archive_root() {
+  local prefix="$1" ts
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  printf '%s\n' "$BASE_DIR/archive/${prefix}_${ts}"
+}
+
+archive_matching() {
+  local archive_root="$1" rel_dir="$2"; shift 2
+  local src_dir="$BASE_DIR/$rel_dir" dest_dir="$archive_root/$rel_dir"
+  [[ -d "$src_dir" ]] || return 0
+  mkdir -p "$dest_dir"
+  local moved=0 pattern f
+  shopt -s nullglob
+  for pattern in "$@"; do
+    for f in "$src_dir"/$pattern; do
+      [[ -e "$f" ]] || continue
+      mv "$f" "$dest_dir/" 2>/dev/null && moved=$((moved + 1))
+    done
+  done
+  shopt -u nullglob
+  [[ "$moved" -gt 0 ]] && printf '  archived %-24s %s item(s)\n' "$rel_dir" "$moved"
+}
+
+archive_old_files() {
+  local archive_root="$1" src_dir="$2" older_mins="$3"
+  [[ -d "$src_dir" ]] || return 0
+  local moved=0 f rel dest_dir
+  while IFS= read -r -d '' f; do
+    rel="${f#$BASE_DIR/}"
+    dest_dir="$archive_root/$(dirname "$rel")"
+    mkdir -p "$dest_dir"
+    mv "$f" "$dest_dir/" 2>/dev/null && moved=$((moved + 1))
+  done < <(find "$src_dir" -type f -mmin +"$older_mins" -print0 2>/dev/null)
+  [[ "$moved" -gt 0 ]] && printf '  archived stale files from %s: %s\n' "${src_dir#$BASE_DIR/}" "$moved"
+}
+
+seed_seen_files() {
+  mkdir -p "$TRIAGE_DIR" "$BASE_DIR/fresh" "$BASE_DIR/nuclei"
+
+  local triage_seen="$TRIAGE_DIR/.seen_high.txt"
+  touch "$triage_seen" 2>/dev/null || true
+  if [[ -s "$TRIAGE_DIR/agent_targets.jsonl" && -w "$triage_seen" ]]; then
+    jq -r '
+      select(.priority == "P0" or .priority == "P1") |
+      [
+        (.host // ""),
+        ((.vuln_classes // []) | sort | join(",")),
+        (.kev_signal // ""),
+        ([(.kev_cves // [])[].id] | sort | join(","))
+      ] | join("|")
+    ' "$TRIAGE_DIR/agent_targets.jsonl" 2>/dev/null >> "$triage_seen" || true
+    sort -u "$triage_seen" -o "$triage_seen" 2>/dev/null || true
+  fi
+
+  local fresh_seen="$BASE_DIR/fresh/.seen_keys"
+  touch "$fresh_seen" 2>/dev/null || true
+  if [[ -s "$BASE_DIR/fresh/fresh_confirmed.jsonl" && -w "$fresh_seen" ]]; then
+    jq -r '[.host // "", ((.fresh_kinds // []) | sort | join(","))] | @tsv' \
+      "$BASE_DIR/fresh/fresh_confirmed.jsonl" 2>/dev/null \
+      | while IFS=$'\t' read -r host kinds; do
+          [[ -n "$host" && -n "$kinds" ]] || continue
+          printf '%s|%s' "$host" "$kinds" | sha256sum | awk '{print $1}'
+        done >> "$fresh_seen"
+    sort -u "$fresh_seen" -o "$fresh_seen" 2>/dev/null || true
+  fi
+
+  local nuclei_seen="$BASE_DIR/nuclei/.confirmed_seen"
+  touch "$nuclei_seen" 2>/dev/null || true
+  if [[ -s "$BASE_DIR/nuclei/confirmed.jsonl" && -w "$nuclei_seen" ]]; then
+    jq -r '[.host // "", ."template-id" // ""] | @tsv' "$BASE_DIR/nuclei/confirmed.jsonl" 2>/dev/null \
+      | awk -F'\t' '$1 != "" && $2 != "" {print $1 "|" $2}' >> "$nuclei_seen" || true
+    sort -u "$nuclei_seen" -o "$nuclei_seen" 2>/dev/null || true
+  fi
+}
+
 cmd_start() {
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "Daemon already running (pid $(cat "$PID_FILE"))"; return
@@ -217,22 +292,76 @@ cmd_space() {
 
 cmd_clean() {
   hdr "Cleanup"
-  echo "Pruning archive runs >3d"
-  find "$BASE_DIR/archive" -maxdepth 1 -type d -name 'run_*' -mtime +3 -exec rm -rf {} + 2>/dev/null
-  echo "Trimming sent spool >7d"
-  find "$BASE_DIR/spool/sent" -type f -mtime +7 -delete 2>/dev/null
-  echo "Pruning done/ jsonl >24h"
-  find "$BASE_DIR/queue/done" -type f -mmin +1440 -delete 2>/dev/null
+  local archive_root
+  archive_root="$(new_archive_root stale_cleanup)"
+  mkdir -p "$archive_root"
+  echo "Archiving sent spool >7d"
+  archive_old_files "$archive_root" "$BASE_DIR/spool/sent" 10080
+  echo "Archiving done/ files >24h"
+  archive_old_files "$archive_root" "$BASE_DIR/queue/done" 1440
+  echo "Archive: $archive_root"
   echo "Done"
+  cmd_space
+}
+
+cmd_clean_start() {
+  local arg="${1:-}"
+  hdr "Clean start"
+  if [[ "$arg" != "--yes" && "$arg" != "yes" ]]; then
+    cat <<EOF
+This archives stale active views without deleting useful data:
+  - queue/done httpx outputs and processed batch markers
+  - active triage target/report files
+  - fresh-confirm active results, reports, evidence, and cooldown markers
+  - nuclei run result folders and active confirmed.jsonl
+  - current log files
+
+It preserves scope/CVE databases, submissions, known/alive host state, false-positive lists, and seen/dedup files.
+Stop the daemon first, then run:
+  recon_ctl clean-start --yes
+EOF
+    return 0
+  fi
+
+  if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "Daemon is running. Stop it first with: recon_ctl stop"
+    return 1
+  fi
+
+  seed_seen_files
+
+  local archive_root
+  archive_root="$(new_archive_root clean_start)"
+  mkdir -p "$archive_root"
+
+  archive_matching "$archive_root" "queue/done" "*.jsonl" "*.txt.processed"
+  archive_matching "$archive_root" "triage" "agent_targets.jsonl" "report_*.md"
+  archive_matching "$archive_root" "fresh" "fresh_confirmed.jsonl" "report_*.md" ".last_*"
+  archive_matching "$archive_root" "fresh/evidence" "*"
+  archive_matching "$archive_root" "nuclei" "confirmed.jsonl"
+  archive_matching "$archive_root" "nuclei/results" "run_*"
+  archive_matching "$archive_root" "logs" "*.log"
+
+  mkdir -p "$QUEUE_DIR/inbox" "$QUEUE_DIR/processing" "$QUEUE_DIR/done" \
+           "$BASE_DIR/spool/pending" "$BASE_DIR/spool/sent" "$BASE_DIR/spool/failed" \
+           "$TRIAGE_DIR" "$BASE_DIR/fresh/evidence" "$BASE_DIR/nuclei/results"
+
+  echo "Clean active views ready."
+  echo "Archive: $archive_root"
   cmd_space
 }
 
 cmd_reset_queue() {
   hdr "Reset queue (CONFIRM)"
-  read -r -p "This will wipe inbox/processing/done. Type yes to continue: " ans
+  read -r -p "This will archive inbox/processing/done and clear the active queue. Type yes to continue: " ans
   [[ "$ans" == "yes" ]] || { echo "Aborted"; return; }
-  rm -f "$QUEUE_DIR/inbox"/*.txt "$QUEUE_DIR/processing"/*.txt "$QUEUE_DIR/done"/*.txt.processed "$QUEUE_DIR/done"/*.jsonl 2>/dev/null
-  echo "Queue cleared"
+  local archive_root
+  archive_root="$(new_archive_root queue_reset)"
+  mkdir -p "$archive_root"
+  archive_matching "$archive_root" "queue/inbox" "*.txt"
+  archive_matching "$archive_root" "queue/processing" "*.txt"
+  archive_matching "$archive_root" "queue/done" "*.txt.processed" "*.jsonl"
+  echo "Queue cleared; archive: $archive_root"
 }
 
 
@@ -404,8 +533,9 @@ recon_ctl — pipeline control
   submit <host> <class>  Log a submission (dampens future scoring)
   health                 Tool versions + status
   space                  Disk usage
-  clean                  Prune archives, sent spool, old done/
-  reset-queue            ⚠ Wipe queue (with confirmation)
+  clean                  Archive stale sent spool and old done/
+  clean-start [--yes]    Archive stale active views for a clean restart
+  reset-queue            Archive and clear queue (with confirmation)
 
   V2 commands:
   kev                    Show KEV-matched targets in your data
@@ -441,6 +571,7 @@ case "${1:-}" in
   health)       cmd_health ;;
   space)        cmd_space ;;
   clean)        cmd_clean ;;
+  clean-start)  shift; cmd_clean_start "$@" ;;
   reset-queue)  cmd_reset_queue ;;
   ""|-h|--help|help) usage ;;
   kev)          cmd_kev ;;

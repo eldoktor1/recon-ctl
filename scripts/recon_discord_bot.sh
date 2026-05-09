@@ -101,6 +101,7 @@ cmd_help() {
 !mode            show current mode
 !mode boost      switch to faster mode
 !mode browse     switch to polite mode
+!clean           archive stale sent spool and old done files
 !start           start daemon if stopped
 !stop            stop daemon
 !rescue          automated rescue attempt
@@ -197,6 +198,10 @@ cmd_start() {
 cmd_stop() {
     run_ctl stop >/dev/null
     warn_d "Stopped" "Daemon stopped. Use !start to restart."
+}
+
+cmd_clean() {
+    ok "Cleanup" "$(run_ctl clean)"
 }
 
 cmd_rescue() {
@@ -323,6 +328,7 @@ dispatch() {
         '!watching')  cmd_watching ;;
         '!logs')      cmd_logs "$arg" ;;
         '!mode')      cmd_mode "$arg" ;;
+        '!clean')     cmd_clean ;;
         '!start')     cmd_start ;;
         '!stop')      cmd_stop ;;
         '!rescue')    cmd_rescue ;;

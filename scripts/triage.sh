@@ -88,12 +88,14 @@ DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
 [[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
   DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
 MAX_DISCORD_FINDINGS="${MAX_DISCORD_FINDINGS:-8}"
+DISCORD_ALERT_FRESH_HOURS="${DISCORD_ALERT_FRESH_HOURS:-168}"
 
 mkdir -p "$TRIAGE_DIR" "$STATE_DIR"
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGETS_OUT="$TRIAGE_DIR/agent_targets.jsonl"
 REPORT_OUT="$TRIAGE_DIR/report_${RUN_TS}.md"
 SEEN_FILE="$TRIAGE_DIR/.seen_high.txt"
+SHARED_SEEN_FILE="$SEEN_FILE"
 # Self-heal SEEN_FILE if a previous run (under reconrun or another uid) left it
 # with permissions our current uid can't write. Falls back to /tmp on hard fail.
 if ! ( touch "$SEEN_FILE" 2>/dev/null && [[ -w "$SEEN_FILE" ]] ); then
@@ -102,6 +104,10 @@ if ! ( touch "$SEEN_FILE" 2>/dev/null && [[ -w "$SEEN_FILE" ]] ); then
     SEEN_FILE="$TRIAGE_DIR/.seen_high.$(id -u).txt"
     touch "$SEEN_FILE" 2>/dev/null || SEEN_FILE="/tmp/.recon_seen_high.$(id -u).txt"
     touch "$SEEN_FILE" 2>/dev/null || true
+    if [[ -r "$SHARED_SEEN_FILE" && -w "$SEEN_FILE" ]]; then
+      cat "$SHARED_SEEN_FILE" >> "$SEEN_FILE" 2>/dev/null || true
+      sort -u "$SEEN_FILE" -o "$SEEN_FILE" 2>/dev/null || true
+    fi
   fi
 fi
 
@@ -792,10 +798,22 @@ notify_discord_findings() {
   [[ -z "$DISCORD_WEBHOOK" ]] && return 0
   local fresh; fresh="$(mktemp)"
   : > "$fresh"
-  local count=0
+  local count=0 skipped_stale=0
   while IFS= read -r line; do
     [[ "$count" -ge "$MAX_DISCORD_FINDINGS" ]] && break
-    local key; key="$(echo "$line" | jq -r '.host + ":" + (.score|tostring)')"
+    local age_h; age_h="$(echo "$line" | jq -r '.age_hours // 99999')"
+    if [[ "$age_h" -gt "$DISCORD_ALERT_FRESH_HOURS" ]]; then
+      skipped_stale=$((skipped_stale + 1))
+      continue
+    fi
+    local key; key="$(echo "$line" | jq -r '
+      [
+        (.host // ""),
+        ((.vuln_classes // []) | sort | join(",")),
+        (.kev_signal // ""),
+        ([(.kev_cves // [])[].id] | sort | join(","))
+      ] | join("|")
+    ')"
     local already_sub; already_sub="$(echo "$line" | jq -r '.already_submitted // false')"
     [[ "$already_sub" == "true" ]] && continue
     if ! grep -qxF "$key" "$SEEN_FILE"; then
@@ -805,6 +823,7 @@ notify_discord_findings() {
     fi
   done < <(jq -c 'select(.priority=="P0" or .priority=="P1")' "$in")
 
+  [[ "$skipped_stale" -gt 0 ]] && log "Discord: skipped $skipped_stale stale high-priority finding(s) older than ${DISCORD_ALERT_FRESH_HOURS}h"
   local fc; fc="$(wc -l < "$fresh" | tr -d ' ')"
   [[ "$fc" -lt 1 ]] && { rm -f "$fresh"; return; }
 
