@@ -1,5 +1,80 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.3.0-brain — 2026-05-09 — Payout & KEV-aware triage
+
+Major upgrade to the post-discovery "brain". Triage now factors in scope payout
+tier and active KEV exploitation, and the freshest target on the highest-paying
+program rises to the top automatically.
+
+### Added
+- **Payout-tier propagation** through the scope DB:
+  `recon_scope_db.sh` now records `max_bounty` (numeric) and `payout_tier`
+  (`elite` ≥ $10k, `high` $3k–$10k, `mid` $500–$3k or unknown-paying,
+  `low` $1–$500, `none`) for every program across HackerOne, Bugcrowd,
+  Intigriti, YesWeHack, Federacy.
+- **5-column `inscope_patterns.tsv`** (added `payout_tier`).
+  `recon_scope_check.sh` reads the new column and emits `payout_tier` in JSON,
+  with backward-compat fallback for pre-v2.3 4-column TSVs.
+- **Brain enrichment in `triage.sh`** (Phase 1.5):
+  - Reads `recon_scope_check --batch` and `kev_targets.jsonl`
+  - Hard-excluded hosts (e.g. `.mil`) are dropped before clustering — never
+    reach Discord or `agent_targets.jsonl`
+  - Out-of-scope hosts get `OOS_PENALTY` (default −10) so they fall below
+    the alert threshold automatically
+  - Score bonuses stack: `pays` +2, tier `low`/`mid`/`high`/`elite` +1/+3/+5/+8,
+    KEV match +5
+  - **Fresh-blood-on-payday** mega bonus +5 when novel (<24h) AND
+    confirmed-tech AND program pays
+- **Tier-aware sorting** of `agent_targets.jsonl` and Discord embeds:
+  `(tier_rank, score, novelty)` instead of `score` alone.
+- **Discord embeds** now surface `Program · Platform · payout_tier`,
+  KEV CVE IDs, and a 🩸 marker for fresh-blood-payday hits. KEV hits are
+  red-coded; elite-tier hits are bright red.
+- **ES write-back** extended: every triaged doc now persists
+  `triage_program`, `triage_platform`, `triage_payout_tier`, `triage_pays`,
+  `triage_in_scope`, `triage_out_of_scope`, `triage_kev_match`,
+  `triage_kev_signal`, `triage_kev_cves[]`.
+- **Triage report header** now shows tier counts (elite/high/mid), KEV-matched
+  count, and fresh-blood-payday count.
+- New **`scripts/recon_brain.sh`** one-shot orchestrator:
+  `recon_brain.sh full | quick | triage-only | status`. The `status` mode
+  prints brain health (programs by tier, KEV count, current agent targets by
+  tier) without re-running anything.
+- `recon_inspect.sh` now displays the program's `payout_tier` and highlights
+  ELITE/HIGH payouts for the inspected host.
+
+### Changed
+- Old behavior preserved as graceful fallback: if `kev_targets.jsonl` or the
+  scope DB is missing, `triage.sh` runs exactly as before — zero regression
+  vs v2.2.x.
+- All score bonuses are env-overridable: `PAYS_BONUS`, `TIER_LOW_BONUS`,
+  `TIER_MID_BONUS`, `TIER_HIGH_BONUS`, `TIER_ELITE_BONUS`, `KEV_BONUS`,
+  `FRESHBLOOD_PAYDAY_BONUS`, `OOS_PENALTY`.
+- `recon_daemon.sh` takeover-watch supervisor: retry interval bumped from
+  30s to 5 min and now logs only on state transitions. (Complements the
+  v2.2.1 `recon_takeover_hunter.sh` exit-0 fix.)
+
+### Verified
+- `bash -n` clean on all 7 touched/new scripts.
+- `jq` tier function unit-tested across 6 boundaries (none/low/mid/high/elite).
+- Brain enrichment integration test on synthetic hosts: elite + KEV +
+  fresh-blood produces +20 over base, hard-exclude drops the record,
+  out-of-scope penalty applies correctly, no-scope hosts pass through
+  unchanged.
+- Patched `recon_scope_check.sh` runs cleanly against the existing live
+  4-column TSV (paying patterns default to `mid` until next `scope_db`
+  rebuild).
+
+### Operational
+- Pipeline wiring unchanged: daemon already runs `recon_scope_db`,
+  `recon_cve_intel`, and chains `triage.sh` after every validation cycle.
+  The next `scope_db` cycle (default 24h) regenerates the TSV with proper
+  tier columns; the next triage cycle (default 15 min in browse mode)
+  picks them up automatically.
+- For an immediate refresh: `bash scripts/recon_brain.sh full`.
+- For a status check without side effects: `bash scripts/recon_brain.sh status`.
+
+
 ## v2.2.1 — 2026-05-09 — Sudo fix and preflight self-heal
 
 ### Fixed
@@ -54,6 +129,7 @@
 - [ ] Verify preflight at `/usr/local/sbin/recon-safe-preflight` and sudoers rule
 - [ ] `tools/enable_recon_killswitch.sh` then `tools/check_recon_killswitch.sh`
 - [ ] `tools/start_recon_safe.sh` — final smoke test
+
 
 ## v2.1.6-killswitch final hardening notes
 

@@ -70,73 +70,108 @@ TMP_NORM="$RAW_DIR/.normalized.jsonl"
 
 log "Normalizing programs"
 
-# ---- HackerOne (unchanged from v2.1) ----------------------------------------
+# =============================================================================
+# Payout-tier helper (jq fragment)
+#
+#   none  : pays=false
+#   low   : pays=true, max_bounty < 500
+#   mid   : 500 - 2999, OR pays=true with unknown amount (default for h1/federacy
+#           which only expose offers_bounties bool)
+#   high  : 3000 - 9999
+#   elite : >= 10000
+#
+# Used by every normalizer below. Inputs $pays (bool) and $mb (number, 0 if unknown).
+# =============================================================================
+TIER_FRAG='
+def tier($pays; $mb):
+  if ($pays | not) then "none"
+  elif ($mb // 0) >= 10000 then "elite"
+  elif ($mb // 0) >=  3000 then "high"
+  elif ($mb // 0) >=   500 then "mid"
+  elif ($mb // 0) >      0 then "low"
+  else "mid" end;
+'
+
+# ---- HackerOne (h1 only exposes offers_bounties bool — tier=mid when paying) ----
 if [[ -s "$RAW_DIR/hackerone.json" ]]; then
-  jq -c '.[] | select(.handle != null) | {
-    handle: .handle,
-    name: (.name // .handle),
-    platform: "hackerone",
-    url: ("https://hackerone.com/" + .handle),
-    pays: ((.offers_bounties // false) == true),
-    in_scope: [
-      .targets.in_scope[]?
-      | select(.asset_type == "URL" or .asset_type == "WILDCARD")
-      | .asset_identifier
-      | select(. != null and . != "")
-    ],
-    out_scope: [
-      .targets.out_of_scope[]?
-      | select(.asset_type == "URL" or .asset_type == "WILDCARD")
-      | .asset_identifier
-      | select(. != null and . != "")
-    ]
-  }' "$RAW_DIR/hackerone.json" 2>/dev/null >> "$TMP_NORM" || warn "h1 normalize errors"
+  jq -c "$TIER_FRAG"' .[] | select(.handle != null) |
+    ((.offers_bounties // false) == true) as $pays |
+    0 as $mb |
+    {
+      handle: .handle,
+      name: (.name // .handle),
+      platform: "hackerone",
+      url: ("https://hackerone.com/" + .handle),
+      pays: $pays,
+      max_bounty: $mb,
+      payout_tier: tier($pays; $mb),
+      in_scope: [
+        .targets.in_scope[]?
+        | select(.asset_type == "URL" or .asset_type == "WILDCARD")
+        | .asset_identifier
+        | select(. != null and . != "")
+      ],
+      out_scope: [
+        .targets.out_of_scope[]?
+        | select(.asset_type == "URL" or .asset_type == "WILDCARD")
+        | .asset_identifier
+        | select(. != null and . != "")
+      ]
+    }' "$RAW_DIR/hackerone.json" 2>/dev/null >> "$TMP_NORM" || warn "h1 normalize errors"
 fi
 
-# ---- Bugcrowd (unchanged) ---------------------------------------------------
+# ---- Bugcrowd (max_payout numeric) -----------------------------------------
 if [[ -s "$RAW_DIR/bugcrowd.json" ]]; then
-  jq -c '.[] | {
-    handle: (.code // .name | tostring),
-    name: (.name // .code | tostring),
-    platform: "bugcrowd",
-    url: (.url // ""),
-    pays: (((.max_payout // 0) | tonumber) > 0),
-    in_scope: [
-      (.targets.in_scope // [])[]
-      | (if type == "string" then . else (.target // .uri // .name // "") end)
-      | select(. != null and . != "")
-    ],
-    out_scope: [
-      (.targets.out_of_scope // [])[]
-      | (if type == "string" then . else (.target // .uri // .name // "") end)
-      | select(. != null and . != "")
-    ]
-  }' "$RAW_DIR/bugcrowd.json" 2>/dev/null >> "$TMP_NORM" || warn "bc normalize errors"
+  jq -c "$TIER_FRAG"' .[] |
+    (((.max_payout // 0) | tonumber? // 0)) as $mb |
+    ($mb > 0) as $pays |
+    {
+      handle: (.code // .name | tostring),
+      name: (.name // .code | tostring),
+      platform: "bugcrowd",
+      url: (.url // ""),
+      pays: $pays,
+      max_bounty: $mb,
+      payout_tier: tier($pays; $mb),
+      in_scope: [
+        (.targets.in_scope // [])[]
+        | (if type == "string" then . else (.target // .uri // .name // "") end)
+        | select(. != null and . != "")
+      ],
+      out_scope: [
+        (.targets.out_of_scope // [])[]
+        | (if type == "string" then . else (.target // .uri // .name // "") end)
+        | select(. != null and . != "")
+      ]
+    }' "$RAW_DIR/bugcrowd.json" 2>/dev/null >> "$TMP_NORM" || warn "bc normalize errors"
 fi
 
 # ---- Intigriti — FIXED with real schema -------------------------------------
 # Real fields: handle, name, url, status, max_bounty.value (object), targets.in_scope[].endpoint
 if [[ -s "$RAW_DIR/intigriti.json" ]]; then
-  jq -c '.[] | select(.handle != null) | {
-    handle: .handle,
-    name: (.name // .handle),
-    platform: "intigriti",
-    url: (.url // ""),
-    pays: (
-      ((.max_bounty.value // 0) | tonumber? // 0) > 0
-    ),
-    in_scope: [
-      .targets.in_scope[]?
-      | select(.type == "url" or .type == "wildcard" or .type == "api")
-      | .endpoint
-      | select(. != null and . != "")
-    ],
-    out_scope: [
-      (.targets.out_of_scope // [])[]?
-      | (if type == "string" then . else (.endpoint // "") end)
-      | select(. != null and . != "")
-    ]
-  }' "$RAW_DIR/intigriti.json" 2>/dev/null >> "$TMP_NORM" || warn "intigriti normalize errors"
+  jq -c "$TIER_FRAG"' .[] | select(.handle != null) |
+    (((.max_bounty.value // 0) | tonumber? // 0)) as $mb |
+    ($mb > 0) as $pays |
+    {
+      handle: .handle,
+      name: (.name // .handle),
+      platform: "intigriti",
+      url: (.url // ""),
+      pays: $pays,
+      max_bounty: $mb,
+      payout_tier: tier($pays; $mb),
+      in_scope: [
+        .targets.in_scope[]?
+        | select(.type == "url" or .type == "wildcard" or .type == "api")
+        | .endpoint
+        | select(. != null and . != "")
+      ],
+      out_scope: [
+        (.targets.out_of_scope // [])[]?
+        | (if type == "string" then . else (.endpoint // "") end)
+        | select(. != null and . != "")
+      ]
+    }' "$RAW_DIR/intigriti.json" 2>/dev/null >> "$TMP_NORM" || warn "intigriti normalize errors"
   # Confirm count
   ic="$(jq -c 'select(.platform == "intigriti")' "$TMP_NORM" 2>/dev/null | wc -l)"
   log "  intigriti: $ic normalized"
@@ -145,24 +180,29 @@ fi
 # ---- YesWeHack — FIXED with real schema -------------------------------------
 # Real fields: id, name, public, max_bounty (number), targets.in_scope[].target with type
 if [[ -s "$RAW_DIR/yeswehack.json" ]]; then
-  jq -c '.[] | select(.id != null) | {
-    handle: (.id | tostring),
-    name: (.name | tostring),
-    platform: "yeswehack",
-    url: ("https://yeswehack.com/programs/" + (.id | tostring)),
-    pays: (((.max_bounty // 0) | tonumber? // 0) > 0),
-    in_scope: [
-      .targets.in_scope[]?
-      | select(.type == "web-application" or .type == "api" or .type == "website" or .type == null)
-      | .target
-      | select(. != null and . != "")
-    ],
-    out_scope: [
-      (.targets.out_of_scope // [])[]?
-      | (if type == "string" then . else (.target // "") end)
-      | select(. != null and . != "")
-    ]
-  }' "$RAW_DIR/yeswehack.json" 2>/dev/null >> "$TMP_NORM" || warn "ywh normalize errors"
+  jq -c "$TIER_FRAG"' .[] | select(.id != null) |
+    (((.max_bounty // 0) | tonumber? // 0)) as $mb |
+    ($mb > 0) as $pays |
+    {
+      handle: (.id | tostring),
+      name: (.name | tostring),
+      platform: "yeswehack",
+      url: ("https://yeswehack.com/programs/" + (.id | tostring)),
+      pays: $pays,
+      max_bounty: $mb,
+      payout_tier: tier($pays; $mb),
+      in_scope: [
+        .targets.in_scope[]?
+        | select(.type == "web-application" or .type == "api" or .type == "website" or .type == null)
+        | .target
+        | select(. != null and . != "")
+      ],
+      out_scope: [
+        (.targets.out_of_scope // [])[]?
+        | (if type == "string" then . else (.target // "") end)
+        | select(. != null and . != "")
+      ]
+    }' "$RAW_DIR/yeswehack.json" 2>/dev/null >> "$TMP_NORM" || warn "ywh normalize errors"
   yc="$(jq -c 'select(.platform == "yeswehack")' "$TMP_NORM" 2>/dev/null | wc -l)"
   log "  yeswehack: $yc normalized"
 fi
@@ -170,24 +210,29 @@ fi
 # ---- Federacy — FIXED with real schema --------------------------------------
 # Real fields: id, name, offers_awards, targets.in_scope[].target with type
 if [[ -s "$RAW_DIR/federacy.json" ]]; then
-  jq -c '.[] | select(.id != null) | {
-    handle: (.id | tostring),
-    name: (.name | tostring),
-    platform: "federacy",
-    url: (.url // ""),
-    pays: ((.offers_awards // false) == true),
-    in_scope: [
-      .targets.in_scope[]?
-      | select(.type == "website" or .type == "url" or .type == "api" or .type == null)
-      | .target
-      | select(. != null and . != "")
-    ],
-    out_scope: [
-      (.targets.out_of_scope // [])[]?
-      | (if type == "string" then . else (.target // "") end)
-      | select(. != null and . != "")
-    ]
-  }' "$RAW_DIR/federacy.json" 2>/dev/null >> "$TMP_NORM" || warn "federacy normalize errors"
+  jq -c "$TIER_FRAG"' .[] | select(.id != null) |
+    ((.offers_awards // false) == true) as $pays |
+    0 as $mb |
+    {
+      handle: (.id | tostring),
+      name: (.name | tostring),
+      platform: "federacy",
+      url: (.url // ""),
+      pays: $pays,
+      max_bounty: $mb,
+      payout_tier: tier($pays; $mb),
+      in_scope: [
+        .targets.in_scope[]?
+        | select(.type == "website" or .type == "url" or .type == "api" or .type == null)
+        | .target
+        | select(. != null and . != "")
+      ],
+      out_scope: [
+        (.targets.out_of_scope // [])[]?
+        | (if type == "string" then . else (.target // "") end)
+        | select(. != null and . != "")
+      ]
+    }' "$RAW_DIR/federacy.json" 2>/dev/null >> "$TMP_NORM" || warn "federacy normalize errors"
   fc="$(jq -c 'select(.platform == "federacy")' "$TMP_NORM" 2>/dev/null | wc -l)"
   log "  federacy: $fc normalized"
 fi
@@ -221,13 +266,16 @@ rm -f "$TMP_NORM"
 
 # Pattern tables
 log "Building pattern tables"
+# TSV columns (5):  pattern  handle  platform  pays  payout_tier
+# Old consumers (pre-v2.2) reading 4 columns still work — extra column is appended.
 jq -r '.[] |
   . as $p |
   ($p.in_scope // [])[] |
   select(. != null and . != "") |
   [
     (. | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
-    $p.handle, $p.platform, ($p.pays | tostring)
+    $p.handle, $p.platform, ($p.pays | tostring),
+    ($p.payout_tier // (if $p.pays then "mid" else "none" end))
   ] | @tsv
 ' "$PROGRAMS_JSON" | sort -u > "$INSCOPE_TSV"
 
@@ -250,6 +298,20 @@ jq -r '
     count: length,
     paying: [.[] | select(.pays == true)] | length
   }) | .[] | "\(.platform): \(.count) total, \(.paying) paying"
+' "$PROGRAMS_JSON" 2>/dev/null | while read -r line; do log "  $line"; done
+
+# Payout-tier distribution
+jq -r '
+  group_by(.payout_tier // "none") | map({
+    tier: (.[0].payout_tier // "none"),
+    count: length
+  }) | sort_by(
+    if .tier == "elite" then 0
+    elif .tier == "high"  then 1
+    elif .tier == "mid"   then 2
+    elif .tier == "low"   then 3
+    else 4 end
+  ) | .[] | "tier=\(.tier): \(.count)"
 ' "$PROGRAMS_JSON" 2>/dev/null | while read -r line; do log "  $line"; done
 
 log "Scope DB build complete"
