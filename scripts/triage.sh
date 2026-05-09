@@ -94,7 +94,16 @@ RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 TARGETS_OUT="$TRIAGE_DIR/agent_targets.jsonl"
 REPORT_OUT="$TRIAGE_DIR/report_${RUN_TS}.md"
 SEEN_FILE="$TRIAGE_DIR/.seen_high.txt"
-touch "$SEEN_FILE"
+# Self-heal SEEN_FILE if a previous run (under reconrun or another uid) left it
+# with permissions our current uid can't write. Falls back to /tmp on hard fail.
+if ! ( touch "$SEEN_FILE" 2>/dev/null && [[ -w "$SEEN_FILE" ]] ); then
+  if [[ -e "$SEEN_FILE" && ! -w "$SEEN_FILE" ]]; then
+    warn "$SEEN_FILE not writable by uid $(id -u); falling back to per-uid copy"
+    SEEN_FILE="$TRIAGE_DIR/.seen_high.$(id -u).txt"
+    touch "$SEEN_FILE" 2>/dev/null || SEEN_FILE="/tmp/.recon_seen_high.$(id -u).txt"
+    touch "$SEEN_FILE" 2>/dev/null || true
+  fi
+fi
 
 exec 8>"$LOCK_FILE"; flock -n 8 || { warn "triage already running"; exit 0; }
 
@@ -630,7 +639,10 @@ apply_cluster_and_submission() {
     : > "$subs_filter"
   fi
 
-  jq -s --slurpfile subs <(jq -R '.' "$subs_filter") \
+  # -c (compact) is critical: without it, output is multi-line pretty-printed
+  # JSON. Downstream `wc -l` then inflates counts ~19x and `head -N | jq` cuts
+  # mid-record. The agent_targets.jsonl must be true JSONL.
+  jq -sc --slurpfile subs <(jq -R '.' "$subs_filter") \
         --argjson max "$CLUSTER_MAX" --argjson penalty "$CLUSTER_PENALTY" '
     ($subs[0] // []) as $submitted |
     def cluster_key:
@@ -847,7 +859,11 @@ notify_discord_findings() {
       i=$((i + 10)); sleep 1
     done
   fi
-  tail -n 5000 "$SEEN_FILE" > "$SEEN_FILE.tmp" && mv "$SEEN_FILE.tmp" "$SEEN_FILE"
+  if [[ -w "$SEEN_FILE" ]]; then
+    tail -n 5000 "$SEEN_FILE" > "$SEEN_FILE.tmp" 2>/dev/null \
+      && mv "$SEEN_FILE.tmp" "$SEEN_FILE" 2>/dev/null \
+      || rm -f "$SEEN_FILE.tmp" 2>/dev/null
+  fi
   rm -f "$fresh"
 }
 
