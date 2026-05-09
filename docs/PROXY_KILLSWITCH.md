@@ -61,9 +61,9 @@ Sanity check passed:
 Expected scanner processes:
 
     reconrun ... recon_validate.sh
-    reconrun ... httpx -http-proxy socks5://127.0.0.1:9050
+reconrun ... httpx -http-proxy socks5h://127.0.0.1:9050
     reconrun ... recon_discovery.sh
-    reconrun ... subfinder -proxy socks5://127.0.0.1:9050
+reconrun ... subfinder -proxy socks5h://127.0.0.1:9050
 
 There should be no target-facing scanner processes owned by `d0k`.
 
@@ -87,9 +87,9 @@ The nuclei path was verified in code:
 
 Native proxy flags are still used where available:
 
-    httpx -http-proxy socks5://127.0.0.1:9050
-    subfinder -proxy socks5://127.0.0.1:9050
-    nuclei -proxy socks5://127.0.0.1:9050
+httpx -http-proxy socks5h://127.0.0.1:9050
+subfinder -proxy socks5h://127.0.0.1:9050
+nuclei -proxy socks5h://127.0.0.1:9050
 
 However, the nftables kill switch is the real fail-closed protection.
 
@@ -101,7 +101,7 @@ However, the nftables kill switch is the real fail-closed protection.
 
 Use:
 
-    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5://127.0.0.1:9050 ~/recon_ctl.sh start
+SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5h://127.0.0.1:9050 ~/recon_ctl.sh start
 
 ## Sanity Check Commands
 
@@ -114,7 +114,9 @@ Use:
 
     sudo nft list chain inet recon_killswitch output
 
-    sudo -u reconrun curl -s --max-time 5 https://ifconfig.me || echo "OK direct blocked"
+    # Optional: performs a live direct-egress test and will leak if the kill switch is broken.
+    # Leave disabled unless you are deliberately testing the firewall.
+    RECON_RUN_LIVE_LEAK_TEST=1 tools/check_recon_killswitch.sh
 
     sudo -u reconrun curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://ifconfig.me; echo
 

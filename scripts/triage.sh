@@ -21,6 +21,8 @@ die()  { printf '[%s TRIAGE FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 for c in curl jq sort head wc cat date mktemp grep tr nproc xargs awk; do
   command -v "$c" >/dev/null 2>&1 || die "Missing dependency: $c"
 done
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 TRIAGE_DIR="${TRIAGE_DIR:-$BASE_DIR/triage}"
@@ -644,12 +646,12 @@ notify_discord_findings() {
 
   local n_emb; n_emb="$(echo "$payload" | jq '.embeds|length')"
   if [[ "$n_emb" -le 10 ]]; then
-    curl -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+    curl_net -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
   else
     local i=0
     while [[ $i -lt $n_emb ]]; do
       local chunk; chunk="$(echo "$payload" | jq --argjson s "$i" '{content:.content,embeds:(.embeds[$s:$s+10])}')"
-      curl -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$chunk" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+      curl_net -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$chunk" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
       i=$((i + 10)); sleep 1
     done
   fi

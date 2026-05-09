@@ -64,9 +64,18 @@ BULK_LINES="${BULK_LINES:-5000}"
 
 BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-3}"
 RUN_TAKEOVER="${RUN_TAKEOVER:-1}"
-TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$HOME/recon_takeover_hunter.sh}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_path() {
+  local name="$1"
+  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/$name"
+  else
+    printf '%s\n' "$HOME/$name"
+  fi
+}
+TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover_hunter.sh)}"
 RUN_TRIAGE="${RUN_TRIAGE:-1}"
-TRIAGE_SCRIPT="${TRIAGE_SCRIPT:-$HOME/triage.sh}"
+TRIAGE_SCRIPT="${TRIAGE_SCRIPT:-$(script_path triage.sh)}"
 
 mkdir -p "$STATE_DIR" "$INBOX" "$PROCESSING" "$DONE" "$LOG_DIR" "$SPOOL/pending" "$SPOOL/sent" "$SPOOL/failed"
 exec 9>"$LOCK_FILE"; flock -n 9 || { warn "validate already running"; exit 0; }
@@ -194,7 +203,7 @@ process_batch() {
     cp "$httpx_out" "$DONE/${stem}.jsonl"
 
     # ---- IMMEDIATE takeover hunter call (first-blood path) ----
-    if [[ "$RUN_TAKEOVER" == "1" && -x "$TAKEOVER_SCRIPT" ]]; then
+    if [[ "$RUN_TAKEOVER" == "1" && -f "$TAKEOVER_SCRIPT" ]]; then
       ( DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" \
         timeout --kill-after=10 600 bash "$TAKEOVER_SCRIPT" stream "$DONE/${stem}.jsonl" \
         || warn "takeover hunter exited non-zero on $stem" ) &
@@ -271,7 +280,7 @@ main() {
   log "=== validate cycle done (processed=$processed) ==="
 
   # Chain to triage if anything was processed
-  if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -x "$TRIAGE_SCRIPT" ]]; then
+  if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
     log "Chaining to triage"
     ( DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
       INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 1200 bash "$TRIAGE_SCRIPT" \

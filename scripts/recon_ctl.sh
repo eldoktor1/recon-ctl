@@ -11,7 +11,19 @@ FB_DIR="$BASE_DIR/firstblood"
 LOG_DIR="$BASE_DIR/logs"
 TRIAGE_DIR="$BASE_DIR/triage"
 MODE_FILE="$HOME/.recon_mode"
-DAEMON="$HOME/recon-pipeline/scripts/recon_daemon.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+script_path() {
+  local name="$1"
+  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/$name"
+  else
+    printf '%s\n' "$HOME/$name"
+  fi
+}
+
+DAEMON="${DAEMON:-$(script_path recon_daemon.sh)}"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
@@ -27,6 +39,19 @@ hdr() { printf '\n\033[1;36m== %s ==\033[0m\n' "$1"; }
 cmd_start() {
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "Daemon already running (pid $(cat "$PID_FILE"))"; return
+  fi
+  if [[ "${RECON_SKIP_PREFLIGHT:-0}" != "1" ]]; then
+    if [[ -x /usr/local/sbin/recon-safe-preflight ]]; then
+      echo "Running secure preflight"
+      sudo -n /usr/local/sbin/recon-safe-preflight || {
+        echo "Preflight failed; refusing to start target-facing recon."
+        return 1
+      }
+    elif [[ "${RECON_REQUIRE_PREFLIGHT:-1}" == "1" ]]; then
+      echo "Secure preflight is not installed; refusing to start target-facing recon."
+      echo "Use tools/start_recon_safe.sh after installing /usr/local/sbin/recon-safe-preflight."
+      return 1
+    fi
   fi
   nohup bash "$DAEMON" >/dev/null 2>&1 &
   sleep 1
@@ -96,8 +121,11 @@ cmd_mode() {
     return
   fi
   case "$m" in
-    browse|night) echo "$m" > "$MODE_FILE"; echo "Mode → $m (effective next cycle)" ;;
-    *) echo "Usage: recon_ctl mode browse|night"; return 1 ;;
+    night) m="boost" ;;
+  esac
+  case "$m" in
+    browse|boost) echo "$m" > "$MODE_FILE"; echo "Mode → $m (effective next cycle)" ;;
+    *) echo "Usage: recon_ctl mode browse|boost"; return 1 ;;
   esac
 }
 
@@ -215,7 +243,7 @@ cmd_reset_queue() {
 
 
 # V21_CTL_BEGIN — v2 commands (remove block to revert)
-V21_SCOPE_CHECK="$HOME/recon_scope_check.sh"
+V21_SCOPE_CHECK="$(script_path recon_scope_check.sh)"
 V21_KILL_DIR="$HOME/recon/state/kill"
 
 cmd_kev() {
@@ -230,8 +258,8 @@ cmd_kev() {
 cmd_scope() {
   local host="${1:-}"
   if [[ -z "$host" ]]; then echo "Usage: recon_ctl scope <host>"; return 1; fi
-  [[ -x "$V21_SCOPE_CHECK" ]] || { echo "scope_check missing"; return 1; }
-  "$V21_SCOPE_CHECK" "$host" | jq .
+  [[ -f "$V21_SCOPE_CHECK" ]] || { echo "scope_check missing"; return 1; }
+  bash "$V21_SCOPE_CHECK" "$host" | jq .
 }
 
 cmd_programs() {
@@ -256,6 +284,17 @@ cmd_confirmed() {
   tail -20 "$f" | jq -r '"  [\(.info.severity // \"?\")] \(.host) — \(.\"template-id\") (program: \(.scope.program // \"?\"))"'
 }
 
+cmd_fresh() {
+  hdr "Fresh confirmed queue"
+  local f="$HOME/recon/fresh/fresh_confirmed.jsonl"
+  [[ ! -s "$f" ]] && { echo "  none yet"; return; }
+  tail -20 "$f" | jq -r '"  [\(.fresh_score)] \(.host)  \(.fresh_kinds | join(","))  scope=\(.scope.program // "?")  url=\(.verified_url)"'
+  echo
+  local latest
+  latest="$(ls -t "$HOME/recon/fresh"/report_*.md 2>/dev/null | head -1)"
+  [[ -n "$latest" ]] && echo "  latest report: $latest"
+}
+
 cmd_fp() {
   local host="${1:-}" tmpl="${2:-}"
   if [[ -z "$host" || -z "$tmpl" ]]; then echo "Usage: recon_ctl fp <host> <template_id>"; return 1; fi
@@ -271,7 +310,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_nuclei; do
+      for k in v2_scope v2_cve v2_nuclei v2_fresh; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
@@ -304,9 +343,9 @@ cmd_v2() {
       mkdir -p "$V21_KILL_DIR"
       echo "${*:-manual}" > "$V21_KILL_DIR/v2_$mod"; echo "$mod disabled"
       ;;
-    refresh-scope) bash "$HOME/recon_scope_db.sh" ;;
-    refresh-cve)   bash "$HOME/recon_cve_intel.sh" all ;;
-    scan-now)      bash "$HOME/recon_nuclei.sh" ;;
+    refresh-scope) bash "$(script_path recon_scope_db.sh)" ;;
+    refresh-cve)   bash "$(script_path recon_cve_intel.sh)" all ;;
+    scan-now)      bash "$(script_path recon_nuclei.sh)" ;;
     *)
       echo "v2 subcommands: status | enable <mod> | disable <mod> [reason] | refresh-scope | refresh-cve | scan-now"
       ;;
@@ -319,7 +358,7 @@ cmd_v2() {
 cmd_inspect() {
   local host="${1:-}"
   if [[ -z "$host" ]]; then echo "Usage: recon_ctl inspect <host>"; return 1; fi
-  bash "$HOME/recon_inspect.sh" "$host"
+  bash "$(script_path recon_inspect.sh)" "$host"
 }
 # V213_INSPECT_END
 
@@ -337,12 +376,15 @@ cmd_schedule_status() {
   hdr "Schedule status"
   echo "  Current PT time: $(TZ=$tz date '+%A %H:%M')"
   echo "  Current mode:    $(cat "$MODE_FILE" 2>/dev/null || echo browse)"
-  if [[ "$dow" -ge 6 ]]; then
-    echo "  Weekend: manual mode preserved (use: recon_ctl mode browse|night)"
+  local weekend_boost_start=180 weekend_boost_end=600
+  if [[ "$dow" -ge 6 && "$time_mins" -ge "$weekend_boost_start" && "$time_mins" -lt "$weekend_boost_end" ]]; then
+    echo "  Weekend boost window: ACTIVE (until 10:00 AM PT)"
+  elif [[ "$dow" -ge 6 ]]; then
+    echo "  Weekend: manual mode preserved outside 3:00 AM-10:00 AM PT boost window (use: recon_ctl mode browse|boost)"
   elif [[ "$time_mins" -ge "$browse_start" && "$time_mins" -lt "$browse_end" ]]; then
     echo "  Weekday browse window: ACTIVE (until 11:30 PM PT)"
   else
-    echo "  Night mode window: ACTIVE"
+    echo "  Boost mode window: ACTIVE"
     if [[ "$time_mins" -lt "$browse_start" ]]; then
       mins_until=$(( browse_start - time_mins ))
       echo "  Browse starts in: ${mins_until}m (at 5:30 PM PT)"
@@ -350,11 +392,11 @@ cmd_schedule_status() {
       echo "  Next browse window: tomorrow 5:30 PM PT"
     fi
   fi
-  echo "  Schedule: weekdays 5:30pm-11:30pm=browse, all other=night"
+  echo "  Schedule: weekdays 5:30pm-11:30pm=browse, weekday off-hours=boost, weekends 3am-10am=boost"
 }
 
 cmd_schedule_check() {
-  bash "$HOME/recon_schedule.sh" && echo "Schedule check OK"
+  bash "$(script_path recon_schedule.sh)" && echo "Schedule check OK"
   echo "Mode is now: $(cat "$HOME/.recon_mode" 2>/dev/null || echo browse)"
 }
 # V214_SCHEDULE_END
@@ -366,7 +408,7 @@ recon_ctl — pipeline control
   start                  Launch daemon
   stop                   Stop daemon + children
   status                 Daemon, queue, ES, FB summary
-  mode [browse|night]    Show or set mode
+  mode [browse|boost]    Show or set mode (night remains an alias)
   queue                  Show queue counts
   logs [N]               Tail daemon log (default 50)
   top [N]                Top N triage targets (default 15)
@@ -384,6 +426,7 @@ recon_ctl — pipeline control
   scope <host>           Check if a host is in any program scope
   programs               Summary of programs in scope DB
   confirmed              Latest confirmed nuclei findings
+  fresh                  Latest fresh in-scope confirmed candidates
   fp <host> <tmpl>       Mark a nuclei finding as false positive
   v2 status              V2 module health
   v2 enable <mod>        Re-enable killed module (scope|cve|nuclei)
@@ -418,6 +461,7 @@ case "${1:-}" in
   scope)        shift; cmd_scope "$@" ;;
   programs)     cmd_programs ;;
   confirmed)    cmd_confirmed ;;
+  fresh)        cmd_fresh ;;
   fp)           shift; cmd_fp "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;

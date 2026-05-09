@@ -32,7 +32,10 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
 INDEX="${INDEX_NAME:-recon_alive}"
-SCOPE_CHECK="$HOME/recon_scope_check.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
+SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
+[[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"
 KEV_FILE="$HOME/recon/cve/kev_targets.jsonl"
 
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'; C='\033[0;36m'; N='\033[0m'
@@ -45,7 +48,7 @@ es_doc="$(curl -sS -u "$ES_USER:$ES_PASS" "$ES_URL/$INDEX/_doc/$host" 2>/dev/nul
           | jq '._source // null' 2>/dev/null)"
 
 # 2. Scope verdict
-scope="$(echo "$host" | "$SCOPE_CHECK" --batch 2>/dev/null | head -1)"
+scope="$(echo "$host" | bash "$SCOPE_CHECK" --batch 2>/dev/null | head -1)"
 
 # 3. KEV match
 kev_match="null"
@@ -57,7 +60,7 @@ fi
 # 4. Live probe
 probe_json="null"
 if command -v curl >/dev/null 2>&1; then
-  probe="$(curl -sS -k -L --max-redirs 3 -m 10 \
+  probe="$(curl_net -sS -k -L --max-redirs 3 -m 10 \
     -A 'Mozilla/5.0 (recon-inspect)' \
     -o /dev/null \
     -w '{"status":%{http_code},"final_url":"%{url_effective}","redirect_count":%{num_redirects},"time_total":%{time_total},"server":"%{header.server}"}' \

@@ -74,7 +74,7 @@ The `recon-start` alias points to:
 The safe startup script does this:
 
     sudo -n /usr/local/sbin/recon-safe-preflight
-    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5://127.0.0.1:9050 ~/recon_ctl.sh start
+    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5h://127.0.0.1:9050 ~/recon_ctl.sh start
 
 The preflight script:
 
@@ -136,9 +136,9 @@ Proxychains and native proxy flags are still used, but they are not the only sec
 
 Tools with native proxy support are launched with SOCKS proxy flags:
 
-    httpx -http-proxy socks5://127.0.0.1:9050
-    subfinder -proxy socks5://127.0.0.1:9050
-    nuclei -proxy socks5://127.0.0.1:9050
+    httpx -http-proxy socks5h://127.0.0.1:9050
+    subfinder -proxy socks5h://127.0.0.1:9050
+    nuclei -proxy socks5h://127.0.0.1:9050
 
 `assetfinder` is skipped in proxy-safe mode because it does not provide a trusted native proxy flag.
 

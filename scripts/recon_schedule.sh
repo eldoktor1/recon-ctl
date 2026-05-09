@@ -1,24 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# recon_schedule.sh — Automatic mode switching based on time of day
+# recon_schedule.sh - Automatic mode switching based on Pacific time
 #
-# Schedule (Pacific Time):
-#   Weekdays (Mon-Fri):
-#     05:30 PM - 11:30 PM  → browse   (you're home, using the computer)
-#     all other hours      → night    (you're at work or asleep)
-#   Weekends (Sat-Sun):
-#     Controlled separately by recon_ctl mode browse|night
-#     This script does NOT override on weekends.
+# Weekdays (Mon-Fri):
+#   05:30 PM - 11:30 PM  -> browse
+#   all other hours      -> boost
 #
-# Mechanism:
-#   - Runs as a sub-loop inside recon_daemon.sh (checked every 5 minutes)
-#   - Writes to ~/.recon_mode
-#   - Battery check still applies on top of this (daemon does it in load_profile)
-#   - Weekend mode is preserved (whatever you last set manually)
+# Weekends (Sat-Sun):
+#   03:00 AM - 10:00 AM  -> boost
+#   all other hours      -> preserve manual mode
 #
 # Called by:
 #   - recon_daemon.sh supervise_loop every SCHEDULE_SLEEP seconds
-#   - recon_ctl schedule-check (manual trigger)
+#   - recon_ctl schedule-check
 # =============================================================================
 
 set -uo pipefail
@@ -30,37 +24,43 @@ export TZ
 
 log() { printf '[%s SCHED] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$SCHEDULE_LOG" 2>/dev/null || true; }
 
-# Current local time components
 DOW="$(date +%u)"   # 1=Mon ... 7=Sun
 HOUR="$(date +%H)"  # 00-23
 MIN="$(date +%M)"   # 00-59
 TIME_MINS=$(( 10#$HOUR * 60 + 10#$MIN ))
 
-# Window: 17:30 = 1050 mins, 23:30 = 1410 mins
-BROWSE_START=1050   # 5:30 PM
-BROWSE_END=1410     # 11:30 PM
+BROWSE_START=1050        # 5:30 PM
+BROWSE_END=1410          # 11:30 PM
+WEEKEND_BOOST_START=180  # 3:00 AM
+WEEKEND_BOOST_END=600    # 10:00 AM
 
-# Determine target mode
-TARGET_MODE=""
+read_mode() {
+  tr -d '[:space:]' < "$MODE_FILE" 2>/dev/null || echo browse
+}
+
+write_if_changed() {
+  local target="$1" reason="$2"
+  local current
+  current="$(read_mode)"
+  if [[ "$current" != "$target" ]]; then
+    echo "$target" > "$MODE_FILE"
+    log "$reason: $current -> $target (DOW=$DOW TIME=$(date +%H:%M)PT)"
+  fi
+}
+
 if [[ "$DOW" -ge 6 ]]; then
-  # Weekend — preserve whatever was manually set, don't touch
-  CURRENT="$(cat "$MODE_FILE" 2>/dev/null | tr -d '[:space:]' || echo browse)"
-  log "Weekend — preserving manual mode: $CURRENT"
+  if [[ "$TIME_MINS" -ge "$WEEKEND_BOOST_START" && "$TIME_MINS" -lt "$WEEKEND_BOOST_END" ]]; then
+    write_if_changed "boost" "Weekend boost"
+  else
+    log "Weekend outside boost window - preserving manual mode: $(read_mode)"
+  fi
   exit 0
 fi
 
-# Weekday logic
 if [[ "$TIME_MINS" -ge "$BROWSE_START" && "$TIME_MINS" -lt "$BROWSE_END" ]]; then
-  TARGET_MODE="browse"
+  write_if_changed "browse" "Weekday browse window"
 else
-  TARGET_MODE="night"
-fi
-
-# Only write if changed (avoids unnecessary disk writes + daemon log spam)
-CURRENT="$(cat "$MODE_FILE" 2>/dev/null | tr -d '[:space:]' || echo "")"
-if [[ "$CURRENT" != "$TARGET_MODE" ]]; then
-  echo "$TARGET_MODE" > "$MODE_FILE"
-  log "Mode switched: $CURRENT → $TARGET_MODE (DOW=$DOW TIME=$(date +%H:%M)PT)"
+  write_if_changed "boost" "Weekday boost window"
 fi
 
 exit 0

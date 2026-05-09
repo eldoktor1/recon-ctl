@@ -6,7 +6,11 @@ sudo nft list chain inet recon_killswitch output
 
 echo
 echo "== direct should fail =="
-sudo -u reconrun curl -s --max-time 5 https://ifconfig.me || echo "OK direct blocked"
+echo "Skipped live direct egress probe by default to avoid leaking your public IP."
+echo "Rule inspection above must show a final 'meta skuid <reconrun-uid> reject'."
+if [[ "${RECON_RUN_LIVE_LEAK_TEST:-0}" == "1" ]]; then
+  sudo -u reconrun curl -s --max-time 5 https://ifconfig.me || echo "OK direct blocked"
+fi
 
 echo
 echo "== Tor should work =="

@@ -18,6 +18,10 @@ LOCK_FILE="$STATE_DIR/discord_bot.lock"
 PID_FILE="$STATE_DIR/discord_bot.pid"
 BOT_LOG="$LOG_DIR/discord_bot.log"
 LAST_MSG_FILE="$STATE_DIR/discord_bot_last_msg.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CTL_SCRIPT="${CTL_SCRIPT:-$SCRIPT_DIR/recon_ctl.sh}"
+[[ -f "$CTL_SCRIPT" ]] || CTL_SCRIPT="$HOME/recon_ctl.sh"
+source "$SCRIPT_DIR/recon_net.sh"
 
 POLL_INTERVAL=5
 RATE_LIMIT_SECS=10
@@ -44,8 +48,8 @@ echo $$ > "$PID_FILE"
 trap "rm -f '$PID_FILE'" EXIT
 
 # ---- API helpers ------------------------------------------------------------
-api_get()  { curl -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
-api_post() { curl -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
+api_get()  { curl_net -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
+api_post() { curl_net -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
 
 # Send embed to channel
 # Colors: green=3066993 blue=3447003 orange=15105570 red=15158332 grey=9807270
@@ -81,7 +85,7 @@ info() { send "$1" "$2" 3447003;  }  # blue
 warn_d(){ send "$1" "$2" 15105570; } # orange
 err()  { send "$1" "$2" 15158332; }  # red
 
-run_ctl() { bash "$HOME/recon_ctl.sh" "$@" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true; }
+run_ctl() { bash "$CTL_SCRIPT" "$@" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true; }
 
 # ---- Commands ---------------------------------------------------------------
 cmd_help() {
@@ -90,11 +94,12 @@ cmd_help() {
 !health          full health check
 !queue           queue file counts
 !top [N]         top N targets (default 10, max 20)
+!fresh           latest fresh confirmed queue
 !takeovers       high-confidence takeover candidates
 !watching        medium-confidence watching list
 !logs [N]        last N daemon log lines (default 20)
 !mode            show current mode
-!mode night      switch to aggressive mode
+!mode boost      switch to faster mode
 !mode browse     switch to polite mode
 !start           start daemon if stopped
 !stop            stop daemon
@@ -121,6 +126,10 @@ cmd_top() {
     [[ "$n" =~ ^[0-9]+$ ]] || n=10
     [[ "$n" -gt 20 ]] && n=20
     info "Top $n targets" "$(run_ctl top "$n")"
+}
+
+cmd_fresh() {
+    info "Fresh confirmed queue" "$(run_ctl fresh)"
 }
 
 cmd_takeovers() {
@@ -160,12 +169,13 @@ cmd_mode() {
         info "Mode" "Current: $(cat "$HOME/.recon_mode" 2>/dev/null || echo browse)"
         return
     fi
+    [[ "$m" == "night" ]] && m="boost"
     case "$m" in
-        browse|night)
+        browse|boost)
             echo "$m" > "$HOME/.recon_mode"
             ok "Mode" "Switched to $m (effective next cycle)"
             ;;
-        *) err "Mode" "Usage: !mode browse|night" ;;
+        *) err "Mode" "Usage: !mode browse|boost" ;;
     esac
 }
 
@@ -175,7 +185,7 @@ cmd_start() {
         warn_d "Start" "Already running (pid $(cat "$pid_file"))"
         return
     fi
-    nohup bash "$HOME/recon_daemon.sh" >/dev/null 2>&1 &
+    run_ctl start >/dev/null
     sleep 2
     if [[ -s "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         ok "Started" "Daemon running (pid $(cat "$pid_file"))"
@@ -185,7 +195,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-    bash "$HOME/recon_ctl.sh" stop >/dev/null 2>&1 || true
+    run_ctl stop >/dev/null
     warn_d "Stopped" "Daemon stopped. Use !start to restart."
 }
 
@@ -256,7 +266,7 @@ cmd_rescue() {
         lines+=("[OK] Daemon running (pid $(cat "$pid_file"))")
     else
         rm -f "$pid_file" 2>/dev/null || true
-        nohup bash "$HOME/recon_daemon.sh" >/dev/null 2>&1 &
+        run_ctl start >/dev/null
         sleep 3
         if [[ -s "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
             lines+=("[FIXED] Daemon restarted (pid $(cat "$pid_file"))")
@@ -308,6 +318,7 @@ dispatch() {
         '!health')    cmd_health ;;
         '!queue')     cmd_queue ;;
         '!top')       cmd_top "$arg" ;;
+        '!fresh')     cmd_fresh ;;
         '!takeovers') cmd_takeovers ;;
         '!watching')  cmd_watching ;;
         '!logs')      cmd_logs "$arg" ;;

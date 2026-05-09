@@ -49,6 +49,9 @@ run_net() {
   fi
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
+
 
 for c in jq curl; do command -v "$c" >/dev/null || die "missing: $c"; done
 command -v nuclei >/dev/null || die "nuclei not installed"
@@ -57,7 +60,8 @@ NUCLEI_DIR="${NUCLEI_DIR:-$HOME/recon/nuclei}"
 RESULTS_DIR="$NUCLEI_DIR/results"
 FP_DIR="$NUCLEI_DIR/fp"
 CVE_DIR="$HOME/recon/cve"
-SCOPE_CHECK="$HOME/recon_scope_check.sh"
+SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
+[[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"
 KILL_FILE="$HOME/recon/state/kill/v2_nuclei"
 LOCK_FILE="$HOME/recon/state/nuclei.lock"
 
@@ -75,6 +79,7 @@ RATE_LIMIT="${RATE_LIMIT:-10}"
 TIMEOUT="${TIMEOUT:-60}"
 COOLDOWN_HOURS="${COOLDOWN_HOURS:-24}"
 MAX_HOSTS_PER_RUN="${MAX_HOSTS_PER_RUN:-50}"
+PAYING_ONLY="${NUCLEI_PAYING_ONLY:-1}"
 
 mkdir -p "$RESULTS_DIR" "$FP_DIR" "$NUCLEI_DIR/templates"
 
@@ -88,7 +93,7 @@ flock -n 9 || { log "nuclei already running"; exit 0; }
   exit 0
 }
 
-[[ -x "$SCOPE_CHECK" ]] || die "recon_scope_check.sh missing"
+[[ -f "$SCOPE_CHECK" ]] || die "recon_scope_check.sh missing"
 
 # =============================================================================
 # Build target list — apply all gates (v2.1.2: batch scope check)
@@ -136,24 +141,26 @@ fi
 
 # 2. Extract host list, batch scope-check (single awk pass)
 jq -r '.host' "${TARGETS_TMP}.tier" > "$HOSTS_TMP"
-"$SCOPE_CHECK" --batch "$HOSTS_TMP" > "$SCOPE_TMP"
+bash "$SCOPE_CHECK" --batch "$HOSTS_TMP" > "$SCOPE_TMP"
 SCOPE_OK_COUNT="$(jq -s 'map(select(.in_scope == true and .out_of_scope == false)) | length' "$SCOPE_TMP")"
 log "  after scope check: $SCOPE_OK_COUNT in-scope (any pays/VDP)"
 
 PAYING_OK_COUNT="$(jq -s 'map(select(.in_scope == true and .pays == true)) | length' "$SCOPE_TMP")"
 log "  paying-only:        $PAYING_OK_COUNT in-scope on paying programs"
+[[ "$PAYING_ONLY" == "1" ]] && log "  VDP/unknown-pay targets: excluded"
 
 # 3. Build host→scope map for join, then merge with kev_targets
 # Apply cooldown filter inline
 NOW="$(date +%s)"
 jq -s --slurpfile scope <(jq -s '.' "$SCOPE_TMP") \
    --argjson now "$NOW" \
-   --argjson cooldown "$COOLDOWN_HOURS" '
+   --argjson cooldown "$COOLDOWN_HOURS" \
+   --argjson paying_only "$PAYING_ONLY" '
   ($scope[0] | map({(.host): .}) | add) as $sm |
   map(
     . as $t |
     ($sm[$t.host] // {}) as $s |
-    if ($s.in_scope == true and $s.out_of_scope == false) then
+    if ($s.in_scope == true and $s.out_of_scope == false and ($paying_only == 0 or $s.pays == true)) then
       $t + {
         program: ($s.program // ""),
         platform: ($s.platform // ""),
@@ -329,7 +336,7 @@ notify_discord_confirmed() {
       timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }]
   }')"
-  curl -fsS -m 10 -H 'Content-Type: application/json' \
+  curl_net -fsS -m 10 -H 'Content-Type: application/json' \
     -X POST -d "$payload" "$hook" >/dev/null 2>&1 || true
 }
 
@@ -369,7 +376,7 @@ if [[ "$CONFIRMED_THIS_RUN" -gt 10 ]]; then
 
   # Send alert
   hook="${DISCORD_KEV_WEBHOOK:-$DISCORD_WEBHOOK}"
-  [[ -n "$hook" ]] && curl -fsS -m 10 -H 'Content-Type: application/json' \
+  [[ -n "$hook" ]] && curl_net -fsS -m 10 -H 'Content-Type: application/json' \
     -X POST -d "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" \
     "$hook" >/dev/null 2>&1 || true
 fi
