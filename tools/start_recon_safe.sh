@@ -4,7 +4,6 @@ set -euo pipefail
 TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$TOOL_DIR/.." && pwd)"
 CTL_SCRIPT="$REPO_DIR/scripts/recon_ctl.sh"
-[[ -f "$CTL_SCRIPT" ]] || CTL_SCRIPT="$HOME/recon_ctl.sh"
 
 cd "$REPO_DIR"
 

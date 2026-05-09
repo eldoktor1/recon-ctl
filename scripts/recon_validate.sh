@@ -65,14 +65,7 @@ BULK_LINES="${BULK_LINES:-5000}"
 BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-3}"
 RUN_TAKEOVER="${RUN_TAKEOVER:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-script_path() {
-  local name="$1"
-  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
-    printf '%s\n' "$SCRIPT_DIR/$name"
-  else
-    printf '%s\n' "$HOME/$name"
-  fi
-}
+script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover_hunter.sh)}"
 RUN_TRIAGE="${RUN_TRIAGE:-1}"
 TRIAGE_SCRIPT="${TRIAGE_SCRIPT:-$(script_path triage.sh)}"

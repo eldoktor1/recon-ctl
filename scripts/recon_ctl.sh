@@ -14,14 +14,7 @@ MODE_FILE="$HOME/.recon_mode"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-script_path() {
-  local name="$1"
-  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
-    printf '%s\n' "$SCRIPT_DIR/$name"
-  else
-    printf '%s\n' "$HOME/$name"
-  fi
-}
+script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 
 DAEMON="${DAEMON:-$(script_path recon_daemon.sh)}"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
@@ -76,7 +69,8 @@ cmd_stop() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
-    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei)\.sh' 2>/dev/null || true
+    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|fresh_confirm|schedule)\.sh' 2>/dev/null || true
+    pkill -f 'triage\.sh' 2>/dev/null || true
     pkill -f 'httpx|subfinder|assetfinder|nuclei.*-target' 2>/dev/null || true
     echo "Stopped."
   else
@@ -242,7 +236,6 @@ cmd_reset_queue() {
 }
 
 
-# V21_CTL_BEGIN — v2 commands (remove block to revert)
 V21_SCOPE_CHECK="$(script_path recon_scope_check.sh)"
 V21_KILL_DIR="$HOME/recon/state/kill"
 
@@ -351,19 +344,13 @@ cmd_v2() {
       ;;
   esac
 }
-# V21_CTL_END
 
-
-# V213_INSPECT_BEGIN — added by recon_v213 install (remove block to revert)
 cmd_inspect() {
   local host="${1:-}"
   if [[ -z "$host" ]]; then echo "Usage: recon_ctl inspect <host>"; return 1; fi
   bash "$(script_path recon_inspect.sh)" "$host"
 }
-# V213_INSPECT_END
 
-
-# V214_SCHEDULE_BEGIN
 cmd_schedule_status() {
   local tz="America/Los_Angeles"
   local dow hour min time_mins
@@ -399,7 +386,6 @@ cmd_schedule_check() {
   bash "$(script_path recon_schedule.sh)" && echo "Schedule check OK"
   echo "Mode is now: $(cat "$HOME/.recon_mode" 2>/dev/null || echo browse)"
 }
-# V214_SCHEDULE_END
 
 usage() {
 cat <<EOF
