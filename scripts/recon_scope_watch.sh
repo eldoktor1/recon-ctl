@@ -36,6 +36,8 @@ INBOX="$BASE_DIR/queue/inbox"
 STATE_DIR="$BASE_DIR/state"
 CACHE_DIR="$BASE_DIR/cache"
 LOCK_FILE="$STATE_DIR/scope_watch.lock"
+SCOPE_CHECK="${SCOPE_CHECK:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/recon_scope_check.sh}"
+PAYING_ONLY="${SCOPE_WATCH_PAYING_ONLY:-1}"
 
 PREV_SCOPE="$STATE_DIR/scope_prev.txt"
 CUR_SCOPE="$CACHE_DIR/scope_current.txt"
@@ -93,6 +95,13 @@ main() {
     | sed -E 's#[[:space:]]##g' \
     | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' \
     | sort -u > "$enriched.combined"
+
+  if [[ "$PAYING_ONLY" == "1" && -f "$SCOPE_CHECK" ]]; then
+    local paying_only; paying_only="$(mktemp)"
+    bash "$SCOPE_CHECK" --filter in-scope-paying < "$enriched.combined" > "$paying_only" 2>/dev/null || : > "$paying_only"
+    mv "$paying_only" "$enriched.combined"
+    log "Paying-program filter enabled for new scope"
+  fi
 
   local total; total="$(wc -l < "$enriched.combined" | tr -d ' ')"
 

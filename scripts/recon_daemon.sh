@@ -14,8 +14,8 @@
 #       * scope-watch-loop (detects new bounty programs)
 #       * takeover-watch  (long-running takeover hunter for re-checks)
 #   - Each loop: backoff on failure, NEVER dies permanently
-#   - Reads ~/.recon_mode each cycle for browse|night profile
-#   - Auto-downgrades night→browse on battery (saves laptop)
+#   - Reads ~/.recon_mode each cycle for browse|boost profile
+#   - Auto-downgrades boost/night to browse on battery (saves laptop)
 # =============================================================================
 set -uo pipefail
 IFS=$'\n\t'
@@ -26,27 +26,44 @@ LOG_DIR="$BASE_DIR/logs"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
 LOG_FILE="$LOG_DIR/recon_daemon.log"
 MODE_FILE="$HOME/.recon_mode"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-VALIDATE="${VALIDATE:-$HOME/recon_validate.sh}"
-DISCOVERY="${DISCOVERY:-$HOME/recon_discovery.sh}"
-HOT_SEED="${HOT_SEED:-$HOME/recon_hot_seed.sh}"
-SCOPE_WATCH="${SCOPE_WATCH:-$HOME/recon_scope_watch.sh}"
-TAKEOVER="${TAKEOVER:-$HOME/recon_takeover_hunter.sh}"
+script_path() {
+  local name="$1"
+  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/$name"
+  else
+    printf '%s\n' "$HOME/$name"
+  fi
+}
+
+VALIDATE="${VALIDATE:-$(script_path recon_validate.sh)}"
+DISCOVERY="${DISCOVERY:-$(script_path recon_discovery.sh)}"
+HOT_SEED="${HOT_SEED:-$(script_path recon_hot_seed.sh)}"
+SCOPE_WATCH="${SCOPE_WATCH:-$(script_path recon_scope_watch.sh)}"
+TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
+FRESH_CONFIRM="${FRESH_CONFIRM:-$(script_path recon_fresh_confirm.sh)}"
 
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
-PROXY_URL="${PROXY_URL:-socks5://127.0.0.1:9050}"
+PROXY_URL="${PROXY_URL:-socks5h://127.0.0.1:9050}"
 USE_PROXYCHAINS="${USE_PROXYCHAINS:-1}"
 
 run_scanner() {
-  sudo -u "$SCANNER_USER" env \
-    HOME="$HOME" \
-    BASE_DIR="$BASE_DIR" \
-    ES_URL="${ES_URL:-http://127.0.0.1:9200}" \
-    INDEX_NAME="${INDEX_NAME:-recon_alive}" \
-    USE_PROXYCHAINS="$USE_PROXYCHAINS" \
-    PROXY_URL="$PROXY_URL" \
-    "$@"
+  local env_args=(
+    HOME="$HOME"
+    BASE_DIR="$BASE_DIR"
+    ES_URL="${ES_URL:-http://127.0.0.1:9200}"
+    INDEX_NAME="${INDEX_NAME:-recon_alive}"
+    USE_PROXYCHAINS="$USE_PROXYCHAINS"
+    PROXY_URL="$PROXY_URL"
+    PATH="$PATH"
+  )
+  if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
+    env "${env_args[@]}" "$@"
+  else
+    sudo -n -u "$SCANNER_USER" env "${env_args[@]}" "$@"
+  fi
 }
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
@@ -78,9 +95,10 @@ load_profile() {
   local mode=""
   [[ -f "$MODE_FILE" ]] && mode="$(tr -d '[:space:]' < "$MODE_FILE" 2>/dev/null || true)"
   mode="${mode:-browse}"
+  [[ "$mode" == "night" ]] && mode="boost"
 
   # Auto-downgrade if on battery
-  if [[ "$mode" == "night" ]] && command -v acpi >/dev/null 2>&1; then
+  if [[ "$mode" == "boost" ]] && command -v acpi >/dev/null 2>&1; then
     if acpi -a 2>/dev/null | grep -qi 'off-line'; then
       log "On battery — forcing browse mode"
       mode="browse"
@@ -88,8 +106,8 @@ load_profile() {
   fi
 
   case "$mode" in
-    night)
-      # SAFE night profile (NOT the 4000rps catastrophe from prior build)
+    boost)
+      # SAFE boost profile (NOT the 4000rps catastrophe from prior build)
       export HTTPX_THREADS=120
       export HTTPX_RATE=200          # per worker; with parallelism ~600-800 rps total
       export HTTPX_TIMEOUT=10
@@ -183,10 +201,11 @@ SCOPE_DB_INTERVAL=${SCOPE_DB_INTERVAL:-86400}
 CVE_KEV_INTERVAL=${CVE_KEV_INTERVAL:-3600}
 CVE_NVD_INTERVAL=${CVE_NVD_INTERVAL:-86400}
 NUCLEI_INTERVAL=${NUCLEI_INTERVAL:-21600}
+FRESH_CONFIRM_INTERVAL=${FRESH_CONFIRM_INTERVAL:-900}
 
-V21_SCOPE_DB="${V21_SCOPE_DB:-$HOME/recon_scope_db.sh}"
-V21_CVE_INTEL="${V21_CVE_INTEL:-$HOME/recon_cve_intel.sh}"
-V21_NUCLEI="${V21_NUCLEI:-$HOME/recon_nuclei.sh}"
+V21_SCOPE_DB="${V21_SCOPE_DB:-$(script_path recon_scope_db.sh)}"
+V21_CVE_INTEL="${V21_CVE_INTEL:-$(script_path recon_cve_intel.sh)}"
+V21_NUCLEI="${V21_NUCLEI:-$(script_path recon_nuclei.sh)}"
 V21_KILL="$HOME/recon/state/kill"
 
 # V2.1 sub-loop wrappers — each respects killswitch
@@ -209,13 +228,17 @@ run_nuclei_v21() {
   fi
   run_scanner bash "$V21_NUCLEI"
 }
+run_fresh_confirm() {
+  v21_killed fresh && return 0
+  run_scanner bash "$FRESH_CONFIRM"
+}
 # V21_BLOCK_END
 
 # V214_SCHED_BEGIN — schedule-based mode switcher
 SCHEDULE_SLEEP=${SCHEDULE_SLEEP:-300}   # check every 5 minutes
-SCHEDULE_SCRIPT="${SCHEDULE_SCRIPT:-$HOME/recon_schedule.sh}"
+SCHEDULE_SCRIPT="${SCHEDULE_SCRIPT:-$(script_path recon_schedule.sh)}"
 run_schedule() {
-  [[ -x "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
+  [[ -f "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
 }
 # V214_SCHED_END
 run_validate()    { run_scanner bash "$VALIDATE";    }
@@ -229,9 +252,9 @@ run_takeover_watch() {
   run_scanner bash "$TAKEOVER" watch
 }
 
-BOT_SCRIPT="${BOT_SCRIPT:-$HOME/recon_discord_bot.sh}"
+BOT_SCRIPT="${BOT_SCRIPT:-$(script_path recon_discord_bot.sh)}"
 run_discord_bot() {
-  [[ -x "$BOT_SCRIPT" ]] || { log "[bot] not found/executable, skipping"; return 0; }
+  [[ -f "$BOT_SCRIPT" ]] || { log "[bot] not found, skipping"; return 0; }
   [[ -f "$HOME/.recon_discord_bot" && -f "$HOME/.recon_discord_allowed_uid" && -f "$HOME/.recon_discord_channel_id" ]] || {
     log "[bot] credentials not configured, skipping (see RUNBOOK.md setup)"
     return 0
@@ -261,6 +284,7 @@ run_discord_bot() {
   supervise_loop "cve-kev"   "CVE_KEV_INTERVAL"  run_cve_kev    &
   supervise_loop "cve-nvd"   "CVE_NVD_INTERVAL"  run_cve_nvd    &
   supervise_loop "nuclei-v21" "NUCLEI_INTERVAL"  run_nuclei_v21 &
+  supervise_loop "fresh-confirm" "FRESH_CONFIRM_INTERVAL" run_fresh_confirm &
 
     # Long-running — supervised with simple restart loops
   (

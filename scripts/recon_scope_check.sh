@@ -176,19 +176,27 @@ batch_match() {
 # JSON formatter for batch output
 # =============================================================================
 to_json() {
-  awk -F'\t' '{
+  awk -F'\t' '
+    function esc(s) {
+      gsub(/\\/,"\\\\",s)
+      gsub(/"/,"\\\"",s)
+      gsub(/\r/,"",s)
+      gsub(/\t/,"\\t",s)
+      return s
+    }
+  {
     # field order: host  in  out  pays  program  platform  pattern  out_program  out_pattern
     printf "{\"host\":\"%s\",\"in_scope\":%s,\"out_of_scope\":%s,\"pays\":%s",
-           $1, $2, $3, $4
-    if ($5 != "") printf ",\"program\":\"%s\"", $5
+           esc($1), $2, $3, $4
+    if ($5 != "") printf ",\"program\":\"%s\"", esc($5)
     else          printf ",\"program\":null"
-    if ($6 != "") printf ",\"platform\":\"%s\"", $6
+    if ($6 != "") printf ",\"platform\":\"%s\"", esc($6)
     else          printf ",\"platform\":null"
-    if ($7 != "") printf ",\"pattern\":\"%s\"", $7
+    if ($7 != "") printf ",\"pattern\":\"%s\"", esc($7)
     else          printf ",\"pattern\":null"
     # v2.1.3: hard-exclusion reason (uses out_pattern field $9 when out_program $8 is empty)
     if ($8 == "" && $9 != "" && $9 ~ /^hard-exclude:/) {
-      printf ",\"hard_excluded\":true,\"reason\":\"%s\"", $9
+      printf ",\"hard_excluded\":true,\"reason\":\"%s\"", esc($9)
     }
     print "}"
   }'

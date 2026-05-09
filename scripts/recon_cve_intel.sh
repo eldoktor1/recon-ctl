@@ -21,6 +21,8 @@ warn() { printf '[%s CVE WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
 die()  { printf '[%s CVE ERROR] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
 for c in curl jq python3; do command -v "$c" >/dev/null || die "missing: $c"; done
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
 
 CVE_DIR="${CVE_DIR:-$HOME/recon/cve}"
 RAW_DIR="$CVE_DIR/raw"
@@ -46,7 +48,7 @@ NVD_API="https://services.nvd.nist.gov/rest/json/cves/2.0"
 # =============================================================================
 fetch_kev() {
   log "Fetching CISA KEV"
-  if curl -fsSL -m 30 "$KEV_URL" -o "$CVE_DIR/kev.json.tmp"; then
+  if curl_net -fsSL -m 30 "$KEV_URL" -o "$CVE_DIR/kev.json.tmp"; then
     if jq -e '.vulnerabilities | length > 0' "$CVE_DIR/kev.json.tmp" >/dev/null 2>&1; then
       mv "$CVE_DIR/kev.json.tmp" "$CVE_DIR/kev.json"
       log "KEV: $(jq '.vulnerabilities | length' "$CVE_DIR/kev.json") CVEs"
@@ -96,7 +98,7 @@ fetch_nvd() {
       # FIXED: -w '%{http_code}' returned concatenated codes when redirects happened.
       # Use --no-keepalive + only show http_code at end-of-final-request.
       # Also pipe stdin to avoid any inherited fd weirdness.
-      http_code="$(curl -sS -G -m 60 \
+      http_code="$(curl_net -sS -G -m 60 \
         --no-keepalive \
         --output "$RAW_DIR/.nvd_page.json" \
         --write-out '%{http_code}\n' \

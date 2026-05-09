@@ -20,6 +20,8 @@ warn() { printf '[%s SCOPE WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >
 die()  { printf '[%s SCOPE ERROR] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
 for c in curl jq; do command -v "$c" >/dev/null || die "missing: $c"; done
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
 
 SCOPE_DIR="${SCOPE_DIR:-$HOME/recon/scope}"
 RAW_DIR="$SCOPE_DIR/raw"
@@ -48,7 +50,7 @@ log "Fetching scope feeds"
 for platform in "${!FEEDS[@]}"; do
   url="${FEEDS[$platform]}"
   out="$RAW_DIR/${platform}.json"
-  if curl -fsSL -m 60 "$url" -o "${out}.tmp" 2>/dev/null; then
+  if curl_net -fsSL -m 60 "$url" -o "${out}.tmp" 2>/dev/null; then
     if jq -e 'type == "array" and length > 0' "${out}.tmp" >/dev/null 2>&1; then
       mv "${out}.tmp" "$out"
       log "  ok ${platform} ($(jq 'length' "$out") items)"

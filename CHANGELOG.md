@@ -1,5 +1,35 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## Unreleased
+
+### Added
+- Added `.gitattributes` to keep shell scripts and repo text files LF-normalized across Windows and Kali.
+- Added shared fail-closed network helper `scripts/recon_net.sh` using Tor SOCKS with remote DNS by default.
+- Added `scripts/recon_fresh_confirm.sh` for low-noise fresh confirmation on paying programs only.
+- Added CLI `fresh` command and Discord `!fresh` command for the fresh confirmed queue.
+- Added weekend boost schedule: Saturday/Sunday 3:00 AM-10:00 AM Pacific.
+- Added `docker/.env.example` for required Elasticsearch/Kibana secrets and heap tuning.
+
+### Changed
+- Renamed the faster operating mode from `night` to `boost`; `night` remains a compatibility alias.
+- Made safe startup and `recon_ctl start` refuse target-facing recon when secure preflight is missing or failing.
+- Made nuclei and fresh confirmation exclude VDP/unknown-pay targets by default.
+- Made scope-watch emit paying-program batches by default.
+- Resolved repo-managed script paths directly instead of relying on home-directory compatibility shims.
+- Bound Docker Elasticsearch/Kibana defaults to localhost in the repo compose file and documented the Windows LAN firewall model.
+- Updated the kill switch helper to allow only Windows-host Elasticsearch on port 9200 when needed.
+- Disabled live direct-egress leak testing by default in the kill switch checker.
+
+### Fixed
+- Routed Discord, CVE, scope feed, takeover HTTP/DNS, inspect, triage notification, and fresh-confirm outbound calls through the shared proxy helper where target/network-facing.
+- Moved the fresh-confirm lock into `~/recon/fresh` to avoid `reconrun`/`d0k` ownership friction in shared state.
+- Escaped scope-check JSON output fields so program names/patterns cannot break JSON formatting.
+
+### Verified
+- Kali/WSL can reach Windows Elasticsearch through the narrowed firewall rule.
+- Broad Docker Desktop Public firewall rules can be disabled while preserving Kali-to-ES access.
+- Paid-only CVE/nuclei flow filters in-scope VDP/unknown-pay targets out before scanning.
+
 ## v2.1.6-killswitch final hardening notes
 
 ### Added

@@ -37,6 +37,8 @@ BASE_DIR="${BASE_DIR:-$HOME/recon}"
 FB_DIR="${FB_DIR:-$BASE_DIR/firstblood}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 LOG_DIR="${LOG_DIR:-$BASE_DIR/logs}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
 
 CLAIM_FILE="$FB_DIR/takeovers_to_claim.tsv"
 WATCH_FILE="$FB_DIR/takeovers_watching.tsv"
@@ -188,6 +190,18 @@ load_fingerprints() {
 # =============================================================================
 multi_resolve_cname() {
   local host="$1"
+  if proxy_required; then
+    local cname
+    cname="$(doh_cname "$host")"
+    if [[ -n "$cname" ]]; then
+      printf '%s\tcname\tproxy-doh\n' "$cname"
+    elif doh_nxdomain "$host"; then
+      printf '%s\tnxdomain\tproxy-doh\n' "$host"
+    else
+      printf '\terr\t0/3\n'
+    fi
+    return 0
+  fi
   local r cname_target
   declare -A cname_votes nx_votes
   local total=0 dns_errs=0
@@ -232,6 +246,10 @@ multi_resolve_cname() {
 # Check if CNAME target itself NXDOMAINs (multi-resolver)
 target_nxdomains() {
   local target="$1"
+  if proxy_required; then
+    doh_nxdomain "$target"
+    return $?
+  fi
   local nxcount=0
   for r in "${RESOLVERS[@]}"; do
     local stat
@@ -239,6 +257,21 @@ target_nxdomains() {
     [[ "$stat" == "NXDOMAIN" ]] && nxcount=$((nxcount + 1))
   done
   [[ "$nxcount" -ge 2 ]]
+}
+
+doh_cname() {
+  local host="$1" resp
+  resp="$(curl_net -fsS -m "$DIG_TIMEOUT" -H 'accept: application/dns-json' \
+    "https://cloudflare-dns.com/dns-query?name=$host&type=CNAME" 2>/dev/null)" || return 1
+  echo "$resp" | jq -r '.Answer[]? | select(.type == 5) | .data' 2>/dev/null \
+    | sed 's/\.$//' | tail -1
+}
+
+doh_nxdomain() {
+  local host="$1" resp
+  resp="$(curl_net -fsS -m "$DIG_TIMEOUT" -H 'accept: application/dns-json' \
+    "https://cloudflare-dns.com/dns-query?name=$host&type=A" 2>/dev/null)" || return 1
+  [[ "$(echo "$resp" | jq -r '.Status // 2' 2>/dev/null)" == "3" ]]
 }
 
 # =============================================================================
@@ -269,7 +302,7 @@ http_fingerprint_check() {
 
   local body schemes=("https" "http")
   for scheme in "${schemes[@]}"; do
-    body="$(timeout "$HTTP_TIMEOUT" curl -sk -L --max-redirs 3 -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "$scheme://$host/" 2>/dev/null)"
+    body="$(curl_net -sk -L --max-redirs 3 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "$scheme://$host/" 2>/dev/null)"
     [[ -n "$body" ]] && break
   done
 
@@ -371,7 +404,7 @@ notify_takeover() {
       }]
     }')"
 
-  curl -fsS -m 15 -H 'Content-Type: application/json' \
+  curl_net -fsS -m 15 -H 'Content-Type: application/json' \
     -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 \
     || warn "Discord notify failed for $host"
 }
