@@ -1,6 +1,6 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
-## Unreleased
+## v2.2.0 — 2026-05-08 — Final clean deployment
 
 ### Added
 - Added `.gitattributes` to keep shell scripts and repo text files LF-normalized across Windows and Kali.
@@ -15,12 +15,16 @@
 - Made safe startup and `recon_ctl start` refuse target-facing recon when secure preflight is missing or failing.
 - Made nuclei and fresh confirmation exclude VDP/unknown-pay targets by default.
 - Made scope-watch emit paying-program batches by default.
-- Resolved repo-managed script paths directly instead of relying on home-directory compatibility shims.
+- **Removed home-directory fallback from `script_path()`** in `recon_daemon.sh`, `recon_ctl.sh`, and `recon_validate.sh`. Repo path is now the single source of truth; `~/recon_*.sh` compatibility symlinks can be removed.
+- **Removed home-directory fallback from `tools/start_recon_safe.sh`**; always uses repo `scripts/recon_ctl.sh`.
+- **Extended `recon_ctl stop`** to also kill `recon_fresh_confirm.sh`, `recon_schedule.sh`, and `triage.sh` processes.
+- Removed leftover version-block comment markers (`V21_BLOCK_BEGIN/END`, `V213_INSPECT_BEGIN/END`, `V214_SCHED_BEGIN/END`, `V21_CTL_BEGIN/END`) — code is fully integrated, markers were noise.
 - Bound Docker Elasticsearch/Kibana defaults to localhost in the repo compose file and documented the Windows LAN firewall model.
 - Updated the kill switch helper to allow only Windows-host Elasticsearch on port 9200 when needed.
 - Disabled live direct-egress leak testing by default in the kill switch checker.
 
 ### Fixed
+- Fixed `curl_net()` in `recon_net.sh`: previously called `ensure_proxy_ready()` which required `proxychains4` even though `curl_net` uses `curl --proxy`, not proxychains4. Now only checks the Tor SOCKS listener.
 - Routed Discord, CVE, scope feed, takeover HTTP/DNS, inspect, triage notification, and fresh-confirm outbound calls through the shared proxy helper where target/network-facing.
 - Moved the fresh-confirm lock into `~/recon/fresh` to avoid `reconrun`/`d0k` ownership friction in shared state.
 - Escaped scope-check JSON output fields so program names/patterns cannot break JSON formatting.
@@ -29,6 +33,15 @@
 - Kali/WSL can reach Windows Elasticsearch through the narrowed firewall rule.
 - Broad Docker Desktop Public firewall rules can be disabled while preserving Kali-to-ES access.
 - Paid-only CVE/nuclei flow filters in-scope VDP/unknown-pay targets out before scanning.
+
+### Deploy checklist
+- [ ] `cp docker/.env.example docker/.env` and fill in `ELASTIC_PASSWORD` and `KIBANA_PASSWORD`
+- [ ] Remove home-dir compat symlinks: `rm -f ~/recon_*.sh ~/triage.sh`
+- [ ] Verify `recon-start` alias in `~/.zshrc`: `alias recon-start='~/recon-pipeline/tools/start_recon_safe.sh'`
+- [ ] Update `C:\recon\start_recon_hidden.vbs` content (see RUNBOOK.md)
+- [ ] Verify preflight at `/usr/local/sbin/recon-safe-preflight` and sudoers rule
+- [ ] `tools/enable_recon_killswitch.sh` then `tools/check_recon_killswitch.sh`
+- [ ] `tools/start_recon_safe.sh` — final smoke test
 
 ## v2.1.6-killswitch final hardening notes
 

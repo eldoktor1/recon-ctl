@@ -2,20 +2,20 @@
 
 ## Current Stable Checkpoint
 
-    v2.1.6-killswitch
+    v2.2.0 — Final clean deployment
 
-This is the current stable recovery/hardening checkpoint.
+This is the final production-ready state.
 
 This version includes:
 
-- restored repo-managed recon scripts
-- restored daemon and Discord bot wiring
+- all scripts resolved from repo; no home-directory fallbacks
+- shared `recon_net.sh` fail-closed Tor proxy helper
+- fresh-confirm loop for paying-program candidates
 - safe hidden Windows autostart
 - local Elasticsearch support
 - target-facing scanners running under `reconrun`
 - nftables kill switch for IP leak prevention
 - noninteractive safe startup through preflight
-- documented recovery and sanity checks
 
 ## Core Architecture
 
@@ -44,22 +44,18 @@ This version includes:
 
 ## Golden Rule
 
-Do not start target-facing recon with plain:
-
-    ~/recon_ctl.sh start
-
-unless the kill switch has already been verified.
-
-Use only:
+Do not start target-facing recon without preflight. Only use:
 
     recon-start
 
 or:
 
-    cd ~/recon-pipeline
-    tools/start_recon_safe.sh
+    ~/recon-pipeline/tools/start_recon_safe.sh
 
 or let the hidden Windows task `ReconWatchdog` start it.
+
+Never call `recon_daemon.sh` or `recon_ctl.sh start` directly without
+verifying the kill switch first.
 
 ## Safe Startup
 
@@ -67,14 +63,15 @@ Preferred manual startup:
 
     recon-start
 
-The `recon-start` alias points to:
+The `recon-start` alias should point to:
 
-    cd ~/recon-pipeline && tools/start_recon_safe.sh
+    alias recon-start='~/recon-pipeline/tools/start_recon_safe.sh'
 
 The safe startup script does this:
 
     sudo -n /usr/local/sbin/recon-safe-preflight
-    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5h://127.0.0.1:9050 ~/recon_ctl.sh start
+    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5h://127.0.0.1:9050 \
+      ~/recon-pipeline/scripts/recon_ctl.sh start
 
 The preflight script:
 
@@ -194,22 +191,22 @@ Safe start:
 
 Health and status:
 
-    ~/recon_ctl.sh health
-    ~/recon_ctl.sh status
-    ~/recon_ctl.sh queue
-    ~/recon_ctl.sh top 20
-    ~/recon_ctl.sh takeovers
-    ~/recon_ctl.sh watching
-    ~/recon_ctl.sh logs 100
-    ~/recon_ctl.sh space
+    ~/recon-pipeline/scripts/recon_ctl.sh health
+    ~/recon-pipeline/scripts/recon_ctl.sh status
+    ~/recon-pipeline/scripts/recon_ctl.sh queue
+    ~/recon-pipeline/scripts/recon_ctl.sh top 20
+    ~/recon-pipeline/scripts/recon_ctl.sh takeovers
+    ~/recon-pipeline/scripts/recon_ctl.sh watching
+    ~/recon-pipeline/scripts/recon_ctl.sh logs 100
+    ~/recon-pipeline/scripts/recon_ctl.sh space
 
 Stop:
 
-    ~/recon_ctl.sh stop
+    ~/recon-pipeline/scripts/recon_ctl.sh stop
 
 Clean:
 
-    ~/recon_ctl.sh clean
+    ~/recon-pipeline/scripts/recon_ctl.sh clean
 
 ## Mode Switching
 
@@ -220,14 +217,14 @@ Mode source of truth:
 Used by:
 
 - Discord `!mode`
-- CLI `~/recon_ctl.sh mode`
+- CLI `~/recon-pipeline/scripts/recon_ctl.sh mode`
 - scheduler `recon_schedule.sh`
 - daemon cycles
 
 CLI:
 
-    ~/recon_ctl.sh mode browse
-    ~/recon_ctl.sh mode night
+    ~/recon-pipeline/scripts/recon_ctl.sh mode browse
+    ~/recon-pipeline/scripts/recon_ctl.sh mode night
 
 Discord:
 
@@ -279,7 +276,7 @@ Run:
     cd ~/recon-pipeline
     git status --short
     tools/check_recon_killswitch.sh
-    ~/recon_ctl.sh health
+    ~/recon-pipeline/scripts/recon_ctl.sh health
 
 Confirm no scanner-heavy processes are owned by `d0k`:
 
@@ -340,19 +337,19 @@ Priority prefixes:
 
 Check queue:
 
-    ~/recon_ctl.sh queue
+    ~/recon-pipeline/scripts/recon_ctl.sh queue
 
 If inbox reaches the cap, discovery may pause. That is expected behavior.
 
 If processing is stuck for a long time:
 
-    ~/recon_ctl.sh stop
+    ~/recon-pipeline/scripts/recon_ctl.sh stop
     recon-start
 
 Nuclear reset:
 
-    ~/recon_ctl.sh stop
-    ~/recon_ctl.sh reset-queue
+    ~/recon-pipeline/scripts/recon_ctl.sh stop
+    ~/recon-pipeline/scripts/recon_ctl.sh reset-queue
     recon-start
 
 ## Takeover Hunter
@@ -371,7 +368,7 @@ It runs in two modes:
 
 Manual check:
 
-    ~/recon_takeover_hunter.sh check api.example.com
+    ~/recon-pipeline/scripts/recon_takeover_hunter.sh check api.example.com
 
 Files:
 
@@ -388,15 +385,15 @@ When HIGH or CRITICAL appears:
 5. Submit quickly.
 6. Mark submission:
 
-    ~/recon_ctl.sh submit <host> takeover pending
+    ~/recon-pipeline/scripts/recon_ctl.sh submit <host> takeover pending
 
 ## Submission Dedup
 
 After submitting a finding:
 
-    ~/recon_ctl.sh submit www.example.com xss accepted
-    ~/recon_ctl.sh submit api.foo.com sqli pending
-    ~/recon_ctl.sh submit grafana.bar.io rce duplicate
+    ~/recon-pipeline/scripts/recon_ctl.sh submit www.example.com xss accepted
+    ~/recon-pipeline/scripts/recon_ctl.sh submit api.foo.com sqli pending
+    ~/recon-pipeline/scripts/recon_ctl.sh submit grafana.bar.io rce duplicate
 
 This appends to:
 
@@ -410,15 +407,14 @@ Effects:
 
 Inspect:
 
-    ~/recon_ctl.sh dupes
-    ~/recon_ctl.sh dupes example.com
+    ~/recon-pipeline/scripts/recon_ctl.sh dupes
+    ~/recon-pipeline/scripts/recon_ctl.sh dupes example.com
 
 ## Files and Locations
 
 | Path | Purpose |
 |---|---|
-| `~/recon-pipeline/scripts/` | Repo-managed scripts |
-| `~/recon_*.sh`, `~/triage.sh` | Compatibility symlinks to repo scripts |
+| `~/recon-pipeline/scripts/` | Repo-managed scripts (single source of truth) |
 | `~/recon-pipeline/tools/start_recon_safe.sh` | Safe manual/Windows startup wrapper |
 | `~/recon-pipeline/tools/enable_recon_killswitch.sh` | Manual nft kill switch restore helper |
 | `~/recon-pipeline/tools/check_recon_killswitch.sh` | Manual kill switch sanity check |
@@ -431,7 +427,7 @@ Inspect:
 | `~/.recon_discord_allowed_uid` | Allowed Discord user ID |
 | `~/.recon_discord_channel_id` | Allowed Discord channel ID |
 | `~/.recon_submissions.jsonl` | Submission history |
-| `~/.recon_mode` | browse or night |
+| `~/.recon_mode` | `browse` or `boost` (scheduler manages automatically; set manually to override) |
 | `~/recon/queue/inbox/` | Pending batches |
 | `~/recon/queue/processing/` | In-flight batches |
 | `~/recon/queue/done/` | Completed httpx jsonl files |
@@ -447,7 +443,7 @@ Inspect:
 
 Check:
 
-    ~/recon_ctl.sh logs 200
+    ~/recon-pipeline/scripts/recon_ctl.sh logs 200
 
 Look for:
 
@@ -517,7 +513,7 @@ This is bad for target-facing scanner-heavy processes.
 
 Stop recon:
 
-    ~/recon_ctl.sh stop
+    ~/recon-pipeline/scripts/recon_ctl.sh stop
 
 Kill leftovers:
 

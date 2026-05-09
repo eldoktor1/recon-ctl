@@ -28,14 +28,7 @@ LOG_FILE="$LOG_DIR/recon_daemon.log"
 MODE_FILE="$HOME/.recon_mode"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-script_path() {
-  local name="$1"
-  if [[ -x "$SCRIPT_DIR/$name" || -f "$SCRIPT_DIR/$name" ]]; then
-    printf '%s\n' "$SCRIPT_DIR/$name"
-  else
-    printf '%s\n' "$HOME/$name"
-  fi
-}
+script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 
 VALIDATE="${VALIDATE:-$(script_path recon_validate.sh)}"
 DISCOVERY="${DISCOVERY:-$(script_path recon_discovery.sh)}"
@@ -196,7 +189,6 @@ export DISCORD_WEBHOOK
 export PATH="$PATH:$HOME/go/bin:/usr/local/bin:/usr/local/go/bin"
 
 
-# V21_BLOCK_BEGIN — added by recon_v21 install (remove block to revert)
 SCOPE_DB_INTERVAL=${SCOPE_DB_INTERVAL:-86400}
 CVE_KEV_INTERVAL=${CVE_KEV_INTERVAL:-3600}
 CVE_NVD_INTERVAL=${CVE_NVD_INTERVAL:-86400}
@@ -232,15 +224,13 @@ run_fresh_confirm() {
   v21_killed fresh && return 0
   run_scanner bash "$FRESH_CONFIRM"
 }
-# V21_BLOCK_END
 
-# V214_SCHED_BEGIN — schedule-based mode switcher
 SCHEDULE_SLEEP=${SCHEDULE_SLEEP:-300}   # check every 5 minutes
 SCHEDULE_SCRIPT="${SCHEDULE_SCRIPT:-$(script_path recon_schedule.sh)}"
 run_schedule() {
   [[ -f "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
 }
-# V214_SCHED_END
+
 run_validate()    { run_scanner bash "$VALIDATE";    }
 run_discovery()   { run_scanner bash "$DISCOVERY";   }
 run_hot_seed()    { bash "$HOT_SEED";    }
