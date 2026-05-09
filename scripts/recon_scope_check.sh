@@ -43,12 +43,11 @@ fi
 # Awk engine — load patterns once, match many hosts
 # =============================================================================
 # Output format per line: TAB-separated
-#   host  in_scope  out_of_scope  pays  program  platform  pattern
+#   host  in_scope  out_of_scope  pays  program  platform  pattern  out_program  out_pattern  payout_tier
 # in_scope/out_of_scope/pays = "true"/"false"
-# program/platform/pattern = "" if no match
+# program/platform/pattern/payout_tier = "" if no match
 #
-# Sentinels:
-#   IN-LOOP file 1 (outscope), file 2 (inscope), file 3 (hosts)
+# v2.2: payout_tier added (10th column). Old TSVs without 5th column → "mid" if pays=true.
 # =============================================================================
 batch_match() {
   awk -v out_tsv="$OUTSCOPE_TSV" -v in_tsv="$INSCOPE_TSV" '
@@ -74,6 +73,12 @@ batch_match() {
           in_prog[in_n] = (n >= 2 ? f[2] : "")
           in_plat[in_n] = (n >= 3 ? f[3] : "")
           in_pays[in_n] = (n >= 4 ? f[4] : "false")
+          # v2.2: payout_tier column. Pre-v2.2 TSVs lack this — default to mid if paying else none.
+          if (n >= 5 && f[5] != "") {
+            in_tier[in_n] = f[5]
+          } else {
+            in_tier[in_n] = (in_pays[in_n] == "true" ? "mid" : "none")
+          }
         }
       }
       close(in_tsv)
@@ -119,7 +124,7 @@ batch_match() {
       }
 
       if (hard_excluded) {
-        printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\n", host, hard_reason
+        printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\tnone\n", host, hard_reason
         next
       }
 
@@ -132,24 +137,33 @@ batch_match() {
         }
       }
 
-      # In-scope check — prefer paying matches
-      best_in = ""; best_pays = "false"
+      # In-scope check — prefer the highest-tier paying match (elite > high > mid > low > none)
+      best_in = ""; best_pays = "false"; best_tier = "none"
       for (i = 1; i <= in_n; i++) {
         if (host_matches(host, in_pat[i])) {
-          if (best_in == "" || (in_pays[i] == "true" && best_pays != "true")) {
-            best_in = in_pat[i] "|" in_prog[i] "|" in_plat[i]
+          # tier rank: lower number = better
+          this_rank = (in_tier[i] == "elite" ? 0 :
+                       in_tier[i] == "high"  ? 1 :
+                       in_tier[i] == "mid"   ? 2 :
+                       in_tier[i] == "low"   ? 3 : 4)
+          best_rank = (best_tier == "elite" ? 0 :
+                       best_tier == "high"  ? 1 :
+                       best_tier == "mid"   ? 2 :
+                       best_tier == "low"   ? 3 : 4)
+          if (best_in == "" || this_rank < best_rank) {
+            best_in   = in_pat[i] "|" in_prog[i] "|" in_plat[i]
             best_pays = in_pays[i]
-            if (best_pays == "true") break  # paying match is sufficient
+            best_tier = in_tier[i]
+            if (best_tier == "elite") break  # cannot beat elite
           }
         }
       }
 
-      # Emit TSV: host  in_scope  out_of_scope  pays  program  platform  pattern  out_program  out_pattern
       # Out-of-scope OVERRIDES in-scope: a host matching both is effectively out-of-scope
-      # (in_scope flag still flipped false in this case so downstream filters work)
       if (out_match != "") {
-        in_scope = "false"
+        in_scope  = "false"
         best_pays = "false"
+        best_tier = "none"
       } else {
         in_scope = (best_in != "" ? "true" : "false")
       }
@@ -166,8 +180,9 @@ batch_match() {
         out_pattern = parts[1]; out_program = parts[2]; out_platform = parts[3]
       }
 
-      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-             host, in_scope, out_of_scope, best_pays, program, platform, pattern, out_program, out_pattern
+      # 10-column TSV: host in out pays program platform pattern out_program out_pattern payout_tier
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+             host, in_scope, out_of_scope, best_pays, program, platform, pattern, out_program, out_pattern, best_tier
     }
   '
 }
@@ -185,7 +200,7 @@ to_json() {
       return s
     }
   {
-    # field order: host  in  out  pays  program  platform  pattern  out_program  out_pattern
+    # field order: host  in  out  pays  program  platform  pattern  out_program  out_pattern  payout_tier
     printf "{\"host\":\"%s\",\"in_scope\":%s,\"out_of_scope\":%s,\"pays\":%s",
            esc($1), $2, $3, $4
     if ($5 != "") printf ",\"program\":\"%s\"", esc($5)
@@ -194,6 +209,9 @@ to_json() {
     else          printf ",\"platform\":null"
     if ($7 != "") printf ",\"pattern\":\"%s\"", esc($7)
     else          printf ",\"pattern\":null"
+    # v2.2: payout_tier
+    tier = ($10 != "" ? $10 : "none")
+    printf ",\"payout_tier\":\"%s\"", tier
     # v2.1.3: hard-exclusion reason (uses out_pattern field $9 when out_program $8 is empty)
     if ($8 == "" && $9 != "" && $9 ~ /^hard-exclude:/) {
       printf ",\"hard_excluded\":true,\"reason\":\"%s\"", esc($9)

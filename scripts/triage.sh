@@ -8,8 +8,21 @@
 #   - 80+ tech signals (kept from prior + added: ActiveMQ, ConnectWise, Metabase,
 #     NiFi, Superset, SonarQube, Jupyter, Telerik, Veeam, Keycloak, Splunk,
 #     Zimbra, Harbor, pgAdmin, Hasura)
-#   - Cluster dedup unchanged (it works)
+#   - Cluster dedup (it works)
 #   - LOOKBACK_DAYS bug fix from prior version
+#
+# v2.2 BRAIN UPGRADE:
+#   - Scope-aware scoring (reads recon_scope_check --batch output)
+#       pays:        +PAYS_BONUS
+#       payout_tier: low/mid/high/elite stacked bonuses
+#       hard-excluded hosts: dropped entirely (no Discord, no agent target)
+#       out-of-scope: heavy penalty (effectively filters from output)
+#   - KEV-aware scoring (reads ~/recon/cve/kev_targets.jsonl)
+#       host with active KEV CVE: +KEV_BONUS, attaches matched_cves
+#   - First-blood-on-payday mega bonus: novel + confirmed-tech + paying
+#   - Output sorted by (tier_rank, score, novelty_bonus)
+#   - Discord embeds now surface program / platform / payout_tier / KEV CVEs
+#   - agent_targets.jsonl gets program, platform, payout_tier, kev_* fields
 # =============================================================================
 set -uo pipefail
 IFS=$'\n\t'
@@ -27,6 +40,7 @@ source "$SCRIPT_DIR/recon_net.sh"
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 TRIAGE_DIR="${TRIAGE_DIR:-$BASE_DIR/triage}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
+SCOPE_DIR="${SCOPE_DIR:-$BASE_DIR/scope}"
 LOCK_FILE="${LOCK_FILE:-$STATE_DIR/triage.lock}"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
@@ -52,6 +66,22 @@ ES_PAGE_SIZE="${ES_PAGE_SIZE:-5000}"
 # Submissions file — JSONL: {host,root_domain,vuln_class,cve,status,submitted_date}
 SUBMISSIONS_FILE="${SUBMISSIONS_FILE:-$HOME/.recon_submissions.jsonl}"
 [[ -f "$SUBMISSIONS_FILE" ]] || touch "$SUBMISSIONS_FILE"
+
+# === v2.3 brain inputs (all optional — graceful fallback if missing) =========
+# Repo path resolution (v2.2.0 removed home-dir fallback — single source of truth)
+_TRIAGE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCOPE_CHECK="${SCOPE_CHECK:-$_TRIAGE_SCRIPT_DIR/recon_scope_check.sh}"
+KEV_TARGETS="${KEV_TARGETS:-$HOME/recon/cve/kev_targets.jsonl}"
+
+# Score bonuses (override via env if you want to retune)
+PAYS_BONUS="${PAYS_BONUS:-2}"
+TIER_LOW_BONUS="${TIER_LOW_BONUS:-1}"
+TIER_MID_BONUS="${TIER_MID_BONUS:-3}"
+TIER_HIGH_BONUS="${TIER_HIGH_BONUS:-5}"
+TIER_ELITE_BONUS="${TIER_ELITE_BONUS:-8}"
+KEV_BONUS="${KEV_BONUS:-5}"
+FRESHBLOOD_PAYDAY_BONUS="${FRESHBLOOD_PAYDAY_BONUS:-5}"
+OOS_PENALTY="${OOS_PENALTY:--10}"
 
 # Discord
 DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
@@ -471,6 +501,121 @@ score_raw() {
 }
 
 # =============================================================================
+# Phase 1.5: Scope + KEV enrichment (BRAIN v2.2)
+#
+#   Input: scored.jsonl (one record per host)
+#   For each host we attach:
+#       in_scope, out_of_scope, hard_excluded, pays, program, platform,
+#       payout_tier, payout_bonus, kev_match, kev_signal, kev_cves[],
+#       kev_cvss_max, kev_bonus, freshblood_payday_bonus
+#   Score is updated:  effective_score = score + payout_bonus + kev_bonus
+#                                       + freshblood_payday_bonus + oos_penalty
+#   Hard-excluded hosts are dropped entirely.
+#   Out-of-scope hosts get OOS_PENALTY (drops them below threshold by default).
+# =============================================================================
+apply_scope_kev_enrichment() {
+  local in="$1" out="$2"
+  [[ ! -s "$in" ]] && { : > "$out"; return 0; }
+
+  # ---- Build host->scope JSON map (single batch awk pass) ------------------
+  local scope_map; scope_map="$(mktemp)"
+  if [[ -x "$SCOPE_CHECK" ]] && [[ -s "${SCOPE_DIR:-$HOME/recon/scope}/inscope_patterns.tsv" ]]; then
+    jq -r '.host' "$in" 2>/dev/null \
+      | "$SCOPE_CHECK" --batch 2>/dev/null \
+      | jq -sc 'map({(.host): .}) | add // {}' > "$scope_map" 2>/dev/null \
+      || echo '{}' > "$scope_map"
+  else
+    echo '{}' > "$scope_map"
+    warn "Scope DB not available — running without scope enrichment"
+  fi
+
+  # ---- Build host->KEV JSON map -------------------------------------------
+  local kev_map; kev_map="$(mktemp)"
+  if [[ -s "$KEV_TARGETS" ]]; then
+    jq -sc 'map({(.host): {signal:.matched_signal,
+                            cves:[.matched_cves[]? | select(.kev) | {id, cvss}],
+                            cvss_max:([.matched_cves[]?.cvss] | max // 0)}})
+            | add // {}' "$KEV_TARGETS" > "$kev_map" 2>/dev/null \
+      || echo '{}' > "$kev_map"
+  else
+    echo '{}' > "$kev_map"
+  fi
+
+  # ---- Apply enrichment + score adjustments --------------------------------
+  jq -c \
+    --slurpfile scopes  "$scope_map" \
+    --slurpfile kevs    "$kev_map" \
+    --argjson pays_bonus           "$PAYS_BONUS" \
+    --argjson tier_low_bonus       "$TIER_LOW_BONUS" \
+    --argjson tier_mid_bonus       "$TIER_MID_BONUS" \
+    --argjson tier_high_bonus      "$TIER_HIGH_BONUS" \
+    --argjson tier_elite_bonus     "$TIER_ELITE_BONUS" \
+    --argjson kev_bonus            "$KEV_BONUS" \
+    --argjson freshblood_bonus     "$FRESHBLOOD_PAYDAY_BONUS" \
+    --argjson oos_penalty          "$OOS_PENALTY" \
+    '
+    ($scopes[0] // {}) as $S |
+    ($kevs[0]   // {}) as $K |
+    . as $r |
+    ($S[$r.host] // {}) as $s |
+    ($K[$r.host] // {}) as $k |
+
+    # ---- Hard-exclude → emit nothing -----
+    if ($s.hard_excluded // false) then empty
+    else
+      # Tier bonus
+      ($s.payout_tier // "none") as $tier |
+      (if   $tier == "elite" then $tier_elite_bonus
+       elif $tier == "high"  then $tier_high_bonus
+       elif $tier == "mid"   then $tier_mid_bonus
+       elif $tier == "low"   then $tier_low_bonus
+       else 0 end) as $tier_bonus |
+
+      # pays bonus (separate small kicker to reward any bounty over none)
+      (if ($s.pays // false) then $pays_bonus else 0 end) as $pays_b |
+
+      # KEV bonus if host appears in kev_targets
+      (if ($k.signal // null) != null then $kev_bonus else 0 end) as $kev_b |
+
+      # First-blood-on-payday mega bonus:
+      #   novel (<24h)  AND  confirmed-tech (pattern_only literal false)  AND  paying
+      # NOTE: avoid `// true` — the `//` operator treats false as missing, inverting intent.
+      ((($r.age_hours // 99999) <= 24)
+        and ($r.pattern_only == false)
+        and (($s.pays // false) == true)) as $is_freshblood_payday |
+      (if $is_freshblood_payday then $freshblood_bonus else 0 end) as $fb_b |
+
+      # Out-of-scope penalty
+      (if ($s.out_of_scope // false) then $oos_penalty else 0 end) as $oos_b |
+
+      ($r.score + $tier_bonus + $pays_b + $kev_b + $fb_b + $oos_b) as $eff |
+
+      $r + {
+        score: $eff,
+        base_score_pre_brain: $r.score,
+        in_scope:        ($s.in_scope     // false),
+        out_of_scope:    ($s.out_of_scope // false),
+        pays:            ($s.pays         // false),
+        program:         ($s.program      // null),
+        platform:        ($s.platform     // null),
+        payout_tier:     $tier,
+        payout_bonus:    ($tier_bonus + $pays_b),
+        kev_match:       (($k.signal // null) != null),
+        kev_signal:      ($k.signal        // null),
+        kev_cves:        ($k.cves          // []),
+        kev_cvss_max:    ($k.cvss_max      // 0),
+        kev_bonus:       $kev_b,
+        freshblood_payday: $is_freshblood_payday,
+        freshblood_payday_bonus: $fb_b,
+        oos_penalty_applied: $oos_b
+      }
+    end
+  ' "$in" > "$out" 2>/dev/null || cp "$in" "$out"
+
+  rm -f "$scope_map" "$kev_map"
+}
+
+# =============================================================================
 # Phase 2: Cluster dedup + submission dampening
 # =============================================================================
 apply_cluster_and_submission() {
@@ -520,9 +665,17 @@ apply_cluster_and_submission() {
         elif .score >= '"$P1_THRESHOLD"' then "P1"
         elif .score >= '"$P2_THRESHOLD"' then "P2"
         else "P3" end
+      ),
+      tier_rank: (
+        if   (.payout_tier // "none") == "elite" then 0
+        elif (.payout_tier // "none") == "high"  then 1
+        elif (.payout_tier // "none") == "mid"   then 2
+        elif (.payout_tier // "none") == "low"   then 3
+        else 4 end
       )
     }) |
-    sort_by(-.score) |
+    # Sort: best tier first, then score desc, then novelty desc.
+    sort_by([.tier_rank, -.score, -(.novelty_bonus // 0)]) |
     .[]
   ' "$in" > "$out" 2>/dev/null || true
 
@@ -539,11 +692,20 @@ update_es_scores() {
   jq -c --arg idx "$INDEX_NAME" '
     {"update":{"_index":$idx,"_id":.host}},
     {"doc":{
-      "triage_score": .score,
+      "triage_score":    .score,
       "triage_priority": .priority,
-      "triage_signals": (.signals | map(select(startswith("penalty:") | not))),
-      "triage_classes": .vuln_classes,
-      "triage_at": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+      "triage_signals":  (.signals | map(select(startswith("penalty:") | not))),
+      "triage_classes":  .vuln_classes,
+      "triage_at":       (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      "triage_program":     (.program // null),
+      "triage_platform":    (.platform // null),
+      "triage_payout_tier": (.payout_tier // "none"),
+      "triage_pays":        (.pays // false),
+      "triage_in_scope":    (.in_scope // false),
+      "triage_out_of_scope":(.out_of_scope // false),
+      "triage_kev_match":   (.kev_match // false),
+      "triage_kev_signal":  (.kev_signal // null),
+      "triage_kev_cves":    [(.kev_cves // [])[].id]
     }}
   ' "$in" > "$tmp"
 
@@ -571,20 +733,33 @@ generate_report() {
   p1="$(jq -r 'select(.priority=="P1")' "$in" | wc -l | tr -d ' ')"
   p2="$(jq -r 'select(.priority=="P2")' "$in" | wc -l | tr -d ' ')"
 
+  local elite_n high_n mid_n kev_n fb_n
+  elite_n="$(jq -r 'select((.payout_tier // "none")=="elite")' "$in" 2>/dev/null | wc -l | tr -d ' ')"
+  high_n="$(jq -r 'select((.payout_tier // "none")=="high")'   "$in" 2>/dev/null | wc -l | tr -d ' ')"
+  mid_n="$(jq -r  'select((.payout_tier // "none")=="mid")'    "$in" 2>/dev/null | wc -l | tr -d ' ')"
+  kev_n="$(jq -r  'select(.kev_match // false)'                "$in" 2>/dev/null | wc -l | tr -d ' ')"
+  fb_n="$(jq -r   'select(.freshblood_payday // false)'        "$in" 2>/dev/null | wc -l | tr -d ' ')"
+
   {
     printf '# Triage Report — %s\n\n' "$RUN_TS"
-    printf '**Total:** %s | **P0:** %s | **P1:** %s | **P2:** %s\n\n' "$total" "$p0" "$p1" "$p2"
+    printf '**Total:** %s | **P0:** %s | **P1:** %s | **P2:** %s\n' "$total" "$p0" "$p1" "$p2"
+    printf '**Tiers:** elite=%s high=%s mid=%s | **KEV matches:** %s | **🩸 fresh-blood-payday:** %s\n\n' \
+           "$elite_n" "$high_n" "$mid_n" "$kev_n" "$fb_n"
     for tier in P0 P1 P2; do
       local count; count="$(jq -r --arg t "$tier" 'select(.priority==$t)' "$in" | wc -l | tr -d ' ')"
       [[ "$count" -eq 0 ]] && continue
       printf '## %s — %s targets\n\n' "$tier" "$count"
       jq -r --arg t "$tier" '
         select(.priority==$t) |
-        "### [" + (.score|tostring) + "] " + (.url // .host) + "\n" +
+        "### [" + (.score|tostring) + "·" + (.payout_tier // "none") + "] " + (.url // .host) + "\n" +
+        (if .program then "- **Program:** " + .program + " (" + (.platform // "?") + ", payout=" + (.payout_tier // "none") + ")\n" else "- **Program:** unknown / unmatched scope\n" end) +
         "- **Status/Port:** " + (.status_code|tostring) + " / " + (.port|tostring) + "\n" +
         (if (.tech | length) > 0 then "- **Tech:** " + (.tech | join(", ")) + "\n" else "" end) +
         (if .title != "" then "- **Title:** " + .title + "\n" else "" end) +
         (if .age_hours != null and .age_hours <= 168 then "- **Age:** " + (.age_hours|tostring) + "h (NOVEL — first-blood candidate)\n" else "" end) +
+        (if (.freshblood_payday // false) then "- 🩸 **FRESH-BLOOD ON PAYDAY** (+" + ((.freshblood_payday_bonus // 0)|tostring) + ")\n" else "" end) +
+        (if (.kev_match // false) then "- 🎯 **KEV MATCH:** " + (.kev_signal // "?") + " — " + ([(.kev_cves // [])[].id] | join(", ") | .[0:200]) + " (CVSS≤" + ((.kev_cvss_max // 0)|tostring) + ")\n" else "" end) +
+        (if (.out_of_scope // false) then "- ❌ **OUT OF SCOPE** (penalty applied — should not appear; report bug)\n" else "" end) +
         (if (.already_submitted // false) then "- ⚠️ **Already submitted** — duplicate risk\n" else "" end) +
         "- **Signals:** " + (.signals | join(", ")) + "\n" +
         "- **Classes:** " + (.vuln_classes | join(", ")) + "\n" +
@@ -623,26 +798,43 @@ notify_discord_findings() {
 
   log "Discord: $fc fresh findings"
   local payload
-  payload="$(jq -s '{
-    content: ("**" + (length|tostring) + " new high-priority finding(s)** — feed to agent"),
-    embeds: [.[] | {
-      title: ("[" + .priority + "·" + (.score|tostring) + "] " + (.host | .[0:240])),
-      url: (if (.url // "") != "" then .url else null end),
-      color: (if .priority == "P0" then 10038562 else 15105570 end),
-      description: ("**" + (.signals | map(select(startswith("penalty:") | not)) | join(" · ") | .[0:150]) + "**" +
-                    (if .age_hours and .age_hours <= 168 then "\n🆕 NOVEL: " + (.age_hours|tostring) + "h old" else "" end)),
-      fields: [
-        {name:"Tech", value:(if (.tech|length)>0 then (.tech|join(", ")|.[0:500]) else "Not detected" end), inline:false},
-        {name:"Status", value:(.status_code|tostring), inline:true},
-        {name:"Port", value:(.port|tostring), inline:true},
-        (if .title != "" then {name:"Title", value:(.title|.[0:80]), inline:true} else empty end),
-        {name:"Classes", value:(.vuln_classes | map(select(. != "low-priority" and . != "low-signal")) | join(", ") | .[0:200]), inline:false},
-        (if (.actions|length)>0 then {name:"Next action", value:(.actions[0]|.[0:900]), inline:false} else empty end),
-        (if (.actions|length)>1 then {name:"Also", value:(.actions[1]|.[0:400]), inline:false} else empty end)
-      ],
-      footer:{text:("triage · " + .root_domain)}
-    }]
-  }' "$fresh")"
+  # Sort fresh findings by [tier_rank, -score, -novelty] before building embeds
+  payload="$(jq -s '
+    sort_by([(.tier_rank // 4), -(.score // 0), -((.novelty_bonus // 0))]) |
+    {
+      content: ("**" + (length|tostring) + " new high-priority finding(s)** — feed to agent"),
+      embeds: [.[] | {
+        title: ("[" + .priority + "·" + (.score|tostring) + "·" + (.payout_tier // "none") + "] " + (.host | .[0:230])),
+        url: (if (.url // "") != "" then .url else null end),
+        color: (
+          if (.kev_match // false) then 10038562            # red — active KEV
+          elif (.payout_tier // "none") == "elite" then 16711680
+          elif (.payout_tier // "none") == "high"  then 15844367
+          elif .priority == "P0" then 15105570
+          else 5814783 end
+        ),
+        description: (
+          (if (.kev_match // false) then "🎯 **KEV: " + (.kev_signal // "?") + "**\n" else "" end) +
+          (if (.freshblood_payday // false) then "🩸 **FRESH-BLOOD ON PAYDAY** (novel + tech + paying)\n" else "" end) +
+          "**" + (.signals | map(select(startswith("penalty:") | not)) | join(" · ") | .[0:140]) + "**" +
+          (if .age_hours and .age_hours <= 168 then "\n🆕 NOVEL: " + (.age_hours|tostring) + "h old" else "" end)
+        ),
+        fields: ([
+          (if .program then {name:"Program", value:(.program + " · " + (.platform // "?") + " · payout=" + (.payout_tier // "none")), inline:false} else {name:"Program", value:"unknown / unmatched scope", inline:false} end),
+          {name:"Tech",   value:(if (.tech|length)>0 then (.tech|join(", ")|.[0:500]) else "Not detected" end), inline:false},
+          {name:"Status", value:(.status_code|tostring), inline:true},
+          {name:"Port",   value:(.port|tostring), inline:true},
+          (if .title != "" then {name:"Title", value:(.title|.[0:80]), inline:true} else empty end),
+          (if (.kev_match // false) then
+            {name:"KEV CVEs", value:([(.kev_cves // [])[].id] | join(", ") | .[0:300] | (if . == "" then "—" else . end)), inline:false}
+           else empty end),
+          {name:"Classes", value:(.vuln_classes | map(select(. != "low-priority" and . != "low-signal")) | join(", ") | .[0:200]), inline:false},
+          (if (.actions|length)>0 then {name:"Next action", value:(.actions[0]|.[0:900]), inline:false} else empty end),
+          (if (.actions|length)>1 then {name:"Also",        value:(.actions[1]|.[0:400]), inline:false} else empty end)
+        ] | map(select(. != null))),
+        footer:{text:("triage · " + (.root_domain // "?") + " · tier=" + (.payout_tier // "none"))}
+      }]
+    }' "$fresh")"
 
   local n_emb; n_emb="$(echo "$payload" | jq '.embeds|length')"
   if [[ "$n_emb" -le 10 ]]; then
@@ -661,18 +853,30 @@ notify_discord_findings() {
 
 main() {
   log "=== triage cycle: $RUN_TS ==="
-  local raw scored_raw scored
-  raw="$(mktemp)"; scored_raw="$(mktemp)"; scored="$(mktemp)"
-  trap "rm -f '$raw' '$scored_raw' '$scored'" EXIT
+  local raw scored_raw enriched scored
+  raw="$(mktemp)"; scored_raw="$(mktemp)"; enriched="$(mktemp)"; scored="$(mktemp)"
+  trap "rm -f '$raw' '$scored_raw' '$enriched' '$scored'" EXIT
 
   fetch_es_data "$raw"
   [[ -s "$raw" ]] || { log "No data"; exit 0; }
 
-  log "Phase 1: scoring"
+  log "Phase 1: scoring (tech + ports + status + titles)"
   score_raw "$raw" "$scored_raw"
 
-  log "Phase 2: cluster + submission dampening"
-  apply_cluster_and_submission "$scored_raw" "$scored"
+  log "Phase 1.5: scope + KEV enrichment (brain)"
+  apply_scope_kev_enrichment "$scored_raw" "$enriched"
+  if [[ -s "$enriched" ]]; then
+    local before after
+    before="$(wc -l < "$scored_raw" | tr -d ' ')"
+    after="$(wc -l < "$enriched" | tr -d ' ')"
+    log "  $before → $after after enrichment ($(( before - after )) hard-excluded dropped)"
+  else
+    warn "  enrichment produced empty output, falling back to raw scored"
+    cp "$scored_raw" "$enriched"
+  fi
+
+  log "Phase 2: cluster + submission dampening + tier-aware sort"
+  apply_cluster_and_submission "$enriched" "$scored"
 
   cp "$scored" "$TARGETS_OUT"
   log "Targets: $TARGETS_OUT ($(wc -l < "$TARGETS_OUT" | tr -d ' ') entries)"
@@ -680,17 +884,21 @@ main() {
   generate_report "$scored" "$REPORT_OUT"
   update_es_scores "$scored"
 
-  local total p0 p1 p2
+  local total p0 p1 p2 elite high kev fb
   total="$(wc -l < "$scored" | tr -d ' ')"
-  p0="$(jq -r 'select(.priority=="P0")' "$scored" | wc -l | tr -d ' ')"
-  p1="$(jq -r 'select(.priority=="P1")' "$scored" | wc -l | tr -d ' ')"
-  p2="$(jq -r 'select(.priority=="P2")' "$scored" | wc -l | tr -d ' ')"
-  log "Summary: total=$total P0=$p0 P1=$p1 P2=$p2"
+  p0="$(jq   -r 'select(.priority=="P0")'                "$scored" | wc -l | tr -d ' ')"
+  p1="$(jq   -r 'select(.priority=="P1")'                "$scored" | wc -l | tr -d ' ')"
+  p2="$(jq   -r 'select(.priority=="P2")'                "$scored" | wc -l | tr -d ' ')"
+  elite="$(jq -r 'select((.payout_tier // "none")=="elite")' "$scored" | wc -l | tr -d ' ')"
+  high="$(jq  -r 'select((.payout_tier // "none")=="high")'  "$scored" | wc -l | tr -d ' ')"
+  kev="$(jq   -r 'select(.kev_match // false)'              "$scored" | wc -l | tr -d ' ')"
+  fb="$(jq    -r 'select(.freshblood_payday // false)'      "$scored" | wc -l | tr -d ' ')"
+  log "Summary: total=$total P0=$p0 P1=$p1 P2=$p2 | tier elite=$elite high=$high | KEV=$kev | 🩸FB-payday=$fb"
 
   notify_discord_findings "$scored"
 
   echo "===== Top 10 ====="
-  head -10 "$scored" | jq -r '[.priority, .score, .pattern_only, .host, (.vuln_classes|join(","))] | @tsv'
+  head -10 "$scored" | jq -r '[.priority, .score, (.payout_tier // "none"), (.kev_match // false), .host, (.vuln_classes|join(","))] | @tsv'
   log "=== triage complete ==="
 }
 main "$@"

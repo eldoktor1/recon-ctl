@@ -107,16 +107,25 @@ else
     program="$(echo "$scope" | jq -r '.program // "—"')"
     platform="$(echo "$scope" | jq -r '.platform // "—"')"
     pattern="$(echo "$scope" | jq -r '.pattern // "—"')"
+    tier="$(echo "$scope" | jq -r '.payout_tier // "none"')"
 
     if [[ "$out_scope" == "true" ]]; then
       err_kv "verdict" "OUT OF SCOPE"
     elif [[ "$in_scope" == "true" && "$pays" == "true" ]]; then
-      ok_kv  "verdict" "IN SCOPE — paying"
-      ok_kv  "program" "$program ($platform)"
-      kv     "matched on" "$pattern"
+      case "$tier" in
+        elite) ok_kv  "verdict" "IN SCOPE — ELITE payout (≥\$10k)" ;;
+        high)  ok_kv  "verdict" "IN SCOPE — HIGH payout (\$3k-\$10k)" ;;
+        mid)   ok_kv  "verdict" "IN SCOPE — paying (mid)" ;;
+        low)   ok_kv  "verdict" "IN SCOPE — paying (low)" ;;
+        *)     ok_kv  "verdict" "IN SCOPE — paying" ;;
+      esac
+      ok_kv  "program"     "$program ($platform)"
+      ok_kv  "payout_tier" "$tier"
+      kv     "matched on"  "$pattern"
     elif [[ "$in_scope" == "true" ]]; then
-      warn_kv "verdict" "IN SCOPE — VDP only (no payout)"
-      warn_kv "program" "$program ($platform)"
+      warn_kv "verdict"     "IN SCOPE — VDP only (no payout)"
+      warn_kv "program"     "$program ($platform)"
+      warn_kv "payout_tier" "$tier"
     else
       warn_kv "verdict" "UNKNOWN — no matching program"
     fi

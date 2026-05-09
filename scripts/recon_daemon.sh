@@ -237,9 +237,29 @@ run_hot_seed()    { bash "$HOT_SEED";    }
 run_scope_watch() { run_scanner bash "$SCOPE_WATCH"; }
 
 # Takeover watch is long-running; supervise differently
+# v2.2: throttled — only log launches when state actually changes (avoid spam
+# on benign lock-contention loops). Subsequent attempts are quiet until either
+# the script stays up >60s (=actually running) or fails for a new reason.
+TAKEOVER_LAST_STATE="${TAKEOVER_LAST_STATE:-unknown}"
 run_takeover_watch() {
-  log "[takeover-watch] launching watch mode"
-  run_scanner bash "$TAKEOVER" watch
+  local started=0 finished=0 dur state
+  started="$(date +%s)"
+  if run_scanner bash "$TAKEOVER" watch >/dev/null 2>&1; then
+    finished="$(date +%s)"; dur=$(( finished - started ))
+    if [[ "$dur" -ge 60 ]]; then
+      state="ran-${dur}s"
+    else
+      state="lock-contention"
+    fi
+  else
+    finished="$(date +%s)"; dur=$(( finished - started ))
+    state="failed-${dur}s"
+  fi
+  if [[ "$state" != "$TAKEOVER_LAST_STATE" ]]; then
+    log "[takeover-watch] state=$state"
+    TAKEOVER_LAST_STATE="$state"
+  fi
+  return 0
 }
 
 BOT_SCRIPT="${BOT_SCRIPT:-$(script_path recon_discord_bot.sh)}"
@@ -278,9 +298,12 @@ run_discord_bot() {
 
     # Long-running — supervised with simple restart loops
   (
+    # v2.2: 5-min retry interval (was 30s) — takeover_hunter holds its own
+    # lock so a stuck/duplicate instance doesn't need fast-restart, and the
+    # tighter cadence was burying real signal in the daemon log.
     while [[ "$SHUTDOWN" -eq 0 ]]; do
-      run_takeover_watch || log "[takeover-watch] died, restarting in 30s"
-      sleep 30
+      run_takeover_watch || true
+      sleep 300
     done
   ) &
   (
