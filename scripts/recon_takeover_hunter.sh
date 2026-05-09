@@ -596,7 +596,7 @@ mode_stream() {
 # =============================================================================
 mode_watch() {
   exec 9>"$LOCK_FILE"
-  flock -n 9 || die "Another takeover_hunter watch is running"
+  flock -n 9 || { log "Another takeover_hunter watch is running — exiting cleanly"; exit 0; }
   echo $$ > "$PID_FILE"
 
   load_fingerprints

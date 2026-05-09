@@ -1,5 +1,17 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.2.1 — 2026-05-09 — Sudo fix and preflight self-heal
+
+### Fixed
+- **Critical: all workers were failing with `sudo: a password is required`** — the sudoers rule allowing `d0k` to run scanner processes as `reconrun` (via `sudo -n -u reconrun`) was missing. Added `/etc/sudoers.d/recon-reconrun` with `d0k ALL=(reconrun) NOPASSWD: ALL`.
+- Updated `/usr/local/sbin/recon-safe-preflight` to self-heal the `recon-reconrun` sudoers rule on every startup. Fresh installs no longer require a manual sudoers step.
+- Fixed `recon_takeover_hunter.sh` watch mode: when a second daemon restart loop detects the lock (instance already running), it now exits 0 instead of 1, eliminating noisy `[takeover-watch] died` log spam while the real watch process was healthy.
+
+### Security
+- `d0k ALL=(reconrun) NOPASSWD: ALL` grants privilege *down* to a locked, shell-less, network-isolated user — not up to root. The nftables kill switch on uid 996 is the real security boundary.
+
+---
+
 ## v2.2.0 — 2026-05-08 — Final clean deployment
 
 ### Added

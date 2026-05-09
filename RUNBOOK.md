@@ -87,13 +87,23 @@ The root-owned preflight script is installed at:
 
     /usr/local/sbin/recon-safe-preflight
 
-A narrow sudoers rule allows `d0k` to run only this script without a password:
+Two sudoers rules are required. Both are auto-installed by preflight on every startup:
 
+    # Run the root-owned preflight without a password (allows Windows Task Scheduler)
     d0k ALL=(root) NOPASSWD: /usr/local/sbin/recon-safe-preflight
 
-This prevents Windows Task Scheduler from hanging on a sudo password prompt.
+    # Allow d0k to launch scanner processes as the locked reconrun user
+    d0k ALL=(reconrun) NOPASSWD: ALL
 
-General sudo still requires a password.
+Files:
+
+    /etc/sudoers.d/recon-safe-preflight   — preflight rule
+    /etc/sudoers.d/recon-reconrun         — scanner user rule (auto-created by preflight)
+
+The reconrun rule grants privilege *down* to a locked, shell-less user — not up to root.
+The nftables kill switch on uid 996 is the real security boundary.
+
+General sudo to root still requires a password.
 
 ## IP Protection Model
 
