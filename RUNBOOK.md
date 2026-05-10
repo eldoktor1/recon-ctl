@@ -173,6 +173,13 @@ The May 10 fix removed the forced restart line and backed up the old crontab at:
 
     ~/recon/archive/cron_backups/d0k_crontab_before_tor_fix.txt
 
+## Killswitch Check
+
+`tools/check_recon_killswitch.sh` is intentionally non-interactive. It requires
+passwordless sudo for nftables inspection and for running curl as `reconrun`.
+If that sudo path is not available, the check exits immediately with a clear
+error instead of waiting for a password prompt.
+
 ## Windows Scheduled Tasks
 
 ### ReconElastic
