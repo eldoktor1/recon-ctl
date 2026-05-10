@@ -290,7 +290,23 @@ cmd_health() {
     "vuln-feed:recon_vuln_feed.sh"; do
     name="${item%%:*}"
     pattern="${item#*:}"
-    count="$(pgrep -af "$pattern" 2>/dev/null | grep -v 'pgrep -af' | wc -l | tr -d ' ')"
+    count="$(ps -eo pid=,ppid=,user=,args= 2>/dev/null \
+      | awk -v pat="$pattern" '
+          $0 ~ pat &&
+          $0 !~ /sudo -n -u/ &&
+          $0 !~ /timeout --kill-after/ &&
+          $0 !~ /pgrep -af/ &&
+          $0 !~ /awk -v pat/ {
+            pids[$1]=1
+            ppids[$1]=$2
+          }
+          END {
+            for (pid in pids) {
+              if (!(ppids[pid] in pids)) n++
+            }
+            print n+0
+          }
+        ')"
     if [[ "${count:-0}" -gt 1 ]]; then
       echo "  WARN $name duplicate workers: $count"
     else

@@ -18,6 +18,7 @@ curl -fsS -m "$OLLAMA_TIMEOUT" "$OLLAMA_URL/api/chat" \
     '{
       model: $model,
       stream: false,
+      format: "json",
       options: {temperature: 0.1, num_ctx: 8192},
       messages: [
         {

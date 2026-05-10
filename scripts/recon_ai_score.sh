@@ -26,6 +26,62 @@ ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || 
 mkdir -p "$TMP_DIR"
 : > "$OUT"
 
+extract_ai_json() {
+  python3 - <<'PYEOF'
+import json, sys
+
+raw = sys.stdin.read().strip()
+
+def valid(obj):
+    obj.setdefault("ai_relevance_score", 0)
+    obj.setdefault("confidence", "low")
+    obj.setdefault("recommendation", "watch")
+    obj.setdefault("route", "human")
+    obj.setdefault("reason", "")
+    obj.setdefault("safe_checks", [])
+    obj.setdefault("risk_flags", [])
+    return obj
+
+try:
+    print(json.dumps(valid(json.loads(raw)), separators=(",", ":")))
+    raise SystemExit(0)
+except Exception:
+    pass
+
+start = raw.find("{")
+if start == -1:
+    raise SystemExit(1)
+
+depth = 0
+in_str = False
+esc = False
+for i, ch in enumerate(raw[start:], start):
+    if in_str:
+        if esc:
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            in_str = False
+        continue
+    if ch == '"':
+        in_str = True
+    elif ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            try:
+                obj = json.loads(raw[start:i + 1])
+                print(json.dumps(valid(obj), separators=(",", ":")))
+                raise SystemExit(0)
+            except Exception:
+                raise SystemExit(1)
+
+raise SystemExit(1)
+PYEOF
+}
+
 [[ -s "$IN" ]] || { log "no triage input"; exit 0; }
 curl -fsS -m 3 "$OLLAMA_URL/api/tags" >/dev/null 2>&1 || {
   warn "Ollama not reachable at $OLLAMA_URL; skipping AI scoring"
@@ -59,12 +115,13 @@ jq -c --argjson min "$AI_MIN_SCORE" '
   ' <<< "$lead" > "$prompt"
 
   raw="$(bash "$SCRIPT_DIR/recon_ollama.sh" "$OLLAMA_MODEL_LEAD" "$prompt" 2>/dev/null || true)"
-  if ! jq -e . >/dev/null 2>&1 <<< "$raw"; then
+  ai_json="$(extract_ai_json <<< "$raw" || true)"
+  if [[ -z "$ai_json" ]] || ! jq -e . >/dev/null 2>&1 <<< "$ai_json"; then
     warn "invalid AI JSON for $host"
     continue
   fi
 
-  enriched="$(jq -c --argjson ai "$raw" --arg model "$OLLAMA_MODEL_LEAD" '
+  enriched="$(jq -c --argjson ai "$ai_json" --arg model "$OLLAMA_MODEL_LEAD" '
     . + {ai: ($ai + {model:$model})}
   ' <<< "$lead")"
   printf '%s\n' "$enriched" >> "$OUT"
