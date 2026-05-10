@@ -10,6 +10,7 @@ QUEUE_DIR="$BASE_DIR/queue"
 FB_DIR="$BASE_DIR/firstblood"
 LOG_DIR="$BASE_DIR/logs"
 TRIAGE_DIR="$BASE_DIR/triage"
+VULN_DIR="$BASE_DIR/vuln"
 MODE_FILE="$HOME/.recon_mode"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -278,6 +279,25 @@ cmd_health() {
   command -v dig >/dev/null 2>&1 && echo "  dig: present" || echo "  dig: MISSING"
   command -v docker >/dev/null 2>&1 && echo "  docker: $(docker --version | head -1)" || echo "  docker: missing (ok if ES via systemd)"
   echo
+  hdr "Worker duplication"
+  local name pattern count
+  for item in \
+    "validate:recon_validate.sh" \
+    "discovery:recon_discovery.sh" \
+    "scope-watch:recon_scope_watch.sh" \
+    "takeover-watch:recon_takeover_hunter.sh watch" \
+    "nuclei:recon_nuclei.sh" \
+    "vuln-feed:recon_vuln_feed.sh"; do
+    name="${item%%:*}"
+    pattern="${item#*:}"
+    count="$(pgrep -af "$pattern" 2>/dev/null | grep -v 'pgrep -af' | wc -l | tr -d ' ')"
+    if [[ "${count:-0}" -gt 1 ]]; then
+      echo "  WARN $name duplicate workers: $count"
+    else
+      echo "  OK   $name workers: $count"
+    fi
+  done
+  echo
   cmd_status
 }
 
@@ -417,6 +437,65 @@ cmd_fresh() {
   [[ -n "$latest" ]] && echo "  latest report: $latest"
 }
 
+cmd_ai() {
+  hdr "AI review layer"
+  local ai_dir="$HOME/recon/ai_review"
+  local scored="$ai_dir/ai_scored.jsonl"
+  local pending="$ai_dir/pending"
+  local model="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
+  local enabled="${ENABLE_OLLAMA_AI:-1}"
+  echo "  enabled by default: $enabled"
+  echo "  model: $model"
+  if command -v ollama >/dev/null 2>&1 && curl -fsS -m 2 "${OLLAMA_URL:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qxF "$model"; then
+      echo "  ollama: reachable, model installed"
+    else
+      echo "  ollama: reachable, model missing ($model)"
+    fi
+  else
+    echo "  ollama: not reachable"
+  fi
+  local scored_count=0
+  [[ -f "$scored" ]] && scored_count="$(wc -l < "$scored" 2>/dev/null || echo 0)"
+  echo "  scored leads: $scored_count"
+  echo "  pending packets: $(find "$pending" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')"
+  local latest
+  latest="$(find "$pending" -maxdepth 1 -type f -name '*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+  [[ -n "$latest" ]] && echo "  latest packet: $latest"
+  if [[ -s "$scored" ]]; then
+    echo
+    echo "  latest scored:"
+    tail -5 "$scored" | jq -r '"    [AI=\(.ai.ai_relevance_score // "?") route=\(.ai.route // "?")] \(.host) — \(.ai.recommendation // "?")"' 2>/dev/null
+  fi
+}
+
+cmd_vuln() {
+  local sub="${1:-status}"
+  case "$sub" in
+    refresh)
+      bash "$(script_path recon_vuln_feed.sh)" all
+      ;;
+    status)
+      hdr "Vuln intelligence"
+      if [[ -x "$(script_path recon_vuln_feed.sh)" ]]; then
+        bash "$(script_path recon_vuln_feed.sh)" status
+      else
+        echo "  recon_vuln_feed.sh missing"
+      fi
+      ;;
+    top)
+      hdr "Top passive vuln-to-asset matches"
+      local f="$VULN_DIR/vuln_targets.jsonl"
+      [[ ! -s "$f" ]] && { echo "  none yet"; return; }
+      jq -r '[.best_vuln_tier,.best_vuln_id,(.triage_payout_tier // "none"),(.triage_score // 0),.host,.matched_signal] | @tsv' "$f" 2>/dev/null | head -30
+      ;;
+    *)
+      echo "Usage: recon_ctl vuln [status|refresh|top]"
+      return 1
+      ;;
+  esac
+}
+
 cmd_fp() {
   local host="${1:-}" tmpl="${2:-}"
   if [[ -z "$host" || -z "$tmpl" ]]; then echo "Usage: recon_ctl fp <host> <template_id>"; return 1; fi
@@ -432,7 +511,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_nuclei v2_fresh; do
+      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_fresh; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
@@ -443,7 +522,7 @@ cmd_v2() {
       done
       echo
       hdr "V2 data"
-      for f in "scope/programs.json" "cve/kev.json" "cve/tech_cve_map.json" "cve/kev_targets.jsonl"; do
+      for f in "scope/programs.json" "cve/kev.json" "cve/tech_cve_map.json" "cve/kev_targets.jsonl" "vuln/vuln_feed.jsonl" "vuln/vuln_targets.jsonl"; do
         local p="$HOME/recon/$f"
         if [[ -f "$p" ]]; then
           local h=$(( ($(date +%s) - $(stat -c %Y "$p")) / 3600 ))
@@ -456,20 +535,21 @@ cmd_v2() {
       done
       ;;
     enable)
-      local mod="${1:-}"; [[ -z "$mod" ]] && { echo "Usage: recon_ctl v2 enable {scope|cve|nuclei}"; return 1; }
+      local mod="${1:-}"; [[ -z "$mod" ]] && { echo "Usage: recon_ctl v2 enable {scope|cve|vuln_feed|nuclei}"; return 1; }
       rm -f "$V21_KILL_DIR/v2_$mod"; echo "$mod re-enabled"
       ;;
     disable)
       local mod="${1:-}"; shift || true
-      [[ -z "$mod" ]] && { echo "Usage: recon_ctl v2 disable {scope|cve|nuclei} [reason]"; return 1; }
+      [[ -z "$mod" ]] && { echo "Usage: recon_ctl v2 disable {scope|cve|vuln_feed|nuclei} [reason]"; return 1; }
       mkdir -p "$V21_KILL_DIR"
       echo "${*:-manual}" > "$V21_KILL_DIR/v2_$mod"; echo "$mod disabled"
       ;;
     refresh-scope) bash "$(script_path recon_scope_db.sh)" ;;
     refresh-cve)   bash "$(script_path recon_cve_intel.sh)" all ;;
+    refresh-vuln)  bash "$(script_path recon_vuln_feed.sh)" all ;;
     scan-now)      bash "$(script_path recon_nuclei.sh)" ;;
     *)
-      echo "v2 subcommands: status | enable <mod> | disable <mod> [reason] | refresh-scope | refresh-cve | scan-now"
+      echo "v2 subcommands: status | enable <mod> | disable <mod> [reason] | refresh-scope | refresh-cve | refresh-vuln | scan-now"
       ;;
   esac
 }
@@ -543,12 +623,16 @@ recon_ctl — pipeline control
   programs               Summary of programs in scope DB
   confirmed              Latest confirmed nuclei findings
   fresh                  Latest fresh in-scope confirmed candidates
+  vuln [status|top|refresh]
+                         Passive vuln intelligence and race queue
+  ai                     AI review status and pending packet counts
   fp <host> <tmpl>       Mark a nuclei finding as false positive
   v2 status              V2 module health
-  v2 enable <mod>        Re-enable killed module (scope|cve|nuclei)
+  v2 enable <mod>        Re-enable killed module (scope|cve|vuln_feed|nuclei)
   v2 disable <mod> [r]   Manually disable module
   v2 refresh-scope       Run scope DB now
   v2 refresh-cve         Run CVE intel now
+  v2 refresh-vuln        Run passive vuln feed now
   v2 scan-now            Run nuclei pass now
   inspect <host>         Full triage view (ES + scope + KEV + live probe)
   schedule               Show schedule status and current window
@@ -579,6 +663,8 @@ case "${1:-}" in
   programs)     cmd_programs ;;
   confirmed)    cmd_confirmed ;;
   fresh)        cmd_fresh ;;
+  vuln)         shift; cmd_vuln "$@" ;;
+  ai)           cmd_ai ;;
   fp)           shift; cmd_fp "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;

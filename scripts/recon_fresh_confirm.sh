@@ -105,6 +105,7 @@ scope_filter() {
   bash "$SCOPE_CHECK" --batch "$hosts" > "$scope"
   jq -s --slurpfile s "$scope" --argjson paying_only "$PAYING_ONLY" '
     ($s[0]
+      | map(select(type == "object"))
       | map(select(.in_scope == true and .out_of_scope == false))
       | map(select(($paying_only == 0) or (.pays == true)))
       | map({(.host):.}) | add // {}) as $scope |

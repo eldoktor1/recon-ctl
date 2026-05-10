@@ -87,21 +87,64 @@ es_check() {
 ensure_index() {
   if ! es_curl -fsS "$ES_URL/$INDEX_NAME" >/dev/null 2>&1; then
     es_curl -fsS -X PUT "$ES_URL/$INDEX_NAME" -H 'Content-Type: application/json' -d '{
-      "settings":{"number_of_shards":1,"refresh_interval":"30s"},
-      "mappings":{"properties":{
-        "host":{"type":"keyword"},"url":{"type":"keyword"},"scheme":{"type":"keyword"},
-        "port":{"type":"integer"},"status_code":{"type":"integer"},
-        "content_length":{"type":"integer"},"content_type":{"type":"keyword"},
-        "title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":512}}},
-        "tech":{"type":"keyword"},"webserver":{"type":"keyword"},
-        "ip":{"type":"ip"},"cname":{"type":"keyword"},
-        "cdn_name":{"type":"keyword"},"cdn_type":{"type":"keyword"},
-        "favicon_hash":{"type":"keyword"},"final_url":{"type":"keyword"},
-        "root_domain":{"type":"keyword"},
-        "first_seen":{"type":"date"},"last_seen":{"type":"date"},
-        "triage_score":{"type":"integer"},"triage_priority":{"type":"keyword"},
-        "triage_signals":{"type":"keyword"},"triage_classes":{"type":"keyword"}
-      }}
+      "settings":{
+        "number_of_shards":1,
+        "refresh_interval":"30s"
+      },
+      "mappings":{
+        "dynamic":true,
+        "properties":{
+          "host":{"type":"keyword"},
+          "url":{"type":"keyword","ignore_above":2048},
+          "scheme":{"type":"keyword"},
+          "port":{"type":"integer"},
+          "status_code":{"type":"integer"},
+          "content_length":{"type":"long"},
+          "content_type":{"type":"keyword","ignore_above":512},
+          "title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":512}}},
+          "tech":{"type":"keyword","ignore_above":256},
+          "webserver":{"type":"keyword","ignore_above":512},
+          "ip":{"type":"ip","ignore_malformed":true},
+          "cname":{"type":"keyword","ignore_above":512},
+          "cdn_name":{"type":"keyword","ignore_above":256},
+          "cdn_type":{"type":"keyword","ignore_above":256},
+          "favicon_hash":{"type":"keyword"},
+          "final_url":{"type":"keyword","ignore_above":2048},
+          "root_domain":{"type":"keyword"},
+          "first_seen":{"type":"date"},
+          "last_seen":{"type":"date"},
+
+          "triage_score":{"type":"integer"},
+          "triage_priority":{"type":"keyword"},
+          "triage_signals":{"type":"keyword","ignore_above":256},
+          "triage_classes":{"type":"keyword","ignore_above":256},
+          "triage_at":{"type":"date"},
+          "triage_program":{"type":"keyword","ignore_above":512},
+          "triage_platform":{"type":"keyword","ignore_above":128},
+          "triage_payout_tier":{"type":"keyword"},
+          "triage_pays":{"type":"boolean"},
+          "triage_in_scope":{"type":"boolean"},
+          "triage_out_of_scope":{"type":"boolean"},
+          "triage_kev_match":{"type":"boolean"},
+          "triage_kev_signal":{"type":"keyword","ignore_above":256},
+          "triage_kev_cves":{"type":"keyword"},
+
+          "v2_nuclei_status":{"type":"keyword"},
+          "v2_nuclei_template":{"type":"keyword","ignore_above":512},
+          "v2_nuclei_severity":{"type":"keyword"},
+          "v2_nuclei_run_at":{"type":"date"},
+
+          "ai_relevance_score":{"type":"integer"},
+          "ai_confidence":{"type":"keyword"},
+          "ai_recommendation":{"type":"keyword"},
+          "ai_route":{"type":"keyword"},
+          "ai_reason":{"type":"text"},
+          "ai_safe_checks":{"type":"keyword","ignore_above":1024},
+          "ai_risk_flags":{"type":"keyword","ignore_above":512},
+          "ai_model":{"type":"keyword","ignore_above":128},
+          "ai_reviewed_at":{"type":"date"}
+        }
+      }
     }' >/dev/null
     log "Created index $INDEX_NAME"
   fi
