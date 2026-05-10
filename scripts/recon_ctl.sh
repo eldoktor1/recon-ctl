@@ -17,6 +17,14 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 
+first_matching_or_nonblank() {
+  local pattern="${1:?pattern}"
+  local input
+  input="$(cat)"
+  printf '%s\n' "$input" | grep -m1 -E "$pattern" 2>/dev/null && return 0
+  printf '%s\n' "$input" | sed '/^[[:space:]]*$/d' | head -1
+}
+
 DAEMON="${DAEMON:-$(script_path recon_daemon.sh)}"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
 
@@ -272,8 +280,8 @@ cmd_submit() {
 
 cmd_health() {
   hdr "Health check"
-  command -v httpx >/dev/null 2>&1 && echo "  httpx: $(httpx -version 2>&1 | head -1)" || echo "  httpx: MISSING"
-  command -v subfinder >/dev/null 2>&1 && echo "  subfinder: $(subfinder -version 2>&1 | head -1)" || echo "  subfinder: MISSING"
+  command -v httpx >/dev/null 2>&1 && echo "  httpx: $(httpx -version 2>&1 | first_matching_or_nonblank 'Current Version|[Vv]ersion')" || echo "  httpx: MISSING"
+  command -v subfinder >/dev/null 2>&1 && echo "  subfinder: $(subfinder -version 2>&1 | first_matching_or_nonblank 'Current Version|[Vv]ersion')" || echo "  subfinder: MISSING"
   command -v assetfinder >/dev/null 2>&1 && echo "  assetfinder: present" || echo "  assetfinder: missing"
   command -v jq >/dev/null 2>&1 && echo "  jq: $(jq --version)" || echo "  jq: MISSING"
   command -v dig >/dev/null 2>&1 && echo "  dig: present" || echo "  dig: MISSING"

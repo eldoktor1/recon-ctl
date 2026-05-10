@@ -4,7 +4,7 @@
 #
 # Fixes from v2.1:
 #   1. NVD curl: %{http_code} returned concatenated codes (200000) on retries.
-#      Now uses --no-keepalive + tail -n1 + tr/head to extract clean code.
+#      Now captures curl status explicitly so transient NVD failures retry cleanly.
 #   2. KEV→ES match: was case-sensitive wildcard against capitalized "Jenkins".
 #      Now uses case_insensitive: true (ES 7.10+).
 #   3. SIG_TO_TECH: trimmed to terms that exist in real data, expanded coverage
@@ -95,10 +95,11 @@ fetch_nvd() {
     local resp http_code attempt=0 ok=false
     while [[ "$attempt" -lt 3 ]]; do
       attempt=$((attempt + 1))
-      # FIXED: -w '%{http_code}' returned concatenated codes when redirects happened.
-      # Use --no-keepalive + only show http_code at end-of-final-request.
-      # Also pipe stdin to avoid any inherited fd weirdness.
-      http_code="$(curl_net -sS -G -m 60 \
+      # Keep curl failures inside retry logic. Under `set -e -o pipefail`,
+      # command-substitution pipelines can otherwise abort the whole script.
+      local curl_out curl_rc last_line
+      set +e
+      curl_out="$(curl_net -sS -G -m 60 \
         --no-keepalive \
         --output "$RAW_DIR/.nvd_page.json" \
         --write-out '%{http_code}\n' \
@@ -106,10 +107,15 @@ fetch_nvd() {
         --data-urlencode "pubEndDate=$pub_end" \
         --data-urlencode "startIndex=$start_idx" \
         --data-urlencode "resultsPerPage=$page_size" \
-        "$NVD_API" 2>/dev/null </dev/null | tail -n1 | tr -dc '0-9' | head -c 3)"
+        "$NVD_API" 2>/dev/null </dev/null)"
+      curl_rc=$?
+      set -e
+      last_line="${curl_out##*$'\n'}"
+      http_code="${last_line//[^0-9]/}"
+      http_code="${http_code:0:3}"
       [[ -z "$http_code" ]] && http_code="000"
 
-      if [[ "$http_code" == "200" ]]; then
+      if [[ "$curl_rc" -eq 0 && "$http_code" == "200" ]]; then
         if jq -e '.vulnerabilities' "$RAW_DIR/.nvd_page.json" >/dev/null 2>&1; then
           ok=true; break
         fi

@@ -1,5 +1,21 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.4.4-audit-hardening - 2026-05-10 - Strict-mode and health audit
+
+### Fixed
+- Hardened `recon_cve_intel.sh` NVD fetch retries so curl/network failures do
+  not bypass the intended retry logic under `set -e -o pipefail`.
+- Made `tools/check_recon_killswitch.sh` non-interactive by requiring
+  passwordless sudo up front and using `sudo -n` for privileged checks.
+- Fixed `recon_ctl health` tool version display so banner-printing tools such
+  as `httpx` show their actual version line instead of a blank value.
+
+### Verified
+- `bash -n` passed for all scripts and tools.
+- `git diff --check` passed for touched files.
+- Live non-scanning health checks passed: daemon running in boost, queue clean,
+  ES reachable, AI reachable with 25 scored leads, and vuln status refreshed.
+
 ## v2.4.3-ai-score-visibility - 2026-05-10 - AI scoring log banner
 
 ### Added
