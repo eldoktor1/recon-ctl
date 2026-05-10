@@ -1,5 +1,24 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.4.3-ai-score-visibility - 2026-05-10 - AI scoring log banner
+
+### Added
+- Added a visible ASCII AI review banner and per-lead progress lines to
+  `recon_ai_score.sh` so daemon/manual logs clearly show when Ollama is scoring
+  leads.
+- Added rejected raw response capture under `~/recon/ai_review/rejected/` for
+  any future invalid model output.
+
+### Fixed
+- Fixed AI JSON extraction so the parser reads the Ollama response body instead
+  of losing stdin to the embedded Python script.
+- Fixed AI candidate selection under `pipefail`; `jq | head` could abort with
+  `141` before scoring began.
+
+### Verified
+- One-lead smoke test showed the banner and accepted `1/1`.
+- Production run scored `25/25` leads with `rejected=0`.
+
 ## v2.4.2-tor-stability - 2026-05-10 - Remove forced Tor restart loop
 
 ### Fixed

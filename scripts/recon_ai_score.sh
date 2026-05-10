@@ -12,6 +12,7 @@ AI_DIR="${AI_DIR:-$BASE_DIR/ai_review}"
 IN="${1:-$BASE_DIR/triage/agent_targets.jsonl}"
 OUT="$AI_DIR/ai_scored.jsonl"
 TMP_DIR="$AI_DIR/tmp"
+REJECTED_DIR="$AI_DIR/rejected"
 
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
@@ -23,14 +24,26 @@ INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 
-mkdir -p "$TMP_DIR"
+mkdir -p "$TMP_DIR" "$REJECTED_DIR"
 : > "$OUT"
 
-extract_ai_json() {
-  python3 - <<'PYEOF'
-import json, sys
+ai_banner() {
+  log '+--------------------------------------------------+'
+  log '|  [AI] OLLAMA REVIEW LAYER                       |'
+  log '|       deterministic triage is done              |'
+  log '|       scoring high-value leads now              |'
+  log '+--------------------------------------------------+'
+}
 
-raw = sys.stdin.read().strip()
+extract_ai_json() {
+  local raw_file
+  raw_file="$(mktemp)"
+  cat > "$raw_file"
+  set +e
+  python3 - "$raw_file" <<'PYEOF'
+import json, pathlib, sys
+
+raw = pathlib.Path(sys.argv[1]).read_text(errors="replace").strip()
 
 def valid(obj):
     obj.setdefault("ai_relevance_score", 0)
@@ -80,6 +93,10 @@ for i, ch in enumerate(raw[start:], start):
 
 raise SystemExit(1)
 PYEOF
+  local rc=$?
+  set -e
+  rm -f "$raw_file"
+  return "$rc"
 }
 
 [[ -s "$IN" ]] || { log "no triage input"; exit 0; }
@@ -93,17 +110,32 @@ curl -fsS -m 5 "$OLLAMA_URL/api/tags" \
     exit 0
   }
 
+candidates_tmp="$(mktemp)"
+all_candidates_tmp="$(mktemp)"
 updates_tmp="$(mktemp)"
-trap "rm -f '$updates_tmp'" EXIT
+trap "rm -f '$updates_tmp' '$candidates_tmp' '$all_candidates_tmp'" EXIT
 
 jq -c --argjson min "$AI_MIN_SCORE" '
   select((.priority == "P0" or .priority == "P1") and (.score // 0) >= $min)
   | select((.out_of_scope // false) == false)
   | select((.payout_tier // "none") != "none")
   | select(((.signals // []) | length) > 0)
-' "$IN" | head -n "$AI_MAX_LEADS" | while IFS= read -r lead; do
+' "$IN" > "$all_candidates_tmp"
+head -n "$AI_MAX_LEADS" "$all_candidates_tmp" > "$candidates_tmp"
+
+total_candidates="$(wc -l < "$candidates_tmp" | tr -d ' ')"
+ai_banner
+log "model=$OLLAMA_MODEL_LEAD candidates=$total_candidates max=$AI_MAX_LEADS min_score=$AI_MIN_SCORE"
+
+attempted=0
+scored=0
+rejected=0
+
+while IFS= read -r lead; do
+  attempted=$((attempted + 1))
   host="$(jq -r '.host' <<< "$lead")"
   prompt="$TMP_DIR/${host//[^a-zA-Z0-9_.-]/_}.prompt"
+  reject_file="$REJECTED_DIR/${host//[^a-zA-Z0-9_.-]/_}.raw.txt"
 
   jq -r '
     "Assess this already-filtered bug bounty recon lead.\n\n" +
@@ -114,10 +146,13 @@ jq -c --argjson min "$AI_MIN_SCORE" '
     tostring
   ' <<< "$lead" > "$prompt"
 
+  log "[${attempted}/${total_candidates}] scoring $host"
   raw="$(bash "$SCRIPT_DIR/recon_ollama.sh" "$OLLAMA_MODEL_LEAD" "$prompt" 2>/dev/null || true)"
   ai_json="$(extract_ai_json <<< "$raw" || true)"
   if [[ -z "$ai_json" ]] || ! jq -e . >/dev/null 2>&1 <<< "$ai_json"; then
-    warn "invalid AI JSON for $host"
+    rejected=$((rejected + 1))
+    printf '%s\n' "$raw" > "$reject_file"
+    warn "invalid AI JSON for $host (saved raw: $reject_file)"
     continue
   fi
 
@@ -140,7 +175,9 @@ jq -c --argjson min "$AI_MIN_SCORE" '
       ai_reviewed_at:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }}
   ' <<< "$enriched" >> "$updates_tmp"
-done
+  scored=$((scored + 1))
+  log "[${attempted}/${total_candidates}] accepted $host ai_score=$(jq -r '.ai.ai_relevance_score // 0' <<< "$enriched") route=$(jq -r '.ai.route // "human"' <<< "$enriched")"
+done < "$candidates_tmp"
 
 if [[ -s "$updates_tmp" && -n "$ES_PASS" ]]; then
   curl -fsS -m 30 -u "$ES_USER:$ES_PASS" -H 'Content-Type: application/x-ndjson' \
@@ -148,4 +185,4 @@ if [[ -s "$updates_tmp" && -n "$ES_PASS" ]]; then
     || warn "AI ES writeback failed"
 fi
 
-log "AI-scored $(wc -l < "$OUT" | tr -d ' ') lead(s): $OUT"
+log "AI-scored $scored/$attempted lead(s), rejected=$rejected: $OUT"
