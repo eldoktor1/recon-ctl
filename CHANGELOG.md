@@ -1,5 +1,23 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.4.1-live-hotfix - 2026-05-10 - No-stop health and AI cleanup
+
+### Fixed
+- Prevented `recon_vuln_feed.sh status` from exiting `141` under `pipefail`
+  after printing top matches. The daemon now treats successful vuln-feed
+  refreshes as successful instead of backing off after a good run.
+- Corrected `recon_ctl health` duplicate-worker counting so wrapper `sudo`
+  processes and child shell helpers do not appear as duplicate daemon workers.
+- Hardened Ollama review output handling by requesting Ollama JSON mode and
+  extracting JSON from wrapped responses before rejecting a lead.
+
+### Verified
+- Applied without stopping the daemon.
+- `bash -n` passed for touched scripts.
+- `git diff --check` passed.
+- Live health now reports one discovery worker, one takeover watcher, and zero
+  duplicate validation/nuclei/vuln-feed workers.
+
 ## v2.4.0-vuln-intel - 2026-05-10 - Passive fresh-vuln race queue
 
 ### Added

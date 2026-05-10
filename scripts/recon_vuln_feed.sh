@@ -561,7 +561,7 @@ status() {
 
   if [[ -s "$TARGETS_JSONL" ]]; then
     log "targets: $(wc -l < "$TARGETS_JSONL" | tr -d ' ') matches"
-    jq -r '[.best_vuln_tier,.best_vuln_id,.triage_payout_tier,.triage_score,.host,.matched_signal] | @tsv' "$TARGETS_JSONL" 2>/dev/null | head -15
+    jq -sr '.[:15][] | [.best_vuln_tier,.best_vuln_id,.triage_payout_tier,.triage_score,.host,.matched_signal] | @tsv' "$TARGETS_JSONL" 2>/dev/null || true
   else
     warn "targets: no vuln_targets.jsonl yet"
   fi
