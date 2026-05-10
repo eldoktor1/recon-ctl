@@ -151,6 +151,28 @@ Tools with native proxy support are launched with SOCKS proxy flags:
 
 `assetfinder` is skipped in proxy-safe mode because it does not provide a trusted native proxy flag.
 
+## Tor Stability
+
+Do not restart Tor on a tight cron. It creates short windows where
+`127.0.0.1:9050` disappears and the fail-closed network helper correctly
+refuses discovery, Discord polling, and feed fetches.
+
+Known bad crontab entry:
+
+    */3 * * * * /usr/bin/sudo /bin/systemctl restart tor >/dev/null 2>&1
+
+If Tor appears intermittent, check:
+
+    crontab -l
+    systemctl is-active tor
+    pgrep -af tor
+    nc -z -w 2 127.0.0.1 9050
+    journalctl -u tor --no-pager | tail -40
+
+The May 10 fix removed the forced restart line and backed up the old crontab at:
+
+    ~/recon/archive/cron_backups/d0k_crontab_before_tor_fix.txt
+
 ## Windows Scheduled Tasks
 
 ### ReconElastic

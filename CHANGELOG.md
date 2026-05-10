@@ -1,5 +1,20 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.4.2-tor-stability - 2026-05-10 - Remove forced Tor restart loop
+
+### Fixed
+- Diagnosed Tor "intermittency" as an external crontab issue, not a Tor crash:
+  `d0k` had a cron entry restarting Tor every 3 minutes.
+- Removed only that cron line and saved a backup at
+  `~/recon/archive/cron_backups/d0k_crontab_before_tor_fix.txt`.
+
+### Verified
+- Tor PID stayed stable across the old 3-minute restart boundary.
+- `127.0.0.1:9050` accepts TCP connections.
+- Latest Tor journal entries no longer advance with a new 3-minute
+  stop/start cycle.
+- Pipeline health stayed clean without stopping the daemon.
+
 ## v2.4.1-live-hotfix - 2026-05-10 - No-stop health and AI cleanup
 
 ### Fixed
