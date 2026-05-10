@@ -1,5 +1,20 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.3.2-profile-pass - 2026-05-10 - Scanner profile env propagation
+
+### Fixed
+- Passed daemon profile tuning (`HTTPX_THREADS`, `HTTPX_RATE`,
+  `HTTPX_TIMEOUT`, `HTTPX_MAX_RUNTIME`, `BATCHES_PER_CYCLE`,
+  `INBOX_FILE_CAP`, and `BATCH_SIZE`) through `run_scanner` into the
+  `reconrun` worker environment.
+- This prevents boost mode from silently falling back to browse defaults inside
+  `recon_validate.sh`.
+
+### Operational
+- Pipeline was stopped, lingering `httpx`/daemon loop processes were killed,
+  stale lock/pid files were cleared, and the half-run processing batch was moved
+  back to inbox for a clean restart.
+
 ## v2.3.1-clean-start - 2026-05-09 - Stale-output cleanup and archive-safe reset
 
 ### Fixed
