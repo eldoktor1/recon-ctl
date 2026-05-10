@@ -30,6 +30,10 @@ IFS=$'\n\t'
 log()  { printf '[%s TRIAGE] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s TRIAGE WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s TRIAGE FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
+count_records() {
+  local expr="$1" file="$2"
+  jq -c "$expr" "$file" 2>/dev/null | wc -l | tr -d ' '
+}
 
 for c in curl jq sort head wc cat date mktemp grep tr nproc xargs awk; do
   command -v "$c" >/dev/null 2>&1 || die "Missing dependency: $c"
@@ -72,6 +76,8 @@ SUBMISSIONS_FILE="${SUBMISSIONS_FILE:-$HOME/.recon_submissions.jsonl}"
 _TRIAGE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCOPE_CHECK="${SCOPE_CHECK:-$_TRIAGE_SCRIPT_DIR/recon_scope_check.sh}"
 KEV_TARGETS="${KEV_TARGETS:-$HOME/recon/cve/kev_targets.jsonl}"
+AI_SCORE_SCRIPT="${AI_SCORE_SCRIPT:-$_TRIAGE_SCRIPT_DIR/recon_ai_score.sh}"
+AI_PACK_SCRIPT="${AI_PACK_SCRIPT:-$_TRIAGE_SCRIPT_DIR/recon_ai_pack.sh}"
 
 # Score bonuses (override via env if you want to retune)
 PAYS_BONUS="${PAYS_BONUS:-2}"
@@ -100,7 +106,6 @@ SHARED_SEEN_FILE="$SEEN_FILE"
 # with permissions our current uid can't write. Falls back to /tmp on hard fail.
 if ! ( touch "$SEEN_FILE" 2>/dev/null && [[ -w "$SEEN_FILE" ]] ); then
   if [[ -e "$SEEN_FILE" && ! -w "$SEEN_FILE" ]]; then
-    warn "$SEEN_FILE not writable by uid $(id -u); falling back to per-uid copy"
     SEEN_FILE="$TRIAGE_DIR/.seen_high.$(id -u).txt"
     touch "$SEEN_FILE" 2>/dev/null || SEEN_FILE="/tmp/.recon_seen_high.$(id -u).txt"
     touch "$SEEN_FILE" 2>/dev/null || true
@@ -740,6 +745,18 @@ update_es_scores() {
   log "Wrote back triage scores to ES"
 }
 
+run_ai_review_layer() {
+  local in="$1"
+  [[ "${ENABLE_OLLAMA_AI:-1}" == "1" ]] || return 0
+  [[ -x "$AI_SCORE_SCRIPT" ]] || { warn "AI score script missing or not executable: $AI_SCORE_SCRIPT"; return 0; }
+  log "AI review layer enabled"
+  BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
+    bash "$AI_SCORE_SCRIPT" "$in" || warn "AI scoring failed"
+  if [[ -x "$AI_PACK_SCRIPT" ]]; then
+    BASE_DIR="$BASE_DIR" bash "$AI_PACK_SCRIPT" || warn "AI packet build failed"
+  fi
+}
+
 # =============================================================================
 # Markdown report
 # =============================================================================
@@ -747,16 +764,16 @@ generate_report() {
   local in="$1" out="$2"
   local total p0 p1 p2
   total="$(wc -l < "$in" | tr -d ' ')"
-  p0="$(jq -r 'select(.priority=="P0")' "$in" | wc -l | tr -d ' ')"
-  p1="$(jq -r 'select(.priority=="P1")' "$in" | wc -l | tr -d ' ')"
-  p2="$(jq -r 'select(.priority=="P2")' "$in" | wc -l | tr -d ' ')"
+  p0="$(count_records 'select(.priority=="P0")' "$in")"
+  p1="$(count_records 'select(.priority=="P1")' "$in")"
+  p2="$(count_records 'select(.priority=="P2")' "$in")"
 
   local elite_n high_n mid_n kev_n fb_n
-  elite_n="$(jq -r 'select((.payout_tier // "none")=="elite")' "$in" 2>/dev/null | wc -l | tr -d ' ')"
-  high_n="$(jq -r 'select((.payout_tier // "none")=="high")'   "$in" 2>/dev/null | wc -l | tr -d ' ')"
-  mid_n="$(jq -r  'select((.payout_tier // "none")=="mid")'    "$in" 2>/dev/null | wc -l | tr -d ' ')"
-  kev_n="$(jq -r  'select(.kev_match // false)'                "$in" 2>/dev/null | wc -l | tr -d ' ')"
-  fb_n="$(jq -r   'select(.freshblood_payday // false)'        "$in" 2>/dev/null | wc -l | tr -d ' ')"
+  elite_n="$(count_records 'select((.payout_tier // "none")=="elite")' "$in")"
+  high_n="$(count_records 'select((.payout_tier // "none")=="high")' "$in")"
+  mid_n="$(count_records 'select((.payout_tier // "none")=="mid")' "$in")"
+  kev_n="$(count_records 'select(.kev_match // false)' "$in")"
+  fb_n="$(count_records 'select(.freshblood_payday // false)' "$in")"
 
   {
     printf '# Triage Report — %s\n\n' "$RUN_TS"
@@ -764,7 +781,7 @@ generate_report() {
     printf '**Tiers:** elite=%s high=%s mid=%s | **KEV matches:** %s | **🩸 fresh-blood-payday:** %s\n\n' \
            "$elite_n" "$high_n" "$mid_n" "$kev_n" "$fb_n"
     for tier in P0 P1 P2; do
-      local count; count="$(jq -r --arg t "$tier" 'select(.priority==$t)' "$in" | wc -l | tr -d ' ')"
+      local count; count="$(jq -c --arg t "$tier" 'select(.priority==$t)' "$in" | wc -l | tr -d ' ')"
       [[ "$count" -eq 0 ]] && continue
       printf '## %s — %s targets\n\n' "$tier" "$count"
       jq -r --arg t "$tier" '
@@ -918,16 +935,17 @@ main() {
 
   generate_report "$scored" "$REPORT_OUT"
   update_es_scores "$scored"
+  run_ai_review_layer "$scored"
 
   local total p0 p1 p2 elite high kev fb
   total="$(wc -l < "$scored" | tr -d ' ')"
-  p0="$(jq   -r 'select(.priority=="P0")'                "$scored" | wc -l | tr -d ' ')"
-  p1="$(jq   -r 'select(.priority=="P1")'                "$scored" | wc -l | tr -d ' ')"
-  p2="$(jq   -r 'select(.priority=="P2")'                "$scored" | wc -l | tr -d ' ')"
-  elite="$(jq -r 'select((.payout_tier // "none")=="elite")' "$scored" | wc -l | tr -d ' ')"
-  high="$(jq  -r 'select((.payout_tier // "none")=="high")'  "$scored" | wc -l | tr -d ' ')"
-  kev="$(jq   -r 'select(.kev_match // false)'              "$scored" | wc -l | tr -d ' ')"
-  fb="$(jq    -r 'select(.freshblood_payday // false)'      "$scored" | wc -l | tr -d ' ')"
+  p0="$(count_records 'select(.priority=="P0")' "$scored")"
+  p1="$(count_records 'select(.priority=="P1")' "$scored")"
+  p2="$(count_records 'select(.priority=="P2")' "$scored")"
+  elite="$(count_records 'select((.payout_tier // "none")=="elite")' "$scored")"
+  high="$(count_records 'select((.payout_tier // "none")=="high")' "$scored")"
+  kev="$(count_records 'select(.kev_match // false)' "$scored")"
+  fb="$(count_records 'select(.freshblood_payday // false)' "$scored")"
   log "Summary: total=$total P0=$p0 P1=$p1 P2=$p2 | tier elite=$elite high=$high | KEV=$kev | 🩸FB-payday=$fb"
 
   notify_discord_findings "$scored"

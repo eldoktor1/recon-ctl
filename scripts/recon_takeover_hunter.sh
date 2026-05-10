@@ -593,7 +593,12 @@ mode_stream() {
 }
 
 # =============================================================================
-# Watch mode: long-running loop, polls queue/done/ for new validation jsonls
+# Watch mode: long-running loop for periodic WATCH rechecks.
+#
+# Validation already invokes stream mode for each completed httpx batch. Older
+# watch mode also polled queue/done and re-streamed those same files, creating
+# duplicate stream children during busy validate cycles. Leave that legacy poll
+# path opt-in for manual recovery only.
 # =============================================================================
 mode_watch() {
   exec 9>"$LOCK_FILE"
@@ -605,21 +610,25 @@ mode_watch() {
 
   local processed_marker="$STATE_DIR/takeover_processed.txt"
   touch "$processed_marker"
+  local process_done="${TAKEOVER_WATCH_PROCESS_DONE:-0}"
 
   trap 'rm -f "$PID_FILE"' EXIT
 
   while :; do
     local found=0
-    # Find new validation outputs in queue done/
-    local f
-    while IFS= read -r f; do
-      [[ -z "$f" || ! -s "$f" ]] && continue
-      if grep -qxF "$f" "$processed_marker"; then continue; fi
-      found=1
-      log "Processing new validation output: $(basename "$f")"
-      mode_stream "$f"
-      echo "$f" >> "$processed_marker"
-    done < <(find "$BASE_DIR/queue/done" -name '*.jsonl' -mmin -180 2>/dev/null | sort)
+    if [[ "$process_done" == "1" ]]; then
+      # Manual recovery path only. The validator is the normal owner of
+      # per-batch stream processing.
+      local f
+      while IFS= read -r f; do
+        [[ -z "$f" || ! -s "$f" ]] && continue
+        if grep -qxF "$f" "$processed_marker"; then continue; fi
+        found=1
+        log "Processing new validation output: $(basename "$f")"
+        mode_stream "$f"
+        echo "$f" >> "$processed_marker"
+      done < <(find "$BASE_DIR/queue/done" -name '*.jsonl' -mmin -180 2>/dev/null | sort)
+    fi
 
     # Trim processed_marker to keep last 5000 lines
     if [[ "$(wc -l < "$processed_marker")" -gt 5000 ]]; then

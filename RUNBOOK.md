@@ -2,7 +2,7 @@
 
 ## Current Stable Checkpoint
 
-    v2.2.0 — Final clean deployment
+    v2.4.0-vuln-intel — Passive fresh-vuln race queue
 
 This is the final production-ready state.
 
@@ -16,6 +16,8 @@ This version includes:
 - target-facing scanners running under `reconrun`
 - nftables kill switch for IP leak prevention
 - noninteractive safe startup through preflight
+- passive vuln intelligence normalization and local ES matching
+- Ollama review after deterministic scoring
 
 ## Core Architecture
 
@@ -204,6 +206,9 @@ Health and status:
     ~/recon-pipeline/scripts/recon_ctl.sh health
     ~/recon-pipeline/scripts/recon_ctl.sh status
     ~/recon-pipeline/scripts/recon_ctl.sh queue
+    ~/recon-pipeline/scripts/recon_ctl.sh vuln status
+    ~/recon-pipeline/scripts/recon_ctl.sh vuln top
+    ~/recon-pipeline/scripts/recon_ctl.sh ai
     ~/recon-pipeline/scripts/recon_ctl.sh top 20
     ~/recon-pipeline/scripts/recon_ctl.sh takeovers
     ~/recon-pipeline/scripts/recon_ctl.sh watching
@@ -217,6 +222,47 @@ Stop:
 Clean:
 
     ~/recon-pipeline/scripts/recon_ctl.sh clean
+
+## Passive Vuln Intelligence
+
+The transcript-driven CVE change is handled by `recon_vuln_feed.sh`.
+
+Purpose:
+
+    Do not wait for complete NVD enrichment.
+    Normalize public vuln/advisory/template signals.
+    Match them against already-indexed assets in local Elasticsearch.
+    Produce a passive race queue for safe review.
+
+Outputs:
+
+    ~/recon/vuln/vuln_feed.jsonl      normalized vuln records
+    ~/recon/vuln/summary.json         feed counts by tier/source
+    ~/recon/vuln/vuln_targets.jsonl   local ES asset matches
+
+Commands:
+
+    ~/recon-pipeline/scripts/recon_ctl.sh vuln status
+    ~/recon-pipeline/scripts/recon_ctl.sh vuln top
+    ~/recon-pipeline/scripts/recon_ctl.sh v2 refresh-vuln
+
+Daemon behavior:
+
+    The daemon runs the vuln-feed loop automatically every hour by default.
+    The worker runs as reconrun and uses the shared Tor/proxy helper.
+    It does not execute nuclei and does not probe targets.
+
+Risk tiers:
+
+    T0  CISA KEV
+    T1  fresh/public template or high-confidence public check exists
+    T2  fresh or high-risk advisory before complete enrichment
+    T3  weak signal, report-only until stronger evidence
+
+Safety rule:
+
+    AI may summarize why a target matters and draft safe verification plans,
+    but AI output must not create or auto-run nuclei templates.
 
 ## Mode Switching
 

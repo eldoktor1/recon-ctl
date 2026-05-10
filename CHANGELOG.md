@@ -1,5 +1,71 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.4.0-vuln-intel - 2026-05-10 - Passive fresh-vuln race queue
+
+### Added
+- Added `scripts/recon_vuln_feed.sh`, a passive vulnerability intelligence
+  layer that normalizes KEV/NVD-local data plus optional EPSS, CISA
+  Vulnrichment, and ProjectDiscovery nuclei-template signals.
+- Added `~/recon/vuln/vuln_feed.jsonl`, `summary.json`, and
+  `vuln_targets.jsonl` outputs. These are intelligence and local ES matching
+  artifacts only; they do not launch scans or probes.
+- Added daemon `vuln-feed` supervision loop, default interval 1 hour, running
+  as `reconrun` behind the existing Tor/proxy and nftables model.
+- Added `recon_ctl vuln status|top|refresh` and Discord `!vuln` visibility.
+- Extended `recon_brain.sh` so full/quick refreshes update passive vuln
+  intelligence before triage.
+- Added duplicate-worker detection to `recon_ctl health` for validation,
+  discovery, scope-watch, takeover-watch, nuclei, and vuln-feed loops.
+
+### Security
+- Preserved the scanner user boundary: target-facing and feed worker paths
+  still run as `reconrun`; no scanner code was moved to the main `d0k` user.
+- `recon_vuln_feed.sh` is passive. It fetches public intelligence feeds and
+  matches against local Elasticsearch only; nuclei execution remains gated in
+  `recon_nuclei.sh`.
+- Fresh ES resets now clear derived vuln target queues so old asset matches
+  cannot repopulate a fresh start.
+
+### Fixed
+- Repaired shared directory ACL preparation so `reconrun` can create queue,
+  state, CVE, vuln, AI, scope, spool, and log artifacts without weakening the
+  kill-switch model.
+- Ensured `reconrun`-created vuln feed outputs remain readable by the control
+  user for `recon_ctl vuln status`.
+
+### Verified
+- `bash -n` passed for changed shell scripts.
+- `git diff --check` passed for the vuln-intel changes.
+- Local-only vuln normalization produced 1,590 KEV-derived records and refused
+  to create asset work while `recon_alive` was empty.
+- `recon_ctl health` reports no duplicate long-running workers.
+
+## v2.3.4-live-hygiene - 2026-05-10 - Duplicate watcher and fresh-confirm cleanup
+
+### Fixed
+- Corrected triage/report summary counters to count JSONL records with compact
+  `jq` output. Previous counters counted pretty-printed object lines, producing
+  impossible values such as `P0` counts larger than total target count.
+- Expanded fresh `recon_alive` index creation mappings to explicitly align base
+  httpx fields, `triage_*`, `v2_nuclei_*`, and post-score `ai_*` fields.
+- Stopped takeover watch mode from re-streaming recent validation outputs by
+  default. `recon_validate.sh` already owns per-batch takeover streaming, so the
+  watch loop now focuses on periodic WATCH rechecks unless
+  `TAKEOVER_WATCH_PROCESS_DONE=1` is explicitly set for manual recovery.
+- Hardened `recon_fresh_confirm.sh` scope filtering against non-object lines
+  from batch scope-check output, preventing `jq` errors like
+  `Cannot index string with string "in_scope"`.
+- Quieted the expected triage seen-file fallback when daemon runs under
+  `reconrun` and uses its per-UID dedup file.
+
+### Added
+- Optional post-score Ollama review layer: `recon_ollama.sh`,
+  `recon_ai_score.sh`, and `recon_ai_pack.sh`.
+- Ollama runs by default after deterministic triage scoring and can be disabled
+  with `ENABLE_OLLAMA_AI=0`; output is isolated under `ai_*` fields.
+- Daemon now passes `ENABLE_OLLAMA_AI`, `OLLAMA_URL`, `OLLAMA_MODEL_LEAD`, and
+  AI review limits into the `reconrun` worker environment.
+
 ## v2.3.3-takeover-noise - 2026-05-10 - Empty fingerprint guard
 
 ### Fixed

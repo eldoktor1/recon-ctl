@@ -69,6 +69,7 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
+ES_AUTH=(-u "$ES_USER:$ES_PASS")
 
 DISCORD_KEV_WEBHOOK="${DISCORD_KEV_WEBHOOK:-$(cat "$HOME/.recon_discord_kev" 2>/dev/null || true)}"
 DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-$(cat "$HOME/.recon_discord" 2>/dev/null || true)}"
@@ -92,6 +93,12 @@ flock -n 9 || { log "nuclei already running"; exit 0; }
   log "No KEV targets to scan (run recon_cve_intel.sh match first)"
   exit 0
 }
+
+es_doc_count="$(curl -fsS -m 10 "${ES_AUTH[@]}" "$ES_URL/$INDEX_NAME/_count" 2>/dev/null | jq -r '.count // 0' 2>/dev/null || echo 0)"
+if [[ "${es_doc_count:-0}" -eq 0 ]]; then
+  warn "ES index $INDEX_NAME is empty; refusing to scan stale KEV target file"
+  exit 0
+fi
 
 [[ -f "$SCOPE_CHECK" ]] || die "recon_scope_check.sh missing"
 
@@ -222,7 +229,13 @@ mkdir -p "$RUN_DIR"
 CONFIRMED_FILE="$NUCLEI_DIR/confirmed.jsonl"
 CONFIRMED_SEEN_FILE="$NUCLEI_DIR/.confirmed_seen"
 FP_LIST="$FP_DIR/known_fp.txt"
-touch "$CONFIRMED_FILE" "$CONFIRMED_SEEN_FILE" "$FP_LIST"
+touch "$CONFIRMED_FILE" "$FP_LIST"
+if ! (touch "$CONFIRMED_SEEN_FILE" 2>/dev/null && [[ -w "$CONFIRMED_SEEN_FILE" ]]); then
+  warn "$CONFIRMED_SEEN_FILE not writable by uid $(id -u); using per-uid seen file"
+  CONFIRMED_SEEN_FILE="$NUCLEI_DIR/.confirmed_seen.$(id -u)"
+  touch "$CONFIRMED_SEEN_FILE" 2>/dev/null || CONFIRMED_SEEN_FILE="/tmp/.recon_nuclei_confirmed_seen.$(id -u)"
+  touch "$CONFIRMED_SEEN_FILE" 2>/dev/null || true
+fi
 if [[ ! -s "$CONFIRMED_SEEN_FILE" && -s "$CONFIRMED_FILE" ]]; then
   jq -r '[.host // "", ."template-id" // ""] | @tsv' "$CONFIRMED_FILE" 2>/dev/null \
     | awk -F'\t' '$1 != "" && $2 != "" {print $1 "|" $2}' \

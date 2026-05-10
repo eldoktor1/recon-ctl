@@ -6,7 +6,9 @@
 #   1. Refresh scope DB (paying programs + payout_tier per program)
 #   2. Refresh KEV/CVE intel (CISA KEV + NVD recent), build tech→CVE map,
 #      match KEV against indexed hosts → kev_targets.jsonl
-#   3. Re-run triage with full enrichment
+#   3. Refresh normalized vuln feed (EPSS, CISA Vulnrichment, nuclei templates)
+#      and build a passive fresh-vuln asset queue
+#   4. Re-run triage with full enrichment
 #
 # Intended for:
 #   - On-demand refresh after manual scope/program changes
@@ -39,6 +41,7 @@ TRIAGE_DIR="${TRIAGE_DIR:-$BASE_DIR/triage}"
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 SCOPE_DB="${SCOPE_DB:-$SCRIPT_DIR/recon_scope_db.sh}"
 CVE_INTEL="${CVE_INTEL:-$SCRIPT_DIR/recon_cve_intel.sh}"
+VULN_FEED="${VULN_FEED:-$SCRIPT_DIR/recon_vuln_feed.sh}"
 TRIAGE="${TRIAGE:-$SCRIPT_DIR/triage.sh}"
 
 mode="${1:-full}"
@@ -76,6 +79,17 @@ case "$mode" in
     else
       warn "matches: no kev_targets.jsonl"
     fi
+    if [[ -s "$BASE_DIR/vuln/summary.json" ]]; then
+      log "vuln:    $(jq -r '.total // 0' "$BASE_DIR/vuln/summary.json") normalized records"
+      jq -r '(.tiers // {}) | to_entries[] | "  vuln tier \(.key)=\(.value)"' "$BASE_DIR/vuln/summary.json" 2>/dev/null
+    else
+      warn "vuln:    no summary.json"
+    fi
+    if [[ -s "$BASE_DIR/vuln/vuln_targets.jsonl" ]]; then
+      log "race:    $(wc -l < "$BASE_DIR/vuln/vuln_targets.jsonl" | tr -d ' ') passive vuln-to-asset matches"
+    else
+      warn "race:    no vuln_targets.jsonl"
+    fi
     if [[ -s "$TRIAGE_DIR/agent_targets.jsonl" ]]; then
       log "triage:  $(wc -l < "$TRIAGE_DIR/agent_targets.jsonl" | tr -d ' ') prioritized targets"
       log "         $(jq -s 'group_by(.payout_tier // "none") | map({(.[0].payout_tier // "none"): length}) | add // {}' \
@@ -96,6 +110,7 @@ case "$mode" in
     log "===== Brain quick refresh (KEV-only) ====="
     [[ -x "$SCOPE_DB"  ]] && run_step "scope_db"   bash "$SCOPE_DB"
     [[ -x "$CVE_INTEL" ]] && run_step "cve_kev"    bash "$CVE_INTEL" kev
+    [[ -x "$VULN_FEED" ]] && run_step "vuln_feed"  bash "$VULN_FEED" all
     [[ -x "$TRIAGE"    ]] && run_step "triage"     bash "$TRIAGE"
     ;;
 
@@ -103,10 +118,12 @@ case "$mode" in
     log "===== Brain full refresh ====="
     [[ -x "$SCOPE_DB"  ]] || warn "scope_db script missing: $SCOPE_DB"
     [[ -x "$CVE_INTEL" ]] || warn "cve_intel script missing: $CVE_INTEL"
+    [[ -x "$VULN_FEED" ]] || warn "vuln_feed script missing: $VULN_FEED"
     [[ -x "$TRIAGE"    ]] || die  "triage script missing: $TRIAGE"
 
     [[ -x "$SCOPE_DB"  ]] && run_step "scope_db"  bash "$SCOPE_DB"
     [[ -x "$CVE_INTEL" ]] && run_step "cve_intel" bash "$CVE_INTEL" all
+    [[ -x "$VULN_FEED" ]] && run_step "vuln_feed" bash "$VULN_FEED" all
                               run_step "triage"   bash "$TRIAGE"
     ;;
 esac

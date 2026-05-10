@@ -42,6 +42,59 @@ SCANNER_USER="${SCANNER_USER:-reconrun}"
 PROXY_URL="${PROXY_URL:-socks5h://127.0.0.1:9050}"
 USE_PROXYCHAINS="${USE_PROXYCHAINS:-1}"
 
+prepare_scanner_dirs() {
+  local shared_dirs=(
+    "$BASE_DIR"
+    "$STATE_DIR"
+    "$STATE_DIR/kill"
+    "$LOG_DIR"
+    "$BASE_DIR/queue"
+    "$BASE_DIR/queue/inbox"
+    "$BASE_DIR/queue/processing"
+    "$BASE_DIR/queue/done"
+    "$BASE_DIR/spool"
+    "$BASE_DIR/spool/pending"
+    "$BASE_DIR/spool/sent"
+    "$BASE_DIR/spool/failed"
+    "$BASE_DIR/firstblood"
+    "$BASE_DIR/triage"
+    "$BASE_DIR/fresh"
+    "$BASE_DIR/fresh/evidence"
+    "$BASE_DIR/scope"
+    "$BASE_DIR/scope/raw"
+    "$BASE_DIR/cache"
+    "$BASE_DIR/cache/programs"
+    "$BASE_DIR/cve"
+    "$BASE_DIR/cve/raw"
+    "$BASE_DIR/vuln"
+    "$BASE_DIR/vuln/raw"
+    "$BASE_DIR/ai_review"
+    "$BASE_DIR/ai_review/pending"
+  )
+  local scanner_dirs=(
+    "$BASE_DIR/nuclei"
+    "$BASE_DIR/nuclei/results"
+    "$BASE_DIR/nuclei/fingerprints"
+  )
+
+  mkdir -p "${shared_dirs[@]}"
+
+  [[ "$(id -un 2>/dev/null || true)" != "$SCANNER_USER" ]] || return 0
+  id "$SCANNER_USER" >/dev/null 2>&1 || return 0
+
+  sudo -n -u "$SCANNER_USER" env HOME="$HOME" BASE_DIR="$BASE_DIR" mkdir -p "${scanner_dirs[@]}" 2>/dev/null || true
+  command -v setfacl >/dev/null 2>&1 || return 0
+
+  local owner_user
+  owner_user="$(id -un 2>/dev/null || true)"
+  setfacl \
+    -m "u:${SCANNER_USER}:rwx" \
+    -m "d:u:${SCANNER_USER}:rwx" \
+    -m "u:${owner_user}:rwx" \
+    -m "d:u:${owner_user}:rwx" \
+    "${shared_dirs[@]}" 2>/dev/null || true
+}
+
 run_scanner() {
   local env_args=(
     HOME="$HOME"
@@ -57,6 +110,12 @@ run_scanner() {
     BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-2}"
     INBOX_FILE_CAP="${INBOX_FILE_CAP:-200}"
     BATCH_SIZE="${BATCH_SIZE:-2500}"
+    ENABLE_OLLAMA_AI="${ENABLE_OLLAMA_AI:-1}"
+    OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+    OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
+    AI_MAX_LEADS="${AI_MAX_LEADS:-25}"
+    AI_MIN_SCORE="${AI_MIN_SCORE:-15}"
+    MIN_AI_RELEVANCE="${MIN_AI_RELEVANCE:-7}"
     PATH="$PATH"
   )
   if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
@@ -66,7 +125,7 @@ run_scanner() {
   fi
 }
 
-mkdir -p "$STATE_DIR" "$LOG_DIR"
+prepare_scanner_dirs
 
 log() { printf '[%s DAEMON] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
@@ -216,11 +275,13 @@ export PATH="$PATH:$HOME/go/bin:/usr/local/bin:/usr/local/go/bin"
 SCOPE_DB_INTERVAL=${SCOPE_DB_INTERVAL:-86400}
 CVE_KEV_INTERVAL=${CVE_KEV_INTERVAL:-3600}
 CVE_NVD_INTERVAL=${CVE_NVD_INTERVAL:-86400}
+VULN_FEED_INTERVAL=${VULN_FEED_INTERVAL:-3600}
 NUCLEI_INTERVAL=${NUCLEI_INTERVAL:-21600}
 FRESH_CONFIRM_INTERVAL=${FRESH_CONFIRM_INTERVAL:-900}
 
 V21_SCOPE_DB="${V21_SCOPE_DB:-$(script_path recon_scope_db.sh)}"
 V21_CVE_INTEL="${V21_CVE_INTEL:-$(script_path recon_cve_intel.sh)}"
+V21_VULN_FEED="${V21_VULN_FEED:-$(script_path recon_vuln_feed.sh)}"
 V21_NUCLEI="${V21_NUCLEI:-$(script_path recon_nuclei.sh)}"
 V21_KILL="$HOME/recon/state/kill"
 
@@ -230,6 +291,7 @@ v21_killed() { [[ -f "$V21_KILL/v2_$1" ]]; }
 run_scope_db()   { v21_killed scope  && return 0; bash "$V21_SCOPE_DB"; }
 run_cve_kev()    { v21_killed cve    && return 0; bash "$V21_CVE_INTEL" kev; }
 run_cve_nvd()    { v21_killed cve    && return 0; bash "$V21_CVE_INTEL" nvd; }
+run_vuln_feed()  { v21_killed vuln_feed && return 0; run_scanner bash "$V21_VULN_FEED" all; }
 run_nuclei_v21() {
   v21_killed nuclei && return 0
   # Resource gate before nuclei (heaviest module)
@@ -317,6 +379,7 @@ run_discord_bot() {
   supervise_loop "scope-db"  "SCOPE_DB_INTERVAL" run_scope_db   &
   supervise_loop "cve-kev"   "CVE_KEV_INTERVAL"  run_cve_kev    &
   supervise_loop "cve-nvd"   "CVE_NVD_INTERVAL"  run_cve_nvd    &
+  supervise_loop "vuln-feed" "VULN_FEED_INTERVAL" run_vuln_feed &
   supervise_loop "nuclei-v21" "NUCLEI_INTERVAL"  run_nuclei_v21 &
   supervise_loop "fresh-confirm" "FRESH_CONFIRM_INTERVAL" run_fresh_confirm &
 

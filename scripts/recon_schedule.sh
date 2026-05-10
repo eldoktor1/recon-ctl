@@ -22,6 +22,8 @@ SCHEDULE_LOG="${SCHEDULE_LOG:-$HOME/recon/logs/recon_daemon.log}"
 TZ="America/Los_Angeles"
 export TZ
 
+mkdir -p "$(dirname "$MODE_FILE")" "$(dirname "$SCHEDULE_LOG")" 2>/dev/null || true
+
 log() { printf '[%s SCHED] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$SCHEDULE_LOG" 2>/dev/null || true; }
 
 DOW="$(date +%u)"   # 1=Mon ... 7=Sun
@@ -43,8 +45,11 @@ write_if_changed() {
   local current
   current="$(read_mode)"
   if [[ "$current" != "$target" ]]; then
-    echo "$target" > "$MODE_FILE"
-    log "$reason: $current -> $target (DOW=$DOW TIME=$(date +%H:%M)PT)"
+    if echo "$target" > "$MODE_FILE"; then
+      log "$reason: $current -> $target (DOW=$DOW TIME=$(date +%H:%M)PT)"
+    else
+      log "$reason: could not write mode file $MODE_FILE"
+    fi
   fi
 }
 

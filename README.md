@@ -9,6 +9,7 @@ scripts/
   triage.sh         — scoring engine → agent_targets.jsonl + Discord
   recon_daemon.sh   — forever loop, mode-aware, proxychains support
   recon_ctl.sh      — control interface (status/mode/logs/top/health/clean)
+  recon_vuln_feed.sh — passive CVE/advisory/template intelligence normalization
 docker/
   docker-compose.yml — ES 8.17.4 + Kibana 8.17.4
 ```
@@ -19,6 +20,21 @@ docker/
 ~/recon_ctl.sh mode night
 ~/recon_ctl.sh logs
 ```
+
+## Passive fresh-vuln intelligence
+`recon_vuln_feed.sh` builds the transcript-driven "fresh vuln race queue"
+without scanning targets. It normalizes local KEV/NVD data and optional public
+feeds such as EPSS, CISA Vulnrichment, and ProjectDiscovery nuclei-template
+signals, then matches those records against local Elasticsearch assets.
+
+```bash
+~/recon-pipeline/scripts/recon_ctl.sh vuln status
+~/recon-pipeline/scripts/recon_ctl.sh vuln top
+~/recon-pipeline/scripts/recon_ctl.sh v2 refresh-vuln
+```
+
+The daemon refreshes this layer automatically. Nuclei remains separately gated
+and will not run from AI-generated or raw advisory data.
 
 ## Clean active views safely
 Routine cleanup now archives stale runtime files instead of deleting useful

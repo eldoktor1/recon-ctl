@@ -95,6 +95,8 @@ cmd_help() {
 !queue           queue file counts
 !top [N]         top N targets (default 10, max 20)
 !fresh           latest fresh confirmed queue
+!vuln            passive vuln intelligence + race queue
+!ai              AI review status and pending packet counts
 !takeovers       high-confidence takeover candidates
 !watching        medium-confidence watching list
 !logs [N]        last N daemon log lines (default 20)
@@ -131,6 +133,14 @@ cmd_top() {
 
 cmd_fresh() {
     info "Fresh confirmed queue" "$(run_ctl fresh)"
+}
+
+cmd_ai() {
+    info "AI review layer" "$(run_ctl ai)"
+}
+
+cmd_vuln() {
+    info "Vuln intelligence" "$(run_ctl vuln status)"
 }
 
 cmd_takeovers() {
@@ -324,6 +334,8 @@ dispatch() {
         '!queue')     cmd_queue ;;
         '!top')       cmd_top "$arg" ;;
         '!fresh')     cmd_fresh ;;
+        '!vuln')      cmd_vuln ;;
+        '!ai')        cmd_ai ;;
         '!takeovers') cmd_takeovers ;;
         '!watching')  cmd_watching ;;
         '!logs')      cmd_logs "$arg" ;;
