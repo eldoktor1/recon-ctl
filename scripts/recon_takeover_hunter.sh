@@ -122,7 +122,7 @@ intercom^.*\.custom\.intercom\.help\.?$|.*\.intercom\.help\.?$^no^This page is r
 kajabi^.*\.kajabi\.com\.?$^no^The page you were looking for doesn'?t exist\.^404^medium^$300-$1000^Kajabi account; claim site with matching subdomain.
 launchrock^.*\.launchrock\.com\.?$^no^It looks like you may have taken a wrong turn somewhere\^404^medium^$200-$800^LaunchRock account; claim subdomain.
 mashery^.*\.mashery\.com\.?$^no^Unrecognized domain <strong>^404^impossible^N/A^Mashery (TIBCO) — manual investigation only.
-nationbuilder^^no^no website here|nationbuilder\.com$^404^medium^$300-$1500^NationBuilder account; map matching subdomain.
+nationbuilder^.*\.nationbuilder\.com\.?$^no^no website here|nationbuilder\.com$^404^medium^$300-$1500^NationBuilder account; map matching subdomain.
 netlify^\.netlify\.com\.?$|\.netlify\.app\.?$^no^Not Found - Request ID:|Page Not Found.*Looks like you'?ve followed a broken link^404^easy^$300-$1500^Netlify free account; create site, set custom domain to dangling host.
 ngrok^\.ngrok\.io\.?$|\.ngrok-free\.app\.?$|\.ngrok\.app\.?$^no^Tunnel.*not found|ERR_NGROK_3200|ERR_NGROK_6022^404,502^medium^$200-$800^Run ngrok with the matching reserved domain. Paid plan required for reserved domains.
 pantheon^\.pantheonsite\.io\.?$^no^The gods are wise, but do not know of the site|404 error unknown site!^404^medium^$300-$1500^Pantheon account; create site with matching slug.
@@ -282,6 +282,7 @@ match_provider() {
   local cname="$1"
   local i
   for ((i=0; i<${#FP_SVC[@]}; i++)); do
+    [[ -n "${FP_CNAME[$i]}" ]] || continue
     if [[ "$cname" =~ ${FP_CNAME[$i]} ]]; then
       printf '%d\n' "$i"
       return 0

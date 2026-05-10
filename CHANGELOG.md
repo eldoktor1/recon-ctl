@@ -1,5 +1,13 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.3.3-takeover-noise - 2026-05-10 - Empty fingerprint guard
+
+### Fixed
+- Corrected the NationBuilder takeover fingerprint CNAME regex, which had an
+  empty provider pattern and caused broad false Stage 2 hits.
+- Added a defensive guard in `match_provider` so empty CNAME regexes are skipped
+  instead of matching every CNAME target.
+
 ## v2.3.2-profile-pass - 2026-05-10 - Scanner profile env propagation
 
 ### Fixed
