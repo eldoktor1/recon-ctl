@@ -1,5 +1,27 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.5.2-single-profile - 2026-05-14 - One sane multi-worker profile
+
+### Removed
+- `browse` / `boost` mode toggling. The `load_profile` case-statement,
+  `~/.recon_mode` reads, on-battery auto-downgrade-to-browse path, and
+  the `schedule` supervise loop (with `scripts/recon_schedule.sh`) are
+  all gone.
+- `recon_ctl mode`, `recon_ctl schedule`, `recon_ctl schedule-check`
+  commands removed from dispatch + usage. `recon_ctl mode` now prints
+  a deprecation notice.
+
+### Changed
+- One always-on production profile (`load_runtime_env` in `recon_daemon.sh`):
+  HTTPX_THREADS=80, HTTPX_RATE=100/worker, HTTPX_MAX_RUNTIME=1200s,
+  BATCHES_PER_CYCLE=3, VALIDATE_SLEEP=420s, DISCOVERY_SLEEP=1800s,
+  HOT_SEED_SLEEP=300s, SCOPE_SLEEP=5400s. Tor SOCKS is the real bandwidth
+  bottleneck — these values saturate it without melting the laptop.
+- On-battery auto-throttle: halves HTTPX_THREADS + HTTPX_RATE and drops
+  BATCHES_PER_CYCLE to 2 when AC is unplugged. Reported via `POWER_STATE`
+  in supervise_loop log lines and `recon_ctl status`.
+- `recon_ctl status` "Mode: ..." line replaced with "Power: AC | battery".
+
 ## v2.5.1-consolidation - 2026-05-14 - Collapse 4 scan modules into a dispatcher
 
 ### Changed
