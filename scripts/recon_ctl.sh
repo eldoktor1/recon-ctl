@@ -11,7 +11,6 @@ FB_DIR="$BASE_DIR/firstblood"
 LOG_DIR="$BASE_DIR/logs"
 TRIAGE_DIR="$BASE_DIR/triage"
 VULN_DIR="$BASE_DIR/vuln"
-MODE_FILE="$HOME/.recon_mode"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -141,7 +140,7 @@ cmd_stop() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
-    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|schedule|true_fresh|fresh_modules)\.sh' 2>/dev/null || true
+    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|true_fresh|fresh_modules)\.sh' 2>/dev/null || true
     # Stop certstream listener spawned by recon_true_fresh.sh
     if [[ -s "$BASE_DIR/state/true_fresh/certstream.pid" ]]; then
       kill "$(cat "$BASE_DIR/state/true_fresh/certstream.pid" 2>/dev/null)" 2>/dev/null || true
@@ -161,7 +160,13 @@ cmd_status() {
     local pid; pid="$(cat "$PID_FILE")"
     local etime; etime="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
     echo "Running (pid $pid, uptime $etime)"
-    echo "Mode: $(cat "$MODE_FILE" 2>/dev/null || echo browse)"
+    if command -v acpi >/dev/null 2>&1; then
+      if acpi -a 2>/dev/null | grep -qi 'off-line'; then
+        echo "Power: battery (auto-throttled to 50% concurrency)"
+      else
+        echo "Power: AC"
+      fi
+    fi
     echo "Children:"
     pgrep -af 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter)\.sh' 2>/dev/null \
       | awk '{printf "  pid=%s %s %s\n",$1,$2,$3}' || true
@@ -186,18 +191,12 @@ cmd_status() {
 }
 
 cmd_mode() {
-  local m="${1:-}"
-  if [[ -z "$m" ]]; then
-    echo "Current mode: $(cat "$MODE_FILE" 2>/dev/null || echo browse)"
-    return
-  fi
-  case "$m" in
-    night) m="boost" ;;
-  esac
-  case "$m" in
-    browse|boost) echo "$m" > "$MODE_FILE"; echo "Mode → $m (effective next cycle)" ;;
-    *) echo "Usage: recon_ctl mode browse|boost"; return 1 ;;
-  esac
+  cat <<EOF
+Mode toggling was removed in v2.5.2. The daemon now runs a single sane
+"capable" profile (multi-worker, higher output, Tor-friendly). It auto-
+throttles to 50% concurrency when the laptop is on battery.
+See \`recon_ctl status\` for current power state.
+EOF
 }
 
 cmd_queue() {
@@ -579,42 +578,6 @@ cmd_inspect() {
   bash "$(script_path recon_inspect.sh)" "$host"
 }
 
-cmd_schedule_status() {
-  local tz="America/Los_Angeles"
-  local dow hour min time_mins
-  dow="$(TZ=$tz date +%u)"
-  hour="$(TZ=$tz date +%H)"
-  min="$(TZ=$tz date +%M)"
-  time_mins=$(( 10#$hour * 60 + 10#$min ))
-  local browse_start=1050 browse_end=1410  # 17:30-23:30
-
-  hdr "Schedule status"
-  echo "  Current PT time: $(TZ=$tz date '+%A %H:%M')"
-  echo "  Current mode:    $(cat "$MODE_FILE" 2>/dev/null || echo browse)"
-  local weekend_boost_start=180 weekend_boost_end=600
-  if [[ "$dow" -ge 6 && "$time_mins" -ge "$weekend_boost_start" && "$time_mins" -lt "$weekend_boost_end" ]]; then
-    echo "  Weekend boost window: ACTIVE (until 10:00 AM PT)"
-  elif [[ "$dow" -ge 6 ]]; then
-    echo "  Weekend: manual mode preserved outside 3:00 AM-10:00 AM PT boost window (use: recon_ctl mode browse|boost)"
-  elif [[ "$time_mins" -ge "$browse_start" && "$time_mins" -lt "$browse_end" ]]; then
-    echo "  Weekday browse window: ACTIVE (until 11:30 PM PT)"
-  else
-    echo "  Boost mode window: ACTIVE"
-    if [[ "$time_mins" -lt "$browse_start" ]]; then
-      mins_until=$(( browse_start - time_mins ))
-      echo "  Browse starts in: ${mins_until}m (at 5:30 PM PT)"
-    else
-      echo "  Next browse window: tomorrow 5:30 PM PT"
-    fi
-  fi
-  echo "  Schedule: weekdays 5:30pm-11:30pm=browse, weekday off-hours=boost, weekends 3am-10am=boost"
-}
-
-cmd_schedule_check() {
-  bash "$(script_path recon_schedule.sh)" && echo "Schedule check OK"
-  echo "Mode is now: $(cat "$HOME/.recon_mode" 2>/dev/null || echo browse)"
-}
-
 usage() {
 cat <<EOF
 recon_ctl — pipeline control
@@ -622,7 +585,7 @@ recon_ctl — pipeline control
   start                  Launch daemon
   stop                   Stop daemon + children
   status                 Daemon, queue, ES, FB summary
-  mode [browse|boost]    Show or set mode (night remains an alias)
+  mode                   (deprecated) single config in v2.5.2+
   queue                  Show queue counts
   logs [N]               Tail daemon log (default 50)
   top [N]                Top N triage targets (default 15)
@@ -654,8 +617,6 @@ recon_ctl — pipeline control
   v2 refresh-vuln        Run passive vuln feed now
   v2 scan-now            Run nuclei pass now
   inspect <host>         Full triage view (ES + scope + KEV + live probe)
-  schedule               Show schedule status and current window
-  schedule-check         Force run schedule check now
 EOF
 }
 
@@ -687,7 +648,5 @@ case "${1:-}" in
   ignore)       shift; cmd_ignore "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;
-  schedule)      cmd_schedule_status ;;
-  schedule-check) cmd_schedule_check ;;
   *) echo "Unknown: $1"; usage; exit 1 ;;
 esac

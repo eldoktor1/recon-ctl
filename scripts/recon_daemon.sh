@@ -25,7 +25,6 @@ STATE_DIR="$BASE_DIR/state"
 LOG_DIR="$BASE_DIR/logs"
 PID_FILE="$STATE_DIR/recon_daemon.pid"
 LOG_FILE="$LOG_DIR/recon_daemon.log"
-MODE_FILE="$HOME/.recon_mode"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
@@ -163,52 +162,35 @@ cleanup_exit() {
 }
 trap cleanup_exit EXIT
 
-# ---- Mode profile loader ----
-load_profile() {
-  local mode=""
-  [[ -f "$MODE_FILE" ]] && mode="$(tr -d '[:space:]' < "$MODE_FILE" 2>/dev/null || true)"
-  mode="${mode:-browse}"
-  [[ "$mode" == "night" ]] && mode="boost"
+# ---- Runtime env loader (v2.5.2: single capable config, no mode toggle) ----
+#
+# One sane production profile: multi-worker + higher output, but tempered so
+# Tor doesn't drown and the laptop doesn't melt. Tor SOCKS at 9050 is the
+# real bandwidth bottleneck — going past ~80 httpx threads at 100 rps each
+# saturates Tor without speeding anything up.
+#
+# On-battery auto-throttle: halve concurrency + rate when AC is unplugged.
+load_runtime_env() {
+  export HTTPX_THREADS="${HTTPX_THREADS_OVERRIDE:-80}"
+  export HTTPX_RATE="${HTTPX_RATE_OVERRIDE:-100}"   # per worker; Tor throttles total
+  export HTTPX_TIMEOUT=10
+  export HTTPX_MAX_RUNTIME=1200                      # 20 min hard cap
+  export BATCHES_PER_CYCLE=3
+  export INBOX_FILE_CAP=200
+  export BATCH_SIZE=2500
+  VALIDATE_SLEEP=420                                 # 7 min
+  DISCOVERY_SLEEP=1800                               # 30 min
+  HOT_SEED_SLEEP=300                                 # 5 min
+  SCOPE_SLEEP=5400                                   # 90 min
 
-  # Auto-downgrade if on battery
-  if [[ "$mode" == "boost" ]] && command -v acpi >/dev/null 2>&1; then
-    if acpi -a 2>/dev/null | grep -qi 'off-line'; then
-      log "On battery — forcing browse mode"
-      mode="browse"
-    fi
+  if command -v acpi >/dev/null 2>&1 && acpi -a 2>/dev/null | grep -qi 'off-line'; then
+    export HTTPX_THREADS=$(( HTTPX_THREADS / 2 ))
+    export HTTPX_RATE=$(( HTTPX_RATE / 2 ))
+    BATCHES_PER_CYCLE=2
+    POWER_STATE="battery"
+  else
+    POWER_STATE="ac"
   fi
-
-  case "$mode" in
-    boost)
-      # SAFE boost profile (NOT the 4000rps catastrophe from prior build)
-      export HTTPX_THREADS=120
-      export HTTPX_RATE=200          # per worker; with parallelism ~600-800 rps total
-      export HTTPX_TIMEOUT=10
-      export HTTPX_MAX_RUNTIME=1500  # 25 min hard cap
-      export BATCHES_PER_CYCLE=4
-      export INBOX_FILE_CAP=200
-      export BATCH_SIZE=2500
-      VALIDATE_SLEEP=300        # 5 min between cycles
-      DISCOVERY_SLEEP=900       # 15 min
-      HOT_SEED_SLEEP=180        # 3 min
-      SCOPE_SLEEP=3600          # 1h
-      ;;
-    browse|*)
-      # Polite — won't impact your browsing
-      export HTTPX_THREADS=15
-      export HTTPX_RATE=15
-      export HTTPX_TIMEOUT=10
-      export HTTPX_MAX_RUNTIME=900   # 15 min hard cap
-      export BATCHES_PER_CYCLE=2
-      export INBOX_FILE_CAP=200
-      export BATCH_SIZE=2500
-      VALIDATE_SLEEP=900       # 15 min
-      DISCOVERY_SLEEP=3600     # 1h
-      HOT_SEED_SLEEP=600       # 10 min
-      SCOPE_SLEEP=7200         # 2h
-      ;;
-  esac
-  CURRENT_MODE="$mode"
 }
 
 # ---- Periodic cleanup ----
@@ -246,10 +228,10 @@ supervise_loop() {
   local backoff=10 max_backoff=600
 
   while [[ "$SHUTDOWN" -eq 0 ]]; do
-    load_profile  # so children always see fresh env
+    load_runtime_env  # so children always see fresh env (re-checks AC/battery)
     local sleep_secs="${!sleep_var}"
 
-    log "[$name] starting iteration (mode=$CURRENT_MODE)"
+    log "[$name] starting iteration (power=$POWER_STATE threads=$HTTPX_THREADS)"
     if "$@"; then
       backoff=10
     else
@@ -308,12 +290,6 @@ run_nuclei_v21() {
     log "[nuclei-v21] SKIP (disk ${disk_gb}GB)"; return 0
   fi
   run_scanner bash "$V21_NUCLEI"
-}
-
-SCHEDULE_SLEEP=${SCHEDULE_SLEEP:-300}   # check every 5 minutes
-SCHEDULE_SCRIPT="${SCHEDULE_SCRIPT:-$(script_path recon_schedule.sh)}"
-run_schedule() {
-  [[ -f "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
 }
 
 # ---- True-Fresh engine (v2.5) ---------------------------------------------
@@ -383,8 +359,8 @@ run_discord_bot() {
 # ---- Master loop ----
 {
   log "===== recon_daemon started (pid $$) ====="
-  load_profile
-  log "Initial mode: $CURRENT_MODE"
+  load_runtime_env
+  log "Initial config: power=$POWER_STATE threads=$HTTPX_THREADS rate=$HTTPX_RATE batches=$BATCHES_PER_CYCLE"
 
   last_cleanup=0
 
@@ -395,7 +371,6 @@ run_discord_bot() {
   supervise_loop "hot-seed"      "HOT_SEED_SLEEP"      run_hot_seed      &
   supervise_loop "scope-watch"   "SCOPE_SLEEP"         run_scope_watch   &
 
-  supervise_loop "schedule"   "SCHEDULE_SLEEP"    run_schedule   &
   supervise_loop "true-fresh" "TRUE_FRESH_SLEEP"  run_true_fresh &
 
   # V21 sub-loops
