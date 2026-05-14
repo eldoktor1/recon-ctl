@@ -635,11 +635,15 @@ mode_watch() {
       tail -n 4000 "$processed_marker" > "$processed_marker.tmp" && mv "$processed_marker.tmp" "$processed_marker"
     fi
 
-    # Periodic recheck of WATCH list (every ~30 mins)
+    # Periodic recheck of WATCH list. v2.5: loop cadence dropped to 15 min so
+    # true-fresh hosts get faster re-verification. Inside mode_recheck, each
+    # entry's last-probed timestamp gates whether it actually probes:
+    #   - true_fresh host: always re-probe
+    #   - regular host:    re-probe only if 30+ min since last probe
     local now_min last_recheck recheck_marker="$STATE_DIR/last_takeover_recheck.epoch"
     now_min="$(( $(date +%s) / 60 ))"
     last_recheck="$(cat "$recheck_marker" 2>/dev/null || echo 0)"
-    if (( now_min - last_recheck > 30 )); then
+    if (( now_min - last_recheck >= 15 )); then
       mode_recheck
       echo "$now_min" > "$recheck_marker"
     fi
@@ -661,24 +665,58 @@ mode_recheck() {
   local tmp_keep; tmp_keep="$(mktemp)"
   trap "rm -f $tmp_keep" RETURN
 
+  # v2.5: Build set of true_fresh hosts (≤24h, valid) once for fast lookups.
+  local fresh_set; fresh_set="$(mktemp)"
+  trap "rm -f $tmp_keep $fresh_set" RETURN
+  if [[ -s "$STATE_DIR/true_fresh.jsonl" ]]; then
+    local cutoff; cutoff="$(date -u -d '-24 hours' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    jq -r --arg c "$cutoff" 'select((.external_first_seen // "") >= $c) | .host' \
+      "$STATE_DIR/true_fresh.jsonl" 2>/dev/null | sort -u > "$fresh_set"
+  fi
+
+  # Per-host last-probe map (host\tepoch). Skip non-fresh hosts that were
+  # probed within the last 30 min to keep load low.
+  local lp_file="$STATE_DIR/takeover_recheck_lp.tsv"
+  touch "$lp_file"
+  local now_epoch; now_epoch="$(date +%s)"
+  local probe_cutoff=$(( now_epoch - 30 * 60 ))
+
+  declare -A last_probed
+  while IFS=$'\t' read -r h ep; do
+    [[ -n "$h" ]] && last_probed["$h"]="$ep"
+  done < "$lp_file"
+
+  local lp_new; lp_new="$(mktemp)"
+
   while IFS=$'\t' read -r ts host svc cname conf stages diff notes; do
     [[ -z "$host" ]] && continue
-
-    # Skip if already in seen (was upgraded to CLAIM)
     if grep -qxF "$host" "$SEEN_FILE" 2>/dev/null; then continue; fi
 
-    # Re-probe (this writes to CLAIM/WATCH/EVENT as appropriate)
-    probe_host "$host" "$cname"
+    local is_fresh=0
+    [[ -s "$fresh_set" ]] && grep -qxF "$host" "$fresh_set" 2>/dev/null && is_fresh=1
 
-    # If after re-probe it's now in SEEN, it was promoted — don't keep in WATCH
+    local last="${last_probed[$host]:-0}"
+    if [[ "$is_fresh" -eq 0 && "$last" -ge "$probe_cutoff" ]]; then
+      # Non-fresh host recently probed — keep entry, don't re-probe
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$host" "$svc" "$cname" "$conf" "$stages" "$diff" "$notes" >> "$tmp_keep"
+      printf '%s\t%s\n' "$host" "$last" >> "$lp_new"
+      continue
+    fi
+
+    probe_host "$host" "$cname"
+    printf '%s\t%s\n' "$host" "$now_epoch" >> "$lp_new"
+
     if grep -qxF "$host" "$SEEN_FILE" 2>/dev/null; then
       log "  ↑ Promoted to CLAIM: $host"
       continue
     fi
 
-    # Otherwise keep in watch (with refreshed timestamp would require parsing — skip for now)
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$host" "$svc" "$cname" "$conf" "$stages" "$diff" "$notes" >> "$tmp_keep"
   done < "$WATCH_FILE"
+
+  # Dedupe + keep latest per host
+  sort -u -k1,1 -t$'\t' "$lp_new" -o "$lp_new"
+  mv "$lp_new" "$lp_file"
 
   mv "$tmp_keep" "$WATCH_FILE"
   log "Recheck done. Remaining in WATCH: $(wc -l < "$WATCH_FILE" | tr -d ' ')"

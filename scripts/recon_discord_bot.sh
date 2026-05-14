@@ -94,7 +94,6 @@ cmd_help() {
 !health          full health check
 !queue           queue file counts
 !top [N]         top N targets (default 10, max 20)
-!fresh           latest fresh confirmed queue
 !vuln            passive vuln intelligence + race queue
 !ai              AI review status and pending packet counts
 !takeovers       high-confidence takeover candidates
@@ -129,10 +128,6 @@ cmd_top() {
     [[ "$n" =~ ^[0-9]+$ ]] || n=10
     [[ "$n" -gt 20 ]] && n=20
     info "Top $n targets" "$(run_ctl top "$n")"
-}
-
-cmd_fresh() {
-    info "Fresh confirmed queue" "$(run_ctl fresh)"
 }
 
 cmd_ai() {
@@ -333,7 +328,6 @@ dispatch() {
         '!health')    cmd_health ;;
         '!queue')     cmd_queue ;;
         '!top')       cmd_top "$arg" ;;
-        '!fresh')     cmd_fresh ;;
         '!vuln')      cmd_vuln ;;
         '!ai')        cmd_ai ;;
         '!takeovers') cmd_takeovers ;;

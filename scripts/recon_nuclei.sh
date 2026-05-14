@@ -59,6 +59,42 @@ command -v nuclei >/dev/null || die "nuclei not installed"
 NUCLEI_DIR="${NUCLEI_DIR:-$HOME/recon/nuclei}"
 RESULTS_DIR="$NUCLEI_DIR/results"
 FP_DIR="$NUCLEI_DIR/fp"
+BOUNTY_TEMPLATES_DIR="$NUCLEI_DIR/bounty_templates"
+
+# -----------------------------------------------------------------------------
+# Subcommand: `recon_nuclei.sh bounty <target_file>`
+# Runs nuclei using ONLY the curated bounty template set against the hosts in
+# <target_file> (one URL per line). Emits .jsonl results under
+# results/bounty_<ts>/. Used by recon_fresh_modules.sh (smart-scan mode).
+# -----------------------------------------------------------------------------
+if [[ "${1:-}" == "bounty" ]]; then
+  shift
+  target_file="${1:-}"; shift || true
+  [[ -s "$target_file" ]] || { warn "bounty mode: target file empty or missing"; exit 0; }
+  [[ -d "$BOUNTY_TEMPLATES_DIR" ]] || { warn "bounty templates dir missing — run tools/sync_bounty_templates.sh"; exit 0; }
+  RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+  RUN_DIR="$RESULTS_DIR/bounty_$RUN_TS"
+  out_file="$RUN_DIR/findings.jsonl"
+  mkdir -p "$RUN_DIR"
+  log "Bounty scan: $(wc -l < "$target_file" | tr -d ' ') targets, templates=$BOUNTY_TEMPLATES_DIR"
+  timeout 900 nuclei \
+    -proxy "$PROXY_URL" \
+    -l "$target_file" \
+    -t "$BOUNTY_TEMPLATES_DIR" \
+    -severity critical,high,medium \
+    -rate-limit "${RATE_LIMIT:-10}" \
+    -timeout "${TIMEOUT:-60}" \
+    -retries 1 -no-color -silent -nc \
+    -jsonl -o "$out_file" 2>/dev/null || true
+  # Append confirmed
+  if [[ -s "$out_file" ]]; then
+    cat "$out_file" >> "$NUCLEI_DIR/confirmed.jsonl"
+    log "Bounty scan: $(wc -l < "$out_file") findings written"
+  else
+    log "Bounty scan: no findings"
+  fi
+  exit 0
+fi
 CVE_DIR="$HOME/recon/cve"
 SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
 [[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"

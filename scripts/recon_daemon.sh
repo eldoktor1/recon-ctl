@@ -35,7 +35,6 @@ DISCOVERY="${DISCOVERY:-$(script_path recon_discovery.sh)}"
 HOT_SEED="${HOT_SEED:-$(script_path recon_hot_seed.sh)}"
 SCOPE_WATCH="${SCOPE_WATCH:-$(script_path recon_scope_watch.sh)}"
 TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
-FRESH_CONFIRM="${FRESH_CONFIRM:-$(script_path recon_fresh_confirm.sh)}"
 
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
@@ -58,8 +57,7 @@ prepare_scanner_dirs() {
     "$BASE_DIR/spool/failed"
     "$BASE_DIR/firstblood"
     "$BASE_DIR/triage"
-    "$BASE_DIR/fresh"
-    "$BASE_DIR/fresh/evidence"
+    "$STATE_DIR/true_fresh"
     "$BASE_DIR/scope"
     "$BASE_DIR/scope/raw"
     "$BASE_DIR/cache"
@@ -155,6 +153,12 @@ cleanup_exit() {
   jobs -p 2>/dev/null | xargs -r kill -TERM 2>/dev/null || true
   sleep 5
   jobs -p 2>/dev/null | xargs -r kill -KILL 2>/dev/null || true
+  # Stop certstream listener (long-lived child of recon_true_fresh.sh)
+  if [[ -s "$STATE_DIR/true_fresh/certstream.pid" ]]; then
+    local cspid; cspid="$(cat "$STATE_DIR/true_fresh/certstream.pid" 2>/dev/null)"
+    [[ -n "$cspid" ]] && kill "$cspid" 2>/dev/null || true
+    rm -f "$STATE_DIR/true_fresh/certstream.pid"
+  fi
   rm -f "$PID_FILE"
 }
 trap cleanup_exit EXIT
@@ -277,7 +281,6 @@ CVE_KEV_INTERVAL=${CVE_KEV_INTERVAL:-3600}
 CVE_NVD_INTERVAL=${CVE_NVD_INTERVAL:-86400}
 VULN_FEED_INTERVAL=${VULN_FEED_INTERVAL:-3600}
 NUCLEI_INTERVAL=${NUCLEI_INTERVAL:-21600}
-FRESH_CONFIRM_INTERVAL=${FRESH_CONFIRM_INTERVAL:-900}
 
 V21_SCOPE_DB="${V21_SCOPE_DB:-$(script_path recon_scope_db.sh)}"
 V21_CVE_INTEL="${V21_CVE_INTEL:-$(script_path recon_cve_intel.sh)}"
@@ -306,10 +309,6 @@ run_nuclei_v21() {
   fi
   run_scanner bash "$V21_NUCLEI"
 }
-run_fresh_confirm() {
-  v21_killed fresh && return 0
-  run_scanner bash "$FRESH_CONFIRM"
-}
 
 SCHEDULE_SLEEP=${SCHEDULE_SLEEP:-300}   # check every 5 minutes
 SCHEDULE_SCRIPT="${SCHEDULE_SCRIPT:-$(script_path recon_schedule.sh)}"
@@ -317,10 +316,32 @@ run_schedule() {
   [[ -f "$SCHEDULE_SCRIPT" ]] && bash "$SCHEDULE_SCRIPT" || true
 }
 
-run_validate()    { run_scanner bash "$VALIDATE";    }
-run_discovery()   { run_scanner bash "$DISCOVERY";   }
-run_hot_seed()    { bash "$HOT_SEED";    }
-run_scope_watch() { run_scanner bash "$SCOPE_WATCH"; }
+# ---- True-Fresh engine (v2.5) ---------------------------------------------
+# Passive (CT logs + crt.sh). Direct egress — does NOT run under reconrun/Tor.
+TRUE_FRESH_SCRIPT="${TRUE_FRESH_SCRIPT:-$(script_path recon_true_fresh.sh)}"
+TRUE_FRESH_SLEEP="${TRUE_FRESH_SLEEP:-120}"
+run_true_fresh() { bash "$TRUE_FRESH_SCRIPT"; }
+
+# ---- Bounty / deep / active / JS scan loops (v2.5) ------------------------
+# All four are dispatched from a single script: recon_fresh_modules.sh <mode>.
+BOUNTY_SCAN_INTERVAL="${BOUNTY_SCAN_INTERVAL:-1800}"
+DEEP_SCAN_INTERVAL="${DEEP_SCAN_INTERVAL:-86400}"
+ACTIVE_CHECKS_INTERVAL="${ACTIVE_CHECKS_INTERVAL:-600}"
+JS_SCAN_INTERVAL="${JS_SCAN_INTERVAL:-1800}"
+
+FRESH_MODULES_SCRIPT="${FRESH_MODULES_SCRIPT:-$(script_path recon_fresh_modules.sh)}"
+
+run_smart_scan()    { v21_killed nuclei && return 0; [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" smart-scan     || true; }
+run_deep_scan()     { v21_killed nuclei && return 0; [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" deep-scan      || true; }
+run_active_checks() { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" active-checks || true; }
+run_js_scanner()    { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" js-scan       || true; }
+
+run_validate()        { run_scanner bash "$VALIDATE" --exclude-prefix 00_; }
+run_validate_fast()   { run_scanner bash "$VALIDATE" --prefix 00_;          }
+run_discovery()       { run_scanner bash "$DISCOVERY";                      }
+run_hot_seed()        { bash "$HOT_SEED";                                   }
+run_scope_watch()     { run_scanner bash "$SCOPE_WATCH";                    }
+VALIDATE_FAST_SLEEP="${VALIDATE_FAST_SLEEP:-120}"
 
 # Takeover watch is long-running; supervise differently
 # v2.2: throttled — only log launches when state actually changes (avoid spam
@@ -368,20 +389,25 @@ run_discord_bot() {
   last_cleanup=0
 
   # Launch all sub-loops as background jobs
-  supervise_loop "validate"    "VALIDATE_SLEEP"  run_validate    &
-  supervise_loop "discovery"   "DISCOVERY_SLEEP" run_discovery   &
-  supervise_loop "hot-seed"    "HOT_SEED_SLEEP"  run_hot_seed    &
-  supervise_loop "scope-watch" "SCOPE_SLEEP"     run_scope_watch &
+  supervise_loop "validate"      "VALIDATE_SLEEP"      run_validate      &
+  supervise_loop "validate-fast" "VALIDATE_FAST_SLEEP" run_validate_fast &
+  supervise_loop "discovery"     "DISCOVERY_SLEEP"     run_discovery     &
+  supervise_loop "hot-seed"      "HOT_SEED_SLEEP"      run_hot_seed      &
+  supervise_loop "scope-watch"   "SCOPE_SLEEP"         run_scope_watch   &
 
   supervise_loop "schedule"   "SCHEDULE_SLEEP"    run_schedule   &
+  supervise_loop "true-fresh" "TRUE_FRESH_SLEEP"  run_true_fresh &
 
   # V21 sub-loops
   supervise_loop "scope-db"  "SCOPE_DB_INTERVAL" run_scope_db   &
   supervise_loop "cve-kev"   "CVE_KEV_INTERVAL"  run_cve_kev    &
   supervise_loop "cve-nvd"   "CVE_NVD_INTERVAL"  run_cve_nvd    &
   supervise_loop "vuln-feed" "VULN_FEED_INTERVAL" run_vuln_feed &
-  supervise_loop "nuclei-v21" "NUCLEI_INTERVAL"  run_nuclei_v21 &
-  supervise_loop "fresh-confirm" "FRESH_CONFIRM_INTERVAL" run_fresh_confirm &
+  supervise_loop "nuclei-v21"     "NUCLEI_INTERVAL"        run_nuclei_v21     &
+  supervise_loop "bounty-scan"    "BOUNTY_SCAN_INTERVAL"   run_smart_scan     &
+  supervise_loop "deep-scan"      "DEEP_SCAN_INTERVAL"     run_deep_scan      &
+  supervise_loop "active-checks"  "ACTIVE_CHECKS_INTERVAL" run_active_checks  &
+  supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
 
     # Long-running — supervised with simple restart loops
   (

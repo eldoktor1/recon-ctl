@@ -2,15 +2,20 @@
 
 ## Current Stable Checkpoint
 
-    v2.4.0-vuln-intel — Passive fresh-vuln race queue
+    v2.5.0-true-fresh — CT-log driven true-freshness engine
 
-This is the final production-ready state.
+This is the current production state. The legacy "freshblood" / fresh-confirm
+system has been removed; freshness is now driven externally by certstream +
+crt.sh.
 
 This version includes:
 
 - all scripts resolved from repo; no home-directory fallbacks
-- shared `recon_net.sh` fail-closed Tor proxy helper
-- fresh-confirm loop for paying-program candidates
+- shared `recon_net.sh` fail-closed Tor proxy helper, plus
+  `browser_curl` / random real-browser UA helpers
+- true-fresh engine (`recon_true_fresh.sh`) — certstream + crt.sh
+- dual-lane validator (fast lane `--prefix 00_` for fresh batches)
+- bounty + deep + active + JS scan loops, all gated to true-fresh hosts
 - safe hidden Windows autostart
 - local Elasticsearch support
 - target-facing scanners running under `reconrun`

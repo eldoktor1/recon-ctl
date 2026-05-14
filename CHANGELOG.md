@@ -1,5 +1,133 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.5.1-consolidation - 2026-05-14 - Collapse 4 scan modules into a dispatcher
+
+### Changed
+- Consolidated `recon_smart_scan.sh`, `recon_deep_scan.sh`,
+  `recon_active_checks.sh`, and `recon_js_scanner.sh` into a single
+  dispatcher `recon_fresh_modules.sh {smart-scan|deep-scan|active-checks|js-scan}`.
+  All four shared substantial boilerplate (lockfile setup, Discord webhook
+  loading, ES auth, true-fresh+paid host selection) — now deduplicated into
+  one file with mode-specific functions and per-mode lockfiles. No behavior
+  change.
+- Daemon `run_smart_scan` / `run_deep_scan` / `run_active_checks` /
+  `run_js_scanner` now call `recon_fresh_modules.sh <mode>`.
+- `recon_ctl.sh stop` `pkill` pattern simplified accordingly.
+
+### Removed
+- `scripts/recon_smart_scan.sh`
+- `scripts/recon_deep_scan.sh`
+- `scripts/recon_active_checks.sh`
+- `scripts/recon_js_scanner.sh`
+
+## v2.5.0-true-fresh - 2026-05-13 - True-freshness engine and bounty-first pivot
+
+### Removed
+- Deleted the local `first_seen`-based "freshblood" scoring path: removed
+  `novelty_bonus`, `freshblood_payday` / `FRESHBLOOD_PAYDAY_BONUS`,
+  `DISCORD_ALERT_FRESH_HOURS`, and 🩸 markers from `triage.sh`, report output,
+  and Discord embeds.
+- Deleted `recon_fresh_confirm.sh` and all references (daemon supervise loop,
+  `recon_ctl fresh`, `recon_discord_bot !fresh`, `v2_fresh` killswitch slot,
+  `seed_seen_files` / `clean-start` paths, `pkill` patterns).
+
+### Added — Phase 1: True-Freshness Engine
+- New `recon_true_fresh.sh` (passive, direct egress — not via Tor): runs a
+  certstream listener via single-instance pidfile that loads in-scope-paying
+  patterns into memory and emits matching domains in real time, plus a 6h
+  crt.sh poller. Hits hit a holding file, get scope-filtered + 24h-deduped,
+  then split into `00_truefresh_<ts>_<batch>.txt` (500 hosts each) under
+  `queue/inbox/`. Durable feed lives at `~/recon/state/true_fresh.jsonl`.
+  Holding + per-host JSON responses cleaned every cycle.
+- New daemon supervise loop `true-fresh` at `TRUE_FRESH_SLEEP=120`.
+- `triage.sh` now loads `state/true_fresh.jsonl` and adds
+  `triage_true_fresh`, `triage_true_fresh_bonus`, `triage_external_first_seen`.
+  `TRUEFRESH_BONUS` defaults to 10 (sized to be meaningful but not dominant
+  over confirmed-tech KEV/elite tier stacks).
+- Discord gate is now strict: only `triage_true_fresh && in_scope && pays &&
+  (P0 || P1) && !triage_ignored` reach Discord.
+
+### Added — Phase 2: Browser-like HTTP
+- `recon_net.sh` now exposes `random_user_agent()` and `browser_curl()`. The
+  UA pool lives at `~/recon/state/user_agents.txt` (seeded with 16 current
+  Chrome / Firefox / Safari UAs on Win/Mac/Linux). `browser_curl` adds
+  matching Accept-*/Sec-Ch-Ua headers, derives `Sec-Ch-Ua-Platform` from the
+  picked UA, and respects `USE_PROXYCHAINS`.
+
+### Added — Phase 3: Bounty-focused detection
+- `tools/sync_bounty_templates.sh` clones projectdiscovery/nuclei-templates
+  shallowly and copies only templates tagged `exposed-panels|exposures|cors|
+  open-redirect|idor|ssrf|xss|auth-bypass|misconfig` into
+  `~/recon/nuclei/bounty_templates/`.
+- New `recon_nuclei.sh bounty <target_file>` subcommand uses the curated set.
+- New `recon_smart_scan.sh` (30 min): top 10 true-fresh + P0 hosts → bounty
+  scan → Discord "BOUNTY FINDING" alert on new hits. Daemon loop
+  `bounty-scan`.
+- New `recon_deep_scan.sh` (daily): builds `nuclei/tech_template_map.json`
+  from the curated set, then runs tech-specific templates per true-fresh
+  host returned by ES. Daemon loop `deep-scan`.
+
+### Added — Phase 4: Active confirmation
+- New `recon_active_checks.sh`: HTTP-only safe probes via `browser_curl`
+  (Tor-routed when enabled) against top 5 P0 true-fresh in-scope-paying
+  hosts. Probes Docker API version, Jenkins /script, k8s /api/v1/secrets,
+  Grafana datasources, GitLab open signup, Confluence anon. Positive results
+  append to `triage/active_confirmed.jsonl`, update ES (active_check_result,
+  active_checked_at, force priority P0), and fire a Discord "ACTIVE
+  CONFIRMATION" embed. Daemon loop `active-checks` (10 min), gated by
+  agent_targets mtime.
+
+### Added — Phase 5: JS secret + endpoint disclosure scanner
+- New `recon_js_scanner.sh` (30 min): for the latest true-fresh batch,
+  fetches each main page via `browser_curl`, extracts `<script src>` URLs
+  via a tiny Python HTMLParser, downloads each (≤2 MB), and matches against
+  high-confidence regexes (AWS, Google API key, private key headers, JWT,
+  connection strings) plus internal endpoint patterns. Strict ignore list
+  drops heroku/firebase/example/test/etc. Findings emitted to
+  `~/recon/js_findings.jsonl` (filename + match type only, never raw
+  secrets). Per-host dump dir is removed immediately after scan.
+- `triage.sh` integrates `js_findings.jsonl` and adds `js_secret_hit` /
+  `js_endpoint_hit` signals with bonuses (+10 / +5), gated to true-fresh
+  hosts.
+
+### Added — Phase 6: Quality fixes
+- 6A: `triage.sh` now reads `~/recon/vuln/vuln_targets.jsonl` and applies
+  `triage_breaking_vuln` + tier bonus (T0=12, T1=8, T2=5, T3=2) — gated to
+  true-fresh hosts only.
+- 6B: simpler `fetch_es_data()` filter (drop `should/minimum_should_match`),
+  `ES_PAGE_SIZE` bumped to 10000.
+- 6C: new `recon_ctl ignore <host> [reason]` command appends a 7-day TTL
+  record to `~/recon/state/ignored.jsonl`. Triage applies a -50 penalty to
+  non-expired entries.
+- 6D: tightened `pattern_only` — a host is now only confirmed (not
+  pattern-only) if it has a `strength=="confirmed"` signal OR is on a
+  critical port (2375, 2376, 6379, 27017, 9200, 9300, 5432, 3306, 11211,
+  2181). Bare 403/5601-only hosts no longer count as confirmed tech.
+- 6E: `recon_validate.sh` now accepts `--prefix <s>` and
+  `--exclude-prefix <s>`. The daemon spawns two parallel lanes:
+  `validate-fast` (`--prefix 00_`) every 120s for true-fresh batches, and
+  the original `validate` lane (`--exclude-prefix 00_`) on its normal
+  cadence. Per-lane lockfiles so they do not block each other.
+- 6F: `recon_takeover_hunter.sh` recheck cadence dropped from 30 min to 15
+  min. Inside `mode_recheck`, non-fresh hosts are skipped if probed within
+  30 min, while true-fresh hosts (looked up in `state/true_fresh.jsonl`)
+  always re-probe.
+
+### Added — Phase 7: ES mapping
+- `recon_validate.sh` `ensure_index()` now performs an additive PUT
+  `_mapping` on every cycle for `triage_true_fresh*`, `active_check_*`,
+  `js_secret_hit`, `js_endpoint_hit`, `triage_breaking_vuln*`,
+  `triage_vuln_tier`, `triage_ignored*`, and `triage_external_first_seen`.
+  No existing fields removed.
+
+### Notes
+- Certstream needs `pip install certstream`. If missing, the listener is
+  skipped (warning logged) and crt.sh polling still feeds the engine.
+- Certstream and crt.sh polling use direct egress — `recon_true_fresh.sh`
+  bypasses `run_scanner` so it does not run under `reconrun`/Tor. All
+  target-facing modules (smart/deep/active/JS scan) still run under
+  `reconrun` via `run_scanner` and the kill switch.
+
 ## v2.4.4-audit-hardening - 2026-05-10 - Strict-mode and health audit
 
 ### Fixed

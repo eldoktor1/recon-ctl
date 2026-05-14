@@ -46,6 +46,9 @@ DONE="$QUEUE_DIR/done"
 SPOOL="$BASE_DIR/spool"
 LOG_DIR="$BASE_DIR/logs"
 LOCK_FILE="$STATE_DIR/validate.lock"
+# Per-lane lock (set after we've parsed --prefix flags below) — fast + normal
+# lanes must NOT block each other.
+LANE_LOCK_FILE="$LOCK_FILE"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
@@ -71,7 +74,6 @@ RUN_TRIAGE="${RUN_TRIAGE:-1}"
 TRIAGE_SCRIPT="${TRIAGE_SCRIPT:-$(script_path triage.sh)}"
 
 mkdir -p "$STATE_DIR" "$INBOX" "$PROCESSING" "$DONE" "$LOG_DIR" "$SPOOL/pending" "$SPOOL/sent" "$SPOOL/failed"
-exec 9>"$LOCK_FILE"; flock -n 9 || { warn "validate already running"; exit 0; }
 
 KNOWN_HOSTS="$STATE_DIR/known_hosts.txt"
 ALIVE_HOSTS="$STATE_DIR/alive_hosts.txt"
@@ -84,81 +86,131 @@ es_check() {
   [[ "$code" == "200" ]] || { warn "ES not reachable (HTTP $code)"; return 1; }
 }
 
+_INDEX_PROPERTIES='{
+  "host":{"type":"keyword"},
+  "url":{"type":"keyword","ignore_above":2048},
+  "scheme":{"type":"keyword"},
+  "port":{"type":"integer"},
+  "status_code":{"type":"integer"},
+  "content_length":{"type":"long"},
+  "content_type":{"type":"keyword","ignore_above":512},
+  "title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":512}}},
+  "tech":{"type":"keyword","ignore_above":256},
+  "webserver":{"type":"keyword","ignore_above":512},
+  "ip":{"type":"ip","ignore_malformed":true},
+  "cname":{"type":"keyword","ignore_above":512},
+  "cdn_name":{"type":"keyword","ignore_above":256},
+  "cdn_type":{"type":"keyword","ignore_above":256},
+  "favicon_hash":{"type":"keyword"},
+  "final_url":{"type":"keyword","ignore_above":2048},
+  "root_domain":{"type":"keyword"},
+  "first_seen":{"type":"date"},
+  "last_seen":{"type":"date"},
+
+  "triage_score":{"type":"integer"},
+  "triage_priority":{"type":"keyword"},
+  "triage_signals":{"type":"keyword","ignore_above":256},
+  "triage_classes":{"type":"keyword","ignore_above":256},
+  "triage_at":{"type":"date"},
+  "triage_program":{"type":"keyword","ignore_above":512},
+  "triage_platform":{"type":"keyword","ignore_above":128},
+  "triage_payout_tier":{"type":"keyword"},
+  "triage_pays":{"type":"boolean"},
+  "triage_in_scope":{"type":"boolean"},
+  "triage_out_of_scope":{"type":"boolean"},
+  "triage_kev_match":{"type":"boolean"},
+  "triage_kev_signal":{"type":"keyword","ignore_above":256},
+  "triage_kev_cves":{"type":"keyword"},
+
+  "triage_true_fresh":{"type":"boolean"},
+  "triage_true_fresh_bonus":{"type":"integer"},
+  "triage_external_first_seen":{"type":"date"},
+  "triage_breaking_vuln":{"type":"boolean"},
+  "triage_breaking_vuln_bonus":{"type":"integer"},
+  "triage_vuln_tier":{"type":"keyword"},
+  "active_check_result":{"type":"keyword","ignore_above":128},
+  "active_checked_at":{"type":"date"},
+  "js_secret_hit":{"type":"boolean"},
+  "js_endpoint_hit":{"type":"boolean"},
+  "triage_ignored":{"type":"boolean"},
+  "triage_ignored_reason":{"type":"keyword","ignore_above":512},
+
+  "v2_nuclei_status":{"type":"keyword"},
+  "v2_nuclei_template":{"type":"keyword","ignore_above":512},
+  "v2_nuclei_severity":{"type":"keyword"},
+  "v2_nuclei_run_at":{"type":"date"},
+
+  "ai_relevance_score":{"type":"integer"},
+  "ai_confidence":{"type":"keyword"},
+  "ai_recommendation":{"type":"keyword"},
+  "ai_route":{"type":"keyword"},
+  "ai_reason":{"type":"text"},
+  "ai_safe_checks":{"type":"keyword","ignore_above":1024},
+  "ai_risk_flags":{"type":"keyword","ignore_above":512},
+  "ai_model":{"type":"keyword","ignore_above":128},
+  "ai_reviewed_at":{"type":"date"}
+}'
+
 ensure_index() {
   if ! es_curl -fsS "$ES_URL/$INDEX_NAME" >/dev/null 2>&1; then
-    es_curl -fsS -X PUT "$ES_URL/$INDEX_NAME" -H 'Content-Type: application/json' -d '{
-      "settings":{
-        "number_of_shards":1,
-        "refresh_interval":"30s"
-      },
-      "mappings":{
-        "dynamic":true,
-        "properties":{
-          "host":{"type":"keyword"},
-          "url":{"type":"keyword","ignore_above":2048},
-          "scheme":{"type":"keyword"},
-          "port":{"type":"integer"},
-          "status_code":{"type":"integer"},
-          "content_length":{"type":"long"},
-          "content_type":{"type":"keyword","ignore_above":512},
-          "title":{"type":"text","fields":{"keyword":{"type":"keyword","ignore_above":512}}},
-          "tech":{"type":"keyword","ignore_above":256},
-          "webserver":{"type":"keyword","ignore_above":512},
-          "ip":{"type":"ip","ignore_malformed":true},
-          "cname":{"type":"keyword","ignore_above":512},
-          "cdn_name":{"type":"keyword","ignore_above":256},
-          "cdn_type":{"type":"keyword","ignore_above":256},
-          "favicon_hash":{"type":"keyword"},
-          "final_url":{"type":"keyword","ignore_above":2048},
-          "root_domain":{"type":"keyword"},
-          "first_seen":{"type":"date"},
-          "last_seen":{"type":"date"},
-
-          "triage_score":{"type":"integer"},
-          "triage_priority":{"type":"keyword"},
-          "triage_signals":{"type":"keyword","ignore_above":256},
-          "triage_classes":{"type":"keyword","ignore_above":256},
-          "triage_at":{"type":"date"},
-          "triage_program":{"type":"keyword","ignore_above":512},
-          "triage_platform":{"type":"keyword","ignore_above":128},
-          "triage_payout_tier":{"type":"keyword"},
-          "triage_pays":{"type":"boolean"},
-          "triage_in_scope":{"type":"boolean"},
-          "triage_out_of_scope":{"type":"boolean"},
-          "triage_kev_match":{"type":"boolean"},
-          "triage_kev_signal":{"type":"keyword","ignore_above":256},
-          "triage_kev_cves":{"type":"keyword"},
-
-          "v2_nuclei_status":{"type":"keyword"},
-          "v2_nuclei_template":{"type":"keyword","ignore_above":512},
-          "v2_nuclei_severity":{"type":"keyword"},
-          "v2_nuclei_run_at":{"type":"date"},
-
-          "ai_relevance_score":{"type":"integer"},
-          "ai_confidence":{"type":"keyword"},
-          "ai_recommendation":{"type":"keyword"},
-          "ai_route":{"type":"keyword"},
-          "ai_reason":{"type":"text"},
-          "ai_safe_checks":{"type":"keyword","ignore_above":1024},
-          "ai_risk_flags":{"type":"keyword","ignore_above":512},
-          "ai_model":{"type":"keyword","ignore_above":128},
-          "ai_reviewed_at":{"type":"date"}
-        }
-      }
-    }' >/dev/null
+    es_curl -fsS -X PUT "$ES_URL/$INDEX_NAME" -H 'Content-Type: application/json' \
+      -d "$(jq -nc --argjson props "$_INDEX_PROPERTIES" '{
+        settings:{number_of_shards:1, refresh_interval:"30s"},
+        mappings:{dynamic:true, properties: $props}
+      }')" >/dev/null
     log "Created index $INDEX_NAME"
+  else
+    # Idempotent additive mapping migration. ES allows adding new fields freely.
+    es_curl -fsS -X PUT "$ES_URL/$INDEX_NAME/_mapping" -H 'Content-Type: application/json' \
+      -d "$(jq -nc --argjson props "$_INDEX_PROPERTIES" '{properties: $props}')" >/dev/null 2>&1 || true
   fi
 }
 
+# ---- Queue lane filter (v2.5: dual-queue support) -------------------------
+# CLI flags:
+#   --prefix <str>          only claim batches whose basename starts with <str>
+#   --exclude-prefix <str>  skip batches whose basename starts with <str>
+# Used by the daemon to run two validators in parallel:
+#   fast lane  (--prefix 00_)         claims 00_truefresh_*.txt
+#   normal lane (--exclude-prefix 00_) skips them
+CLAIM_PREFIX=""
+CLAIM_EXCLUDE_PREFIX=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prefix)         CLAIM_PREFIX="$2";         shift 2 ;;
+    --exclude-prefix) CLAIM_EXCLUDE_PREFIX="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+
+# Per-lane lock: each (prefix, exclude_prefix) combination gets its own lock.
+# Without this, fast and normal validators would serialize on the same lock.
+LANE_KEY="all"
+[[ -n "$CLAIM_PREFIX"         ]] && LANE_KEY="prefix_${CLAIM_PREFIX//[^a-zA-Z0-9]/_}"
+[[ -n "$CLAIM_EXCLUDE_PREFIX" ]] && LANE_KEY="excl_${CLAIM_EXCLUDE_PREFIX//[^a-zA-Z0-9]/_}"
+LANE_LOCK_FILE="$STATE_DIR/validate.${LANE_KEY}.lock"
+exec 9>"$LANE_LOCK_FILE"; flock -n 9 || { warn "validate (lane=$LANE_KEY) already running"; exit 0; }
+
 # ---- Claim a batch atomically ----
 claim_batch() {
-  local f; f="$(find "$INBOX" -maxdepth 1 -name '*.txt' -type f 2>/dev/null | sort | head -1)"
-  [[ -z "$f" ]] && return 1
-  local target="$PROCESSING/$(basename "$f")"
-  if mv "$f" "$target" 2>/dev/null; then
-    printf '%s\n' "$target"
-    return 0
+  local pattern="*.txt"
+  if [[ -n "$CLAIM_PREFIX" ]]; then
+    pattern="${CLAIM_PREFIX}*.txt"
   fi
+  local f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if [[ -n "$CLAIM_EXCLUDE_PREFIX" ]]; then
+      local base; base="$(basename "$f")"
+      [[ "$base" == "${CLAIM_EXCLUDE_PREFIX}"* ]] && continue
+    fi
+    local target="$PROCESSING/$(basename "$f")"
+    if mv "$f" "$target" 2>/dev/null; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done < <(find "$INBOX" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | sort)
   return 1
 }
 
