@@ -60,10 +60,31 @@ switch before target-facing recon starts.
 Elasticsearch is expected to be Windows-local at `http://127.0.0.1:9200`; the
 Docker compose file binds ES/Kibana to localhost only.
 
-## Fresh paid findings
-`recon_fresh_confirm.sh` runs from the daemon and only queues high-signal,
-in-scope assets where the scope database says the program pays. Check it with:
+## True-freshness engine (v2.5)
+`recon_true_fresh.sh` runs from the daemon and feeds the pipeline with
+domains that are genuinely new (≤24h old) by listening to the certstream
+WSS feed and polling crt.sh every 6h. Hits are scope-filtered to in-scope
+paying programs only and dropped into `queue/inbox/00_truefresh_*.txt`
+batches for the fast-lane validator. Durable feed:
+`~/recon/state/true_fresh.jsonl`. Discord alerts are gated to
+`true_fresh && in_scope && pays && (P0||P1)`.
+
+Bounty-first scanning runs on these fresh hosts only:
+
+- `recon_smart_scan.sh` (30 min): top 10 fresh + P0 hosts → curated
+  bounty nuclei templates.
+- `recon_deep_scan.sh` (daily): tech-aware nuclei against every fresh
+  host in ES with detected tech.
+- `recon_active_checks.sh` (10 min): browser-headered HTTP-only safe
+  confirmations for Docker API / Jenkins / k8s / Grafana / GitLab /
+  Confluence on top 5 fresh P0 hosts.
+- `recon_js_scanner.sh` (30 min): fetches `<script src>` from fresh
+  hosts and scans for AWS / Google / private-key / JWT / connection-
+  string disclosure (with a strict ignore list). Per-host dumps are
+  deleted immediately after scan.
+
+To suppress a noisy host for 7 days:
 
 ```bash
-~/recon_ctl.sh fresh
+~/recon-pipeline/scripts/recon_ctl.sh ignore <host> [reason]
 ```

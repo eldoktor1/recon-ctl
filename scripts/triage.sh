@@ -3,7 +3,9 @@
 # triage.sh — Scoring engine. Improvements over prior version:
 #   - ES-cached scores: scored docs get triage_* fields written back via _bulk
 #     update. Only re-score when last_seen changed, saving CPU.
-#   - Novelty bonus: first_seen <24h = +3, <7d = +1 (first-blood proxy)
+#   - age_hours kept as a reporting field only (no scoring effect).
+#     The local first_seen-based "freshblood" engine was removed in v2.5 —
+#     true freshness will come from the CT-log engine in a later phase.
 #   - Submission dampening: ~/.recon_submissions.jsonl filters dedup risk
 #   - 80+ tech signals (kept from prior + added: ActiveMQ, ConnectWise, Metabase,
 #     NiFi, Superset, SonarQube, Jupyter, Telerik, Veeam, Keycloak, Splunk,
@@ -19,8 +21,7 @@
 #       out-of-scope: heavy penalty (effectively filters from output)
 #   - KEV-aware scoring (reads ~/recon/cve/kev_targets.jsonl)
 #       host with active KEV CVE: +KEV_BONUS, attaches matched_cves
-#   - First-blood-on-payday mega bonus: novel + confirmed-tech + paying
-#   - Output sorted by (tier_rank, score, novelty_bonus)
+#   - Output sorted by (tier_rank, score)
 #   - Discord embeds now surface program / platform / payout_tier / KEV CVEs
 #   - agent_targets.jsonl gets program, platform, payout_tier, kev_* fields
 # =============================================================================
@@ -65,7 +66,7 @@ CLUSTER_PENALTY="${CLUSTER_PENALTY:--3}"
 
 # Only re-score docs touched in the last N days
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-30}"
-ES_PAGE_SIZE="${ES_PAGE_SIZE:-5000}"
+ES_PAGE_SIZE="${ES_PAGE_SIZE:-10000}"
 
 # Submissions file — JSONL: {host,root_domain,vuln_class,cve,status,submitted_date}
 SUBMISSIONS_FILE="${SUBMISSIONS_FILE:-$HOME/.recon_submissions.jsonl}"
@@ -86,15 +87,35 @@ TIER_MID_BONUS="${TIER_MID_BONUS:-3}"
 TIER_HIGH_BONUS="${TIER_HIGH_BONUS:-5}"
 TIER_ELITE_BONUS="${TIER_ELITE_BONUS:-8}"
 KEV_BONUS="${KEV_BONUS:-5}"
-FRESHBLOOD_PAYDAY_BONUS="${FRESHBLOOD_PAYDAY_BONUS:-5}"
+TRUEFRESH_BONUS="${TRUEFRESH_BONUS:-10}"
 OOS_PENALTY="${OOS_PENALTY:--10}"
+
+# True-fresh feed (external CT-log first-seen, populated by recon_true_fresh.sh)
+TRUE_FRESH_FILE="${TRUE_FRESH_FILE:-$STATE_DIR/true_fresh.jsonl}"
+TRUE_FRESH_WINDOW_HOURS="${TRUE_FRESH_WINDOW_HOURS:-24}"
+
+# Vuln-feed integration (Phase 6A): bonus applies to true-fresh hosts only
+VULN_TARGETS_FILE="${VULN_TARGETS_FILE:-$HOME/recon/vuln/vuln_targets.jsonl}"
+VULN_T0_BONUS="${VULN_T0_BONUS:-12}"
+VULN_T1_BONUS="${VULN_T1_BONUS:-8}"
+VULN_T2_BONUS="${VULN_T2_BONUS:-5}"
+VULN_T3_BONUS="${VULN_T3_BONUS:-2}"
+
+# JS-scanner findings (Phase 5)
+JS_FINDINGS_FILE="${JS_FINDINGS_FILE:-$HOME/recon/js_findings.jsonl}"
+JS_SECRET_BONUS="${JS_SECRET_BONUS:-10}"
+JS_ENDPOINT_BONUS="${JS_ENDPOINT_BONUS:-5}"
+
+# Ignore list (Phase 6C): recon_ctl ignore appends to this file
+IGNORE_FILE="${IGNORE_FILE:-$STATE_DIR/ignored.jsonl}"
+IGNORE_TTL_DAYS="${IGNORE_TTL_DAYS:-7}"
+IGNORE_PENALTY="${IGNORE_PENALTY:--50}"
 
 # Discord
 DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
 [[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
   DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
 MAX_DISCORD_FINDINGS="${MAX_DISCORD_FINDINGS:-8}"
-DISCORD_ALERT_FRESH_HOURS="${DISCORD_ALERT_FRESH_HOURS:-168}"
 
 mkdir -p "$TRIAGE_DIR" "$STATE_DIR"
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -129,6 +150,8 @@ fetch_es_data() {
   local since; since="$(date -u -d "-${LOOKBACK_DAYS} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
                        || date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+  # v2.5 (Phase 6B): drop the should/minimum_should_match clause. Simpler filter,
+  # ES_PAGE_SIZE 10000. Trust scoring to drop noise instead of pre-filtering.
   local query
   query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" '{
     size: $size,
@@ -138,18 +161,8 @@ fetch_es_data() {
     query: {bool: {
       filter: [
         {range: {last_seen: {gte: $since}}},
-        {range: {status_code: {gte: 200, lte: 599}}},
-        {bool: {must_not: [{term: {status_code: 404}}]}}
-      ],
-      should: [
-        {exists:  {field: "tech"}},
-        {terms:   {status_code: [401, 403, 500, 503]}},
-        {terms:   {port: [2375,2376,2181,3000,4000,4200,5000,5001,5601,5984,
-                          6379,8000,8008,8080,8081,8082,8090,8161,8181,
-                          8200,8443,8500,8501,8888,9000,9001,9200,9300,
-                          11211,15672,27017,27018]}}
-      ],
-      minimum_should_match: 1
+        {range: {status_code: {gte: 200, lte: 599}}}
+      ]
     }},
     sort: [{"_doc": {order: "asc"}}]
   }')"
@@ -486,16 +499,20 @@ score_raw() {
     ($signals | map(.class) | unique) as $vuln_classes |
     ($signals | map(select(.action != "")) | map(.action)) as $actions |
     ($signals | map(.strength) | unique) as $strengths |
-    (($strengths | any(. == "confirmed" or . == "status" or . == "port")) | not) as $pattern_only |
+    # Phase 6D (v2.5): tighter pattern_only — a host is NOT pattern_only only if
+    # it has a confirmed-strength signal, or a critical port (real services
+    # that do not lie about their identity even without tech detection).
+    [2375,2376,6379,27017,9200,9300,5432,3306,11211,2181] as $critical_ports |
+    ((.port // 0) | (. as $p | $critical_ports | index($p) != null)) as $has_critical_port |
+    ((($strengths | any(. == "confirmed")) or $has_critical_port) | not) as $pattern_only |
 
-    # === Novelty bonus (first-blood signal) ===
+    # age_hours is retained as a reporting field only — it no longer affects
+    # scoring (the local first_seen-based freshness engine was removed in v2.5).
     hours_since_first as $age_h |
-    (if $age_h <= 24 then 3 elif $age_h <= 168 then 1 else 0 end) as $novelty_bonus |
 
     # === Effective score ===
-    ($base_score + $novelty_bonus) as $with_novelty |
-    (if $pattern_only and $with_novelty >= '"$P1_THRESHOLD"' then '"$P1_THRESHOLD"' - 1
-     else $with_novelty end) as $score |
+    (if $pattern_only and $base_score >= '"$P1_THRESHOLD"' then '"$P1_THRESHOLD"' - 1
+     else $base_score end) as $score |
 
     {
       host: .host, url:(.url // ""), scheme:(.scheme // ""),
@@ -505,7 +522,7 @@ score_raw() {
       content_type:(.content_type // ""), content_length:(.content_length // 0),
       root_domain:(.root_domain // ""), first_seen:(.first_seen // ""),
       last_seen:(.last_seen // ""),
-      score: $score, base_score: $base_score, novelty_bonus: $novelty_bonus,
+      score: $score, base_score: $base_score,
       pattern_only: $pattern_only, age_hours: $age_h,
       signals: $matched_sigs, strengths: $strengths,
       vuln_classes: $vuln_classes, actions: $actions
@@ -527,9 +544,9 @@ score_raw() {
 #   For each host we attach:
 #       in_scope, out_of_scope, hard_excluded, pays, program, platform,
 #       payout_tier, payout_bonus, kev_match, kev_signal, kev_cves[],
-#       kev_cvss_max, kev_bonus, freshblood_payday_bonus
+#       kev_cvss_max, kev_bonus
 #   Score is updated:  effective_score = score + payout_bonus + kev_bonus
-#                                       + freshblood_payday_bonus + oos_penalty
+#                                       + oos_penalty
 #   Hard-excluded hosts are dropped entirely.
 #   Out-of-scope hosts get OOS_PENALTY (drops them below threshold by default).
 # =============================================================================
@@ -571,7 +588,6 @@ apply_scope_kev_enrichment() {
     --argjson tier_high_bonus      "$TIER_HIGH_BONUS" \
     --argjson tier_elite_bonus     "$TIER_ELITE_BONUS" \
     --argjson kev_bonus            "$KEV_BONUS" \
-    --argjson freshblood_bonus     "$FRESHBLOOD_PAYDAY_BONUS" \
     --argjson oos_penalty          "$OOS_PENALTY" \
     '
     ($scopes[0] // {}) as $S |
@@ -597,18 +613,10 @@ apply_scope_kev_enrichment() {
       # KEV bonus if host appears in kev_targets
       (if ($k.signal // null) != null then $kev_bonus else 0 end) as $kev_b |
 
-      # First-blood-on-payday mega bonus:
-      #   novel (<24h)  AND  confirmed-tech (pattern_only literal false)  AND  paying
-      # NOTE: avoid `// true` — the `//` operator treats false as missing, inverting intent.
-      ((($r.age_hours // 99999) <= 24)
-        and ($r.pattern_only == false)
-        and (($s.pays // false) == true)) as $is_freshblood_payday |
-      (if $is_freshblood_payday then $freshblood_bonus else 0 end) as $fb_b |
-
       # Out-of-scope penalty
       (if ($s.out_of_scope // false) then $oos_penalty else 0 end) as $oos_b |
 
-      ($r.score + $tier_bonus + $pays_b + $kev_b + $fb_b + $oos_b) as $eff |
+      ($r.score + $tier_bonus + $pays_b + $kev_b + $oos_b) as $eff |
 
       $r + {
         score: $eff,
@@ -625,14 +633,155 @@ apply_scope_kev_enrichment() {
         kev_cves:        ($k.cves          // []),
         kev_cvss_max:    ($k.cvss_max      // 0),
         kev_bonus:       $kev_b,
-        freshblood_payday: $is_freshblood_payday,
-        freshblood_payday_bonus: $fb_b,
         oos_penalty_applied: $oos_b
       }
     end
   ' "$in" > "$out" 2>/dev/null || cp "$in" "$out"
 
   rm -f "$scope_map" "$kev_map"
+}
+
+# =============================================================================
+# Phase 1.6 (v2.5): extra enrichment — true_fresh, passive vuln, js findings,
+# ignore list. All four are JSONL files keyed by host. Single jq pass loads
+# them as host→record maps and applies bonuses/penalties.
+#
+#   true_fresh:   adds triage_true_fresh, triage_external_first_seen,
+#                 triage_true_fresh_bonus (+TRUEFRESH_BONUS).
+#   vuln feed:    adds triage_breaking_vuln, triage_vuln_tier and tier bonus,
+#                 BUT only for hosts where true_fresh == true (per upgrade spec).
+#   js findings:  adds js_secret_hit / js_endpoint_hit signals + bonuses, also
+#                 gated to true_fresh == true.
+#   ignore list:  applies IGNORE_PENALTY (default -50) if a non-expired entry
+#                 exists, sets triage_ignored + triage_ignored_reason.
+# =============================================================================
+apply_extra_enrichment() {
+  local in="$1" out="$2"
+  [[ ! -s "$in" ]] && { : > "$out"; return 0; }
+
+  local tf_map="" vf_map="" js_map="" ig_map=""
+  local tmp; tmp="$(mktemp -d)"
+  tf_map="$tmp/tf.json"; vf_map="$tmp/vf.json"; js_map="$tmp/js.json"; ig_map="$tmp/ig.json"
+
+  local window_iso
+  window_iso="$(date -u -d "-${TRUE_FRESH_WINDOW_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  local ignore_cutoff
+  ignore_cutoff="$(date -u -d "-${IGNORE_TTL_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  # ---- true_fresh map ------------------------------------------------------
+  if [[ -s "$TRUE_FRESH_FILE" ]]; then
+    jq -sc --arg cutoff "$window_iso" '
+      [ .[] | select((.external_first_seen // "") >= $cutoff) ] |
+      group_by(.host) | map({key: .[0].host, value: ( max_by(.external_first_seen) )}) | from_entries
+    ' "$TRUE_FRESH_FILE" > "$tf_map" 2>/dev/null || echo '{}' > "$tf_map"
+  else
+    echo '{}' > "$tf_map"
+  fi
+
+  # ---- vuln-feed map ------------------------------------------------------
+  if [[ -s "$VULN_TARGETS_FILE" ]]; then
+    jq -sc 'map({(.host): {tier: (.best_vuln_tier // .tier // "T3"), id: (.best_vuln_id // .vuln_id // "")}}) | add // {}' \
+      "$VULN_TARGETS_FILE" > "$vf_map" 2>/dev/null || echo '{}' > "$vf_map"
+  else
+    echo '{}' > "$vf_map"
+  fi
+
+  # ---- js-findings map ----------------------------------------------------
+  if [[ -s "$JS_FINDINGS_FILE" ]]; then
+    jq -sc '
+      group_by(.host) |
+      map({
+        key: .[0].host,
+        value: {
+          secret: ([.[] | select(.finding_type == "secret")] | length > 0),
+          endpoint: ([.[] | select(.finding_type == "endpoint")] | length > 0)
+        }
+      }) | from_entries
+    ' "$JS_FINDINGS_FILE" > "$js_map" 2>/dev/null || echo '{}' > "$js_map"
+  else
+    echo '{}' > "$js_map"
+  fi
+
+  # ---- ignore list map ----------------------------------------------------
+  if [[ -s "$IGNORE_FILE" ]]; then
+    jq -sc --arg cutoff "$ignore_cutoff" '
+      [ .[] | select((.added_at // "") >= $cutoff) ] |
+      group_by(.host) | map({key: .[0].host, value: ( max_by(.added_at) )}) | from_entries
+    ' "$IGNORE_FILE" > "$ig_map" 2>/dev/null || echo '{}' > "$ig_map"
+  else
+    echo '{}' > "$ig_map"
+  fi
+
+  jq -c \
+    --slurpfile tf "$tf_map" \
+    --slurpfile vf "$vf_map" \
+    --slurpfile js "$js_map" \
+    --slurpfile ig "$ig_map" \
+    --argjson tf_bonus  "$TRUEFRESH_BONUS" \
+    --argjson t0_bonus  "$VULN_T0_BONUS" \
+    --argjson t1_bonus  "$VULN_T1_BONUS" \
+    --argjson t2_bonus  "$VULN_T2_BONUS" \
+    --argjson t3_bonus  "$VULN_T3_BONUS" \
+    --argjson js_secret_bonus   "$JS_SECRET_BONUS" \
+    --argjson js_endpoint_bonus "$JS_ENDPOINT_BONUS" \
+    --argjson ig_penalty "$IGNORE_PENALTY" '
+    ($tf[0] // {}) as $TF |
+    ($vf[0] // {}) as $VF |
+    ($js[0] // {}) as $JS |
+    ($ig[0] // {}) as $IG |
+    . as $r |
+    ($TF[$r.host] // null) as $tfh |
+    ($VF[$r.host] // null) as $vfh |
+    ($JS[$r.host] // null) as $jsh |
+    ($IG[$r.host] // null) as $igh |
+
+    ($tfh != null) as $is_true_fresh |
+    (if $is_true_fresh then $tf_bonus else 0 end) as $tf_b |
+
+    # vuln-feed bonus — gated to true_fresh only (per upgrade plan 6A)
+    (if $is_true_fresh and $vfh != null then
+      (if   $vfh.tier == "T0" then $t0_bonus
+       elif $vfh.tier == "T1" then $t1_bonus
+       elif $vfh.tier == "T2" then $t2_bonus
+       elif $vfh.tier == "T3" then $t3_bonus
+       else 0 end)
+     else 0 end) as $vf_b |
+
+    # JS bonuses — gated to true_fresh only
+    (if $is_true_fresh and $jsh != null then
+      (if $jsh.secret then $js_secret_bonus else 0 end) +
+      (if $jsh.endpoint then $js_endpoint_bonus else 0 end)
+     else 0 end) as $js_b |
+
+    # JS signals appended for visibility
+    (.signals // []) as $sigs |
+    ($sigs
+      + (if ($is_true_fresh and $jsh.secret // false) then ["js:secret_hit"] else [] end)
+      + (if ($is_true_fresh and $jsh.endpoint // false) then ["js:endpoint_disclosure"] else [] end)
+    ) as $new_sigs |
+
+    # ignore penalty
+    (if $igh != null then $ig_penalty else 0 end) as $ig_b |
+
+    ($r.score + $tf_b + $vf_b + $js_b + $ig_b) as $new_score |
+
+    $r + {
+      score: $new_score,
+      signals: $new_sigs,
+      triage_true_fresh:        $is_true_fresh,
+      triage_true_fresh_bonus:  $tf_b,
+      triage_external_first_seen: ($tfh.external_first_seen // null),
+      triage_breaking_vuln:     ($is_true_fresh and $vfh != null),
+      triage_breaking_vuln_bonus: $vf_b,
+      triage_vuln_tier:         (if $is_true_fresh and $vfh != null then $vfh.tier else null end),
+      js_secret_hit:            ($is_true_fresh and ($jsh.secret // false)),
+      js_endpoint_hit:          ($is_true_fresh and ($jsh.endpoint // false)),
+      triage_ignored:           ($igh != null),
+      triage_ignored_reason:    ($igh.reason // null)
+    }
+  ' "$in" > "$out" 2>/dev/null || cp "$in" "$out"
+
+  rm -rf "$tmp"
 }
 
 # =============================================================================
@@ -697,8 +846,8 @@ apply_cluster_and_submission() {
         else 4 end
       )
     }) |
-    # Sort: best tier first, then score desc, then novelty desc.
-    sort_by([.tier_rank, -.score, -(.novelty_bonus // 0)]) |
+    # Sort: best tier first, then score desc.
+    sort_by([.tier_rank, -.score]) |
     .[]
   ' "$in" > "$out" 2>/dev/null || true
 
@@ -728,7 +877,17 @@ update_es_scores() {
       "triage_out_of_scope":(.out_of_scope // false),
       "triage_kev_match":   (.kev_match // false),
       "triage_kev_signal":  (.kev_signal // null),
-      "triage_kev_cves":    [(.kev_cves // [])[].id]
+      "triage_kev_cves":    [(.kev_cves // [])[].id],
+      "triage_true_fresh":          (.triage_true_fresh // false),
+      "triage_true_fresh_bonus":    (.triage_true_fresh_bonus // 0),
+      "triage_external_first_seen": (.triage_external_first_seen // null),
+      "triage_breaking_vuln":       (.triage_breaking_vuln // false),
+      "triage_breaking_vuln_bonus": (.triage_breaking_vuln_bonus // 0),
+      "triage_vuln_tier":           (.triage_vuln_tier // null),
+      "js_secret_hit":              (.js_secret_hit // false),
+      "js_endpoint_hit":            (.js_endpoint_hit // false),
+      "triage_ignored":             (.triage_ignored // false),
+      "triage_ignored_reason":      (.triage_ignored_reason // null)
     }}
   ' "$in" > "$tmp"
 
@@ -768,18 +927,17 @@ generate_report() {
   p1="$(count_records 'select(.priority=="P1")' "$in")"
   p2="$(count_records 'select(.priority=="P2")' "$in")"
 
-  local elite_n high_n mid_n kev_n fb_n
+  local elite_n high_n mid_n kev_n
   elite_n="$(count_records 'select((.payout_tier // "none")=="elite")' "$in")"
   high_n="$(count_records 'select((.payout_tier // "none")=="high")' "$in")"
   mid_n="$(count_records 'select((.payout_tier // "none")=="mid")' "$in")"
   kev_n="$(count_records 'select(.kev_match // false)' "$in")"
-  fb_n="$(count_records 'select(.freshblood_payday // false)' "$in")"
 
   {
     printf '# Triage Report — %s\n\n' "$RUN_TS"
     printf '**Total:** %s | **P0:** %s | **P1:** %s | **P2:** %s\n' "$total" "$p0" "$p1" "$p2"
-    printf '**Tiers:** elite=%s high=%s mid=%s | **KEV matches:** %s | **🩸 fresh-blood-payday:** %s\n\n' \
-           "$elite_n" "$high_n" "$mid_n" "$kev_n" "$fb_n"
+    printf '**Tiers:** elite=%s high=%s mid=%s | **KEV matches:** %s\n\n' \
+           "$elite_n" "$high_n" "$mid_n" "$kev_n"
     for tier in P0 P1 P2; do
       local count; count="$(jq -c --arg t "$tier" 'select(.priority==$t)' "$in" | wc -l | tr -d ' ')"
       [[ "$count" -eq 0 ]] && continue
@@ -791,8 +949,7 @@ generate_report() {
         "- **Status/Port:** " + (.status_code|tostring) + " / " + (.port|tostring) + "\n" +
         (if (.tech | length) > 0 then "- **Tech:** " + (.tech | join(", ")) + "\n" else "" end) +
         (if .title != "" then "- **Title:** " + .title + "\n" else "" end) +
-        (if .age_hours != null and .age_hours <= 168 then "- **Age:** " + (.age_hours|tostring) + "h (NOVEL — first-blood candidate)\n" else "" end) +
-        (if (.freshblood_payday // false) then "- 🩸 **FRESH-BLOOD ON PAYDAY** (+" + ((.freshblood_payday_bonus // 0)|tostring) + ")\n" else "" end) +
+        (if .age_hours != null and .age_hours < 99999 then "- **Age:** " + (.age_hours|tostring) + "h\n" else "" end) +
         (if (.kev_match // false) then "- 🎯 **KEV MATCH:** " + (.kev_signal // "?") + " — " + ([(.kev_cves // [])[].id] | join(", ") | .[0:200]) + " (CVSS≤" + ((.kev_cvss_max // 0)|tostring) + ")\n" else "" end) +
         (if (.out_of_scope // false) then "- ❌ **OUT OF SCOPE** (penalty applied — should not appear; report bug)\n" else "" end) +
         (if (.already_submitted // false) then "- ⚠️ **Already submitted** — duplicate risk\n" else "" end) +
@@ -808,21 +965,17 @@ generate_report() {
 }
 
 # =============================================================================
-# Discord — only fresh + non-submitted P0/P1
+# Discord — true_fresh + in_scope + pays + (P0 or P1) only, non-submitted
+# (v2.5: hard gate to fresh paying scope — no other alerts go to Discord)
 # =============================================================================
 notify_discord_findings() {
   local in="$1"
   [[ -z "$DISCORD_WEBHOOK" ]] && return 0
   local fresh; fresh="$(mktemp)"
   : > "$fresh"
-  local count=0 skipped_stale=0
+  local count=0
   while IFS= read -r line; do
     [[ "$count" -ge "$MAX_DISCORD_FINDINGS" ]] && break
-    local age_h; age_h="$(echo "$line" | jq -r '.age_hours // 99999')"
-    if [[ "$age_h" -gt "$DISCORD_ALERT_FRESH_HOURS" ]]; then
-      skipped_stale=$((skipped_stale + 1))
-      continue
-    fi
     local key; key="$(echo "$line" | jq -r '
       [
         (.host // ""),
@@ -838,9 +991,14 @@ notify_discord_findings() {
       echo "$key" >> "$SEEN_FILE"
       count=$((count + 1))
     fi
-  done < <(jq -c 'select(.priority=="P0" or .priority=="P1")' "$in")
+  done < <(jq -c 'select(
+      (.priority=="P0" or .priority=="P1")
+      and (.triage_true_fresh // false) == true
+      and (.in_scope // false) == true
+      and (.pays // false) == true
+      and (.triage_ignored // false) == false
+    )' "$in")
 
-  [[ "$skipped_stale" -gt 0 ]] && log "Discord: skipped $skipped_stale stale high-priority finding(s) older than ${DISCORD_ALERT_FRESH_HOURS}h"
   local fc; fc="$(wc -l < "$fresh" | tr -d ' ')"
   [[ "$fc" -lt 1 ]] && { rm -f "$fresh"; return; }
 
@@ -848,24 +1006,27 @@ notify_discord_findings() {
   local payload
   # Sort fresh findings by [tier_rank, -score, -novelty] before building embeds
   payload="$(jq -s '
-    sort_by([(.tier_rank // 4), -(.score // 0), -((.novelty_bonus // 0))]) |
+    sort_by([(.tier_rank // 4), -(.score // 0)]) |
     {
       content: ("**" + (length|tostring) + " new high-priority finding(s)** — feed to agent"),
       embeds: [.[] | {
         title: ("[" + .priority + "·" + (.score|tostring) + "·" + (.payout_tier // "none") + "] " + (.host | .[0:230])),
         url: (if (.url // "") != "" then .url else null end),
         color: (
-          if (.kev_match // false) then 10038562            # red — active KEV
+          if (.triage_true_fresh // false) then 3066993
+          elif (.kev_match // false) then 10038562
           elif (.payout_tier // "none") == "elite" then 16711680
           elif (.payout_tier // "none") == "high"  then 15844367
           elif .priority == "P0" then 15105570
           else 5814783 end
         ),
         description: (
+          (if (.triage_true_fresh // false) then "🆕 **TRUE FRESH** (first seen: " + (.triage_external_first_seen // "?") + ")\n" else "" end) +
           (if (.kev_match // false) then "🎯 **KEV: " + (.kev_signal // "?") + "**\n" else "" end) +
-          (if (.freshblood_payday // false) then "🩸 **FRESH-BLOOD ON PAYDAY** (novel + tech + paying)\n" else "" end) +
-          "**" + (.signals | map(select(startswith("penalty:") | not)) | join(" · ") | .[0:140]) + "**" +
-          (if .age_hours and .age_hours <= 168 then "\n🆕 NOVEL: " + (.age_hours|tostring) + "h old" else "" end)
+          (if (.triage_breaking_vuln // false) then "💥 **BREAKING VULN** tier=" + (.triage_vuln_tier // "?") + "\n" else "" end) +
+          (if (.js_secret_hit // false) then "🔑 **JS SECRET** disclosure\n" else "" end) +
+          (if (.js_endpoint_hit // false) then "🛤️ **JS endpoint** disclosure\n" else "" end) +
+          "**" + (.signals | map(select(startswith("penalty:") | not)) | join(" · ") | .[0:140]) + "**"
         ),
         fields: ([
           (if .program then {name:"Program", value:(.program + " · " + (.platform // "?") + " · payout=" + (.payout_tier // "none")), inline:false} else {name:"Program", value:"unknown / unmatched scope", inline:false} end),
@@ -905,9 +1066,9 @@ notify_discord_findings() {
 
 main() {
   log "=== triage cycle: $RUN_TS ==="
-  local raw scored_raw enriched scored
-  raw="$(mktemp)"; scored_raw="$(mktemp)"; enriched="$(mktemp)"; scored="$(mktemp)"
-  trap "rm -f '$raw' '$scored_raw' '$enriched' '$scored'" EXIT
+  local raw scored_raw enriched enriched2 scored
+  raw="$(mktemp)"; scored_raw="$(mktemp)"; enriched="$(mktemp)"; enriched2="$(mktemp)"; scored="$(mktemp)"
+  trap "rm -f '$raw' '$scored_raw' '$enriched' '$enriched2' '$scored'" EXIT
 
   fetch_es_data "$raw"
   [[ -s "$raw" ]] || { log "No data"; exit 0; }
@@ -927,8 +1088,12 @@ main() {
     cp "$scored_raw" "$enriched"
   fi
 
+  log "Phase 1.6: true_fresh + vuln + js + ignore enrichment"
+  apply_extra_enrichment "$enriched" "$enriched2"
+  [[ -s "$enriched2" ]] || cp "$enriched" "$enriched2"
+
   log "Phase 2: cluster + submission dampening + tier-aware sort"
-  apply_cluster_and_submission "$enriched" "$scored"
+  apply_cluster_and_submission "$enriched2" "$scored"
 
   cp "$scored" "$TARGETS_OUT"
   log "Targets: $TARGETS_OUT ($(wc -l < "$TARGETS_OUT" | tr -d ' ') entries)"
@@ -937,7 +1102,7 @@ main() {
   update_es_scores "$scored"
   run_ai_review_layer "$scored"
 
-  local total p0 p1 p2 elite high kev fb
+  local total p0 p1 p2 elite high kev
   total="$(wc -l < "$scored" | tr -d ' ')"
   p0="$(count_records 'select(.priority=="P0")' "$scored")"
   p1="$(count_records 'select(.priority=="P1")' "$scored")"
@@ -945,8 +1110,7 @@ main() {
   elite="$(count_records 'select((.payout_tier // "none")=="elite")' "$scored")"
   high="$(count_records 'select((.payout_tier // "none")=="high")' "$scored")"
   kev="$(count_records 'select(.kev_match // false)' "$scored")"
-  fb="$(count_records 'select(.freshblood_payday // false)' "$scored")"
-  log "Summary: total=$total P0=$p0 P1=$p1 P2=$p2 | tier elite=$elite high=$high | KEV=$kev | 🩸FB-payday=$fb"
+  log "Summary: total=$total P0=$p0 P1=$p1 P2=$p2 | tier elite=$elite high=$high | KEV=$kev"
 
   notify_discord_findings "$scored"
 

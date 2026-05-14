@@ -75,7 +75,7 @@ archive_old_files() {
 }
 
 seed_seen_files() {
-  mkdir -p "$TRIAGE_DIR" "$BASE_DIR/fresh" "$BASE_DIR/nuclei"
+  mkdir -p "$TRIAGE_DIR" "$BASE_DIR/nuclei"
 
   local triage_seen="$TRIAGE_DIR/.seen_high.txt"
   touch "$triage_seen" 2>/dev/null || true
@@ -90,18 +90,6 @@ seed_seen_files() {
       ] | join("|")
     ' "$TRIAGE_DIR/agent_targets.jsonl" 2>/dev/null >> "$triage_seen" || true
     sort -u "$triage_seen" -o "$triage_seen" 2>/dev/null || true
-  fi
-
-  local fresh_seen="$BASE_DIR/fresh/.seen_keys"
-  touch "$fresh_seen" 2>/dev/null || true
-  if [[ -s "$BASE_DIR/fresh/fresh_confirmed.jsonl" && -w "$fresh_seen" ]]; then
-    jq -r '[.host // "", ((.fresh_kinds // []) | sort | join(","))] | @tsv' \
-      "$BASE_DIR/fresh/fresh_confirmed.jsonl" 2>/dev/null \
-      | while IFS=$'\t' read -r host kinds; do
-          [[ -n "$host" && -n "$kinds" ]] || continue
-          printf '%s|%s' "$host" "$kinds" | sha256sum | awk '{print $1}'
-        done >> "$fresh_seen"
-    sort -u "$fresh_seen" -o "$fresh_seen" 2>/dev/null || true
   fi
 
   local nuclei_seen="$BASE_DIR/nuclei/.confirmed_seen"
@@ -153,7 +141,12 @@ cmd_stop() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
-    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|fresh_confirm|schedule)\.sh' 2>/dev/null || true
+    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|schedule|true_fresh|fresh_modules)\.sh' 2>/dev/null || true
+    # Stop certstream listener spawned by recon_true_fresh.sh
+    if [[ -s "$BASE_DIR/state/true_fresh/certstream.pid" ]]; then
+      kill "$(cat "$BASE_DIR/state/true_fresh/certstream.pid" 2>/dev/null)" 2>/dev/null || true
+      rm -f "$BASE_DIR/state/true_fresh/certstream.pid"
+    fi
     pkill -f 'triage\.sh' 2>/dev/null || true
     pkill -f 'httpx|subfinder|assetfinder|nuclei.*-target' 2>/dev/null || true
     echo "Stopped."
@@ -356,7 +349,6 @@ cmd_clean_start() {
 This archives stale active views without deleting useful data:
   - queue/done httpx outputs and processed batch markers
   - active triage target/report files
-  - fresh-confirm active results, reports, evidence, and cooldown markers
   - nuclei run result folders and active confirmed.jsonl
   - current log files
 
@@ -380,15 +372,13 @@ EOF
 
   archive_matching "$archive_root" "queue/done" "*.jsonl" "*.txt.processed"
   archive_matching "$archive_root" "triage" "agent_targets.jsonl" "report_*.md"
-  archive_matching "$archive_root" "fresh" "fresh_confirmed.jsonl" "report_*.md" ".last_*"
-  archive_matching "$archive_root" "fresh/evidence" "*"
   archive_matching "$archive_root" "nuclei" "confirmed.jsonl"
   archive_matching "$archive_root" "nuclei/results" "run_*"
   archive_matching "$archive_root" "logs" "*.log"
 
   mkdir -p "$QUEUE_DIR/inbox" "$QUEUE_DIR/processing" "$QUEUE_DIR/done" \
            "$BASE_DIR/spool/pending" "$BASE_DIR/spool/sent" "$BASE_DIR/spool/failed" \
-           "$TRIAGE_DIR" "$BASE_DIR/fresh/evidence" "$BASE_DIR/nuclei/results"
+           "$TRIAGE_DIR" "$BASE_DIR/nuclei/results"
 
   echo "Clean active views ready."
   echo "Archive: $archive_root"
@@ -450,17 +440,6 @@ cmd_confirmed() {
   tail -20 "$f" | jq -r '"  [\(.info.severity // \"?\")] \(.host) — \(.\"template-id\") (program: \(.scope.program // \"?\"))"'
 }
 
-cmd_fresh() {
-  hdr "Fresh confirmed queue"
-  local f="$HOME/recon/fresh/fresh_confirmed.jsonl"
-  [[ ! -s "$f" ]] && { echo "  none yet"; return; }
-  tail -20 "$f" | jq -r '"  [\(.fresh_score)] \(.host)  \(.fresh_kinds | join(","))  scope=\(.scope.program // "?")  url=\(.verified_url)"'
-  echo
-  local latest
-  latest="$(ls -t "$HOME/recon/fresh"/report_*.md 2>/dev/null | head -1)"
-  [[ -n "$latest" ]] && echo "  latest report: $latest"
-}
-
 cmd_ai() {
   hdr "AI review layer"
   local ai_dir="$HOME/recon/ai_review"
@@ -520,6 +499,22 @@ cmd_vuln() {
   esac
 }
 
+cmd_ignore() {
+  local host="${1:-}"; shift || true
+  local reason="${*:-manual}"
+  if [[ -z "$host" ]]; then echo "Usage: recon_ctl ignore <host> [reason...]"; return 1; fi
+  local ig_file="$HOME/recon/state/ignored.jsonl"
+  mkdir -p "$(dirname "$ig_file")"
+  local who; who="$(id -un 2>/dev/null || echo unknown)"
+  local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  local expires; expires="$(date -u -d '+7 days' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "$now")"
+  jq -nc --arg host "$host" --arg reason "$reason" --arg added_by "$who" \
+         --arg added_at "$now" --arg expires_at "$expires" \
+    '{host:$host, reason:$reason, added_by:$added_by, added_at:$added_at, expires_at:$expires_at}' \
+    >> "$ig_file"
+  echo "Ignored $host (7 days)  — $reason"
+}
+
 cmd_fp() {
   local host="${1:-}" tmpl="${2:-}"
   if [[ -z "$host" || -z "$tmpl" ]]; then echo "Usage: recon_ctl fp <host> <template_id>"; return 1; fi
@@ -535,7 +530,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_fresh; do
+      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
@@ -646,11 +641,11 @@ recon_ctl — pipeline control
   scope <host>           Check if a host is in any program scope
   programs               Summary of programs in scope DB
   confirmed              Latest confirmed nuclei findings
-  fresh                  Latest fresh in-scope confirmed candidates
   vuln [status|top|refresh]
                          Passive vuln intelligence and race queue
   ai                     AI review status and pending packet counts
   fp <host> <tmpl>       Mark a nuclei finding as false positive
+  ignore <host> [reason] Penalise host in triage for 7 days
   v2 status              V2 module health
   v2 enable <mod>        Re-enable killed module (scope|cve|vuln_feed|nuclei)
   v2 disable <mod> [r]   Manually disable module
@@ -686,10 +681,10 @@ case "${1:-}" in
   scope)        shift; cmd_scope "$@" ;;
   programs)     cmd_programs ;;
   confirmed)    cmd_confirmed ;;
-  fresh)        cmd_fresh ;;
   vuln)         shift; cmd_vuln "$@" ;;
   ai)           cmd_ai ;;
   fp)           shift; cmd_fp "$@" ;;
+  ignore)       shift; cmd_ignore "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;
   schedule)      cmd_schedule_status ;;
