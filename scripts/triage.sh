@@ -597,7 +597,11 @@ apply_scope_kev_enrichment() {
     ($K[$r.host] // {}) as $k |
 
     # ---- Hard-exclude → emit nothing -----
+    # v2.5.3: also drop confirmed out_of_scope hosts entirely (previously they
+    # got OOS_PENALTY=-10 but if base+bonuses-10 was still ≥3 they survived
+    # and polluted agent_targets / downstream fresh modules).
     if ($s.hard_excluded // false) then empty
+    elif (($s.out_of_scope // false) == true and ($s.in_scope // false) == false) then empty
     else
       # Tier bonus
       ($s.payout_tier // "none") as $tier |
@@ -736,15 +740,40 @@ apply_extra_enrichment() {
     ($IG[$r.host] // null) as $igh |
 
     ($tfh != null) as $is_true_fresh |
-    (if $is_true_fresh then $tf_bonus else 0 end) as $tf_b |
+    ($r.pattern_only // false) as $is_pattern_only |
 
-    # vuln-feed bonus — gated to true_fresh only (per upgrade plan 6A)
+    # v2.5.3: true_fresh bonus dampened for pattern-only hosts. A bare hostname
+    # pattern hitting CT logs is interesting (operator may want to look) but
+    # must not auto-promote to P0 alongside elite+pays bonuses with no probing
+    # evidence. Full +TRUEFRESH_BONUS only when at least one confirmed-strength
+    # signal exists.
+    (if $is_true_fresh then
+       (if $is_pattern_only then 3 else $tf_bonus end)
+     else 0 end) as $tf_b |
+
+    # v2.5.3: noisy-tech dampener. WordPress/Drupal/Joomla have constant CVE
+    # flow but most CVEs require specific plugin versions or are already
+    # patched. If the host tech list is only these (or empty), cap the
+    # breaking-vuln bonus at the T2 level. Confirmed strong tech (jenkins,
+    # k8s, confluence, etc.) gets the full bonus.
+    (($r.tech // []) | map(ascii_downcase)) as $tech_lc |
+    (($tech_lc | any(. == "wordpress" or . == "drupal" or . == "joomla")) and
+     ($tech_lc | all(. == "wordpress" or . == "drupal" or . == "joomla" or
+                     . == "iis" or . == "apache" or . == "nginx" or . == "php"))) as $is_noisy_only |
+    (($r.signals // []) | any(startswith("tech:") and
+                              (test("(jenkins|confluence|gitlab|k8s|grafana|kibana|elasticsearch|moveit|citrix|fortinet|pulse|vmware|f5|paloalto|exchange|nifi|superset|metabase|jupyter|activemq|telerik|veeam|connectwise|coldfusion|thinkphp|struts|weblogic|manageengine|laravel-debug|argocd|rancher|portainer|harbor|docker-registry|es-exposed|nexus|airflow|magento)"; "i")
+                             )) as $has_strong_tech |
+
+    # vuln-feed bonus — gated to true_fresh only, dampened for noisy-only hosts
     (if $is_true_fresh and $vfh != null then
-      (if   $vfh.tier == "T0" then $t0_bonus
-       elif $vfh.tier == "T1" then $t1_bonus
-       elif $vfh.tier == "T2" then $t2_bonus
-       elif $vfh.tier == "T3" then $t3_bonus
-       else 0 end)
+      ((if   $vfh.tier == "T0" then $t0_bonus
+        elif $vfh.tier == "T1" then $t1_bonus
+        elif $vfh.tier == "T2" then $t2_bonus
+        elif $vfh.tier == "T3" then $t3_bonus
+        else 0 end) as $raw |
+       if ($is_noisy_only and ($has_strong_tech | not)) then
+         ([$raw, $t2_bonus] | min)
+       else $raw end)
      else 0 end) as $vf_b |
 
     # JS bonuses — gated to true_fresh only
@@ -831,6 +860,17 @@ apply_cluster_and_submission() {
       else $h end
     ) |
     map(select(.score >= 3)) |
+    # v2.5.3: HARD pattern_only cap — no P0 without confirmed-strength signal
+    # or critical port. score_raw clamps base_score to P1-1 for pattern_only
+    # but scope/KEV/true_fresh/vuln bonuses get added after, blowing past
+    # P0_THRESHOLD with no probing evidence. Re-apply the ceiling here.
+    map(if (.pattern_only // false) and (.score >= '"$P0_THRESHOLD"') then
+      . + {
+        score: ('"$P0_THRESHOLD"' - 1),
+        signals: (.signals + ["cap:pattern-only-no-p0"]),
+        pattern_only_capped: true
+      }
+    else . end) |
     map(. + {
       priority: (
         if   .score >= '"$P0_THRESHOLD"' then "P0"
@@ -866,7 +906,7 @@ update_es_scores() {
     {"doc":{
       "triage_score":    .score,
       "triage_priority": .priority,
-      "triage_signals":  (.signals | map(select(startswith("penalty:") | not))),
+      "triage_signals":  (.signals | map(select((startswith("penalty:") or startswith("cap:")) | not))),
       "triage_classes":  .vuln_classes,
       "triage_at":       (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       "triage_program":     (.program // null),
