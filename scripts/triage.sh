@@ -1135,7 +1135,11 @@ main() {
   log "Phase 2: cluster + submission dampening + tier-aware sort"
   apply_cluster_and_submission "$enriched2" "$scored"
 
-  cp "$scored" "$TARGETS_OUT"
+  # v2.5.4: atomic write. Multiple readers (fresh_modules, recon_ctl top,
+  # recon_brain, recon_ai_score) can be reading TARGETS_OUT while triage runs.
+  # `cp` is not atomic — readers could catch a half-written file. mv into
+  # place on the same filesystem IS atomic by POSIX rename(2).
+  cp "$scored" "$TARGETS_OUT.tmp" && mv -f "$TARGETS_OUT.tmp" "$TARGETS_OUT"
   log "Targets: $TARGETS_OUT ($(wc -l < "$TARGETS_OUT" | tr -d ' ') entries)"
 
   generate_report "$scored" "$REPORT_OUT"

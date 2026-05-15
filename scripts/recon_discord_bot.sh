@@ -50,6 +50,23 @@ trap "rm -f '$PID_FILE'" EXIT
 # ---- API helpers ------------------------------------------------------------
 api_get()  { curl_net -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
 api_post() { curl_net -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
+# v2.5.4: poll-failure context. The plain `|| warn "Poll failed"` told us
+# nothing — could be 429, network drop, expired token. Now we capture the
+# HTTP code so the cause is visible in the log.
+api_get_with_code() {
+  local code
+  code="$(curl_net -fsS -m 10 -o /tmp/_bot_resp.$$ -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"
+  if [[ "$code" =~ ^2 ]]; then
+    cat /tmp/_bot_resp.$$ 2>/dev/null
+    rm -f /tmp/_bot_resp.$$
+    return 0
+  else
+    local snippet; snippet="$(head -c 200 /tmp/_bot_resp.$$ 2>/dev/null | tr -d '\n')"
+    rm -f /tmp/_bot_resp.$$
+    printf 'HTTP=%s %s' "$code" "$snippet" >&2
+    return 1
+  fi
+}
 
 # Send embed to channel
 # Colors: green=3066993 blue=3447003 orange=15105570 red=15158332 grey=9807270
@@ -370,8 +387,16 @@ main() {
         local url="/channels/$CHANNEL_ID/messages?limit=10"
         [[ -n "$last_msg_id" ]] && url+="&after=$last_msg_id"
 
-        local resp
-        resp="$(api_get "$url")" || { warn "Poll failed"; continue; }
+        local resp err
+        err="$(mktemp)"
+        if ! resp="$(api_get_with_code "$url" 2>"$err")"; then
+          warn "Poll failed: $(cat "$err" 2>/dev/null | head -1)"
+          rm -f "$err"
+          # Back off on 429 rate-limit
+          if grep -q 'HTTP=429' "$err" 2>/dev/null; then sleep 30; fi
+          continue
+        fi
+        rm -f "$err"
 
         local messages
         messages="$(echo "$resp" | jq -c 'if type=="array" then sort_by(.id)[] else empty end' 2>/dev/null)" || continue

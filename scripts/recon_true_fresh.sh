@@ -48,7 +48,9 @@ LOCK_FILE="$STATE_DIR/true_fresh.lock"
 
 BATCH_SIZE="${TRUE_FRESH_BATCH_SIZE:-500}"
 COOLDOWN_HOURS="${TRUE_FRESH_COOLDOWN_HOURS:-24}"
-CRT_SH_INTERVAL="${CRT_SH_INTERVAL:-21600}"   # 6h
+# v2.5.4: dropped from 6h → 2h. certstream.calidog.io is unreliable in
+# practice, so crt.sh is the load-bearing source of freshness.
+CRT_SH_INTERVAL="${CRT_SH_INTERVAL:-7200}"
 CRT_SH_TIMEOUT="${CRT_SH_TIMEOUT:-30}"
 MAX_PER_FLUSH="${TRUE_FRESH_MAX_PER_FLUSH:-5000}"
 
@@ -72,15 +74,56 @@ certstream_alive() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-start_certstream() {
-  command -v python3 >/dev/null 2>&1 || { warn "python3 missing; certstream disabled"; return 1; }
-  python3 -c 'import certstream' >/dev/null 2>&1 || {
-    warn "Python certstream module not installed (pip install certstream); skipping listener"
-    return 1
-  }
+# Locate a python3 interpreter that can `import certstream`. Probes (in order):
+#   1. $BASE_DIR/.venv         — repo-local venv we manage ourselves
+#   2. ~/.local/share/pipx/venvs/certstream  — `pipx install certstream`
+#   3. ~/.local/pipx/venvs/certstream        — alt pipx prefix
+#   4. system python3 (rare; PEP-668 blocks pip on Kali/Debian)
+# If none works, auto-bootstrap (1): create the repo venv and pip-install
+# certstream into it. After first run, every restart is instant.
+resolve_certstream_python() {
+  command -v python3 >/dev/null 2>&1 || { warn "python3 missing"; return 1; }
+  local candidates=(
+    "$BASE_DIR/.venv/bin/python3"
+    "$HOME/.local/share/pipx/venvs/certstream/bin/python3"
+    "$HOME/.local/pipx/venvs/certstream/bin/python3"
+    "$(command -v python3)"
+  )
+  for py in "${candidates[@]}"; do
+    [[ -x "$py" ]] || continue
+    if "$py" -c 'import certstream' >/dev/null 2>&1; then
+      printf '%s\n' "$py"; return 0
+    fi
+  done
 
-  log "Starting certstream listener"
-  nohup python3 - "$INSCOPE_TSV" "$HOLDING_FILE" >>"$LISTENER_LOG" 2>&1 <<'PY' &
+  # Nothing has it — bootstrap the repo venv.
+  log "certstream not found anywhere; bootstrapping $BASE_DIR/.venv (one-time, ~30s)"
+  if ! python3 -m venv "$BASE_DIR/.venv" >>"$LISTENER_LOG" 2>&1; then
+    warn "venv creation failed; install certstream manually:"
+    warn "  python3 -m venv $BASE_DIR/.venv && $BASE_DIR/.venv/bin/pip install certstream"
+    return 1
+  fi
+  "$BASE_DIR/.venv/bin/pip" install --quiet --upgrade pip >>"$LISTENER_LOG" 2>&1 || true
+  if ! "$BASE_DIR/.venv/bin/pip" install --quiet certstream >>"$LISTENER_LOG" 2>&1; then
+    warn "pip install certstream failed; see $LISTENER_LOG"
+    return 1
+  fi
+  if "$BASE_DIR/.venv/bin/python3" -c 'import certstream' >/dev/null 2>&1; then
+    printf '%s\n' "$BASE_DIR/.venv/bin/python3"; return 0
+  fi
+  warn "post-bootstrap import still fails; see $LISTENER_LOG"
+  return 1
+}
+
+start_certstream() {
+  local PY
+  PY="$(resolve_certstream_python)" || return 1
+  log "Starting certstream listener via $PY"
+  # CRITICAL: 9>&- closes the script lock fd in the child. Without this, the
+  # long-lived listener inherits fd 9 and keeps the flock held forever — every
+  # supervise_loop iteration after the first then bails with "true_fresh
+  # already running", silently disabling crt.sh polling and the flush phase.
+  nohup "$PY" - "$INSCOPE_TSV" "$HOLDING_FILE" 9>&- >>"$LISTENER_LOG" 2>&1 <<'PY' &
 import sys, os, json, time, fcntl, re
 import certstream
 
@@ -166,12 +209,18 @@ def reload_loop():
         load()
 threading.Thread(target=reload_loop, daemon=True).start()
 
+# v2.5.4: exponential backoff on reconnect. certstream.calidog.io drops
+# connections frequently; constant 10s reconnects spam the log without
+# helping. Start at 30s, double up to 300s.
+backoff = 30
 while True:
     try:
         certstream.listen_for_events(callback, url="wss://certstream.calidog.io/")
+        backoff = 30  # reset on clean exit (rare)
     except Exception as e:
-        sys.stderr.write("certstream reconnect: %s\n" % e)
-        time.sleep(10)
+        sys.stderr.write("certstream reconnect in %ds: %s\n" % (backoff, e))
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 300)
 PY
   local cspid=$!
   echo "$cspid" > "$PIDFILE"
