@@ -236,8 +236,27 @@ process_batch() {
         -threads "$HTTPX_THREADS" -rate-limit "$HTTPX_RATE" \
         -timeout "$HTTPX_TIMEOUT" -retries 1 \
         > "$httpx_out" 2>/dev/null; then
-    warn "httpx timed out or failed on $batch_name (will retry — moving to inbox)"
-    mv "$batch" "$INBOX/" 2>/dev/null || true
+    # v2.5.4: bounded retry. Prior behaviour moved the batch back to inbox
+    # forever — a single poisoned batch (DNS-flake host, hung TLS, etc.)
+    # would bounce inbox↔processing on every cycle indefinitely. Now we
+    # count retries via a .retry<N> filename suffix and after MAX_BATCH_RETRIES
+    # we send the batch to spool/failed for postmortem instead of poisoning
+    # the queue.
+    local retry_max="${MAX_BATCH_RETRIES:-3}"
+    local stem_base="${stem%.retry*}"
+    local cur_retry=0
+    if [[ "$stem" =~ \.retry([0-9]+)$ ]]; then
+      cur_retry="${BASH_REMATCH[1]}"
+    fi
+    local next_retry=$(( cur_retry + 1 ))
+    if (( next_retry >= retry_max )); then
+      warn "httpx timed out or failed on $batch_name (giving up after $retry_max retries — moving to spool/failed)"
+      mkdir -p "$SPOOL/failed"
+      mv "$batch" "$SPOOL/failed/${stem_base}.poisoned.txt" 2>/dev/null || rm -f "$batch"
+    else
+      warn "httpx timed out or failed on $batch_name (retry $next_retry/$retry_max — moving to inbox)"
+      mv "$batch" "$INBOX/${stem_base}.retry${next_retry}.txt" 2>/dev/null || true
+    fi
     rm -rf "$tmpd"
     return 1
   fi
