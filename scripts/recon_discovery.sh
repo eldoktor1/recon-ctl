@@ -132,31 +132,76 @@ refresh_subfinder() {
 refresh_assetfinder() {
   command -v assetfinder >/dev/null 2>&1 || return
   [[ -s "$ROOT_DOMAINS" ]] || return
-  log "Running assetfinder"
-  : > "$ASSET_CACHE.new"
+  log "Running assetfinder (parallel)"
+  local tmpdir; tmpdir="$(mktemp -d)"
+  local max_jobs="${ASSETFINDER_PARALLEL:-10}"
+  local running=0
   while IFS= read -r d; do
     [[ -z "$d" ]] && continue
-    run_net timeout 60 assetfinder --subs-only "$d" 2>/dev/null >> "$ASSET_CACHE.new" || true
+    local out="$tmpdir/${d//[^a-zA-Z0-9._-]/_}.txt"
+    ( run_net timeout 60 assetfinder --subs-only "$d" 2>/dev/null > "$out" || true ) &
+    running=$(( running + 1 ))
+    if [[ "$running" -ge "$max_jobs" ]]; then
+      wait; running=0
+    fi
   done < "$ROOT_DOMAINS"
-  tr '[:upper:]' '[:lower:]' < "$ASSET_CACHE.new" | sed -E 's#[[:space:]]##g' \
+  wait
+  cat "$tmpdir"/*.txt 2>/dev/null \
+    | tr '[:upper:]' '[:lower:]' | sed -E 's#[[:space:]]##g' \
     | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$ASSET_CACHE.tmp" \
     && mv "$ASSET_CACHE.tmp" "$ASSET_CACHE"
-  rm -f "$ASSET_CACHE.new"
+  rm -rf "$tmpdir"
   log "assetfinder cache: $(wc -l < "$ASSET_CACHE")"
+}
+
+# ---- Wildcard pre-filter ----
+# Remove hosts that resolve via a wildcard DNS record — probing them produces
+# identical 200s for every subdomain and burns httpx threads for zero signal.
+filter_wildcards() {
+  local in="$1" out="$2"
+  command -v dig >/dev/null 2>&1 || { cp "$in" "$out"; return; }
+  : > "$out"
+  # Extract unique root domains from the candidate list
+  local roots_tmp; roots_tmp="$(mktemp)"
+  awk -F. '{ if (NF >= 2) print $(NF-1)"."$NF }' "$in" | sort -u > "$roots_tmp"
+  # For each root domain, check if *.root resolves (wildcard present)
+  declare -A wildcard_roots=()
+  while IFS= read -r root; do
+    [[ -z "$root" ]] && continue
+    # Query a random subdomain; if it gets an A record, root is wildcard
+    local probe="recon-wc-probe-$$-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n').${root}"
+    local res
+    res="$(timeout 5 dig +short +time=2 +tries=1 "$probe" A 2>/dev/null | head -1)"
+    [[ -n "$res" ]] && wildcard_roots["$root"]=1
+  done < "$roots_tmp"
+  rm -f "$roots_tmp"
+  if [[ "${#wildcard_roots[@]}" -eq 0 ]]; then
+    cp "$in" "$out"; return
+  fi
+  while IFS= read -r host; do
+    local root
+    root="$(awk -F. '{print $(NF-1)"."$NF}' <<< "$host" 2>/dev/null)"
+    [[ -z "${wildcard_roots[$root]+x}" ]] && printf '%s\n' "$host"
+  done < "$in" > "$out"
+  local removed=$(( $(wc -l < "$in") - $(wc -l < "$out") ))
+  [[ "$removed" -gt 0 ]] && log "Wildcard filter: dropped $removed hosts (wildcard DNS roots: ${!wildcard_roots[*]})"
 }
 
 # ---- Build delta + emit batches ----
 emit_batches() {
-  local all delta
-  all="$(mktemp)"; delta="$(mktemp)"
-  trap "rm -f $all $delta" RETURN
+  local all delta filtered
+  all="$(mktemp)"; delta="$(mktemp)"; filtered="$(mktemp)"
+  trap "rm -f $all $delta $filtered" RETURN
 
   cat "$CHAOS_CACHE" "${SUB_CACHE:-/dev/null}" "${ASSET_CACHE:-/dev/null}" 2>/dev/null \
     | sort -u > "$all"
   sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"
   comm -23 "$all" "$KNOWN_HOSTS" > "$delta" || true
 
-  local total_new; total_new="$(wc -l < "$delta" | tr -d ' ')"
+  filter_wildcards "$delta" "$filtered"
+  delta="$filtered"
+
+  local total_new; total_new="$(wc -l < "$filtered" | tr -d ' ')"
   log "Total: $(wc -l < "$all") | Delta new: $total_new"
 
   [[ "$total_new" -eq 0 ]] && return

@@ -287,20 +287,27 @@ mode_active_checks() {
     }')"
   }
 
-  _probe_docker_api()         { browser_curl -sS -m 10 "http://$1/version" 2>/dev/null | jq -e '.ApiVersion // empty' >/dev/null 2>&1; }
+  # Docker API: port 2375 is plain HTTP; port 2376 is TLS. Try both.
+  _probe_docker_api() {
+    local h="$1"
+    browser_curl -sS -m 10 "http://$h/version" 2>/dev/null | jq -e '.ApiVersion // empty' >/dev/null 2>&1 && return 0
+    browser_curl -sS -k -m 10 "https://$h/version" 2>/dev/null | jq -e '.ApiVersion // empty' >/dev/null 2>&1
+  }
   _probe_jenkins_script()     { local c; c="$(browser_curl -sS -k -m 10 -o /dev/null -w '%{http_code}' "https://$1/script" 2>/dev/null || echo 000)"; [[ "$c" == "200" || "$c" == "302" ]]; }
   _probe_k8s_secrets()        { browser_curl -sS -k -m 10 "https://$1/api/v1/secrets" 2>/dev/null | jq -e '.items // empty | type=="array"' >/dev/null 2>&1; }
   _probe_grafana()            { browser_curl -sS -k -m 10 "https://$1/api/datasources" 2>/dev/null | jq -e 'type=="array"' >/dev/null 2>&1; }
   _probe_gitlab_open_signup() { browser_curl -sS -k -m 10 "https://$1/users/sign_up" 2>/dev/null | grep -qi 'new_user\[email\]'; }
   _probe_confluence_anon()    { local c; c="$(browser_curl -sS -k -m 10 -o /dev/null -w '%{http_code}' "https://$1/rest/api/space" 2>/dev/null || echo 000)"; [[ "$c" == "200" ]]; }
 
-  while IFS= read -r line; do
+  # Run probes for a single host in background; serialize _confirm via a per-host tmp dir.
+  _probe_host() {
+    local line="$1"
     local host url
-    host="$(echo "$line" | jq -r '.host')"
-    url="$(echo "$line" | jq -r '.url // ("https://" + .host)')"
-    _has_sig()  { echo "$line" | jq -e --arg p "$1" '(.signals // []) | any(test($p; "i"))' >/dev/null 2>&1; }
-    _has_tech() { echo "$line" | jq -e --arg p "$1" '(.tech // []) | any(. | ascii_downcase | test($p; "i"))' >/dev/null 2>&1; }
-    _has_port() { echo "$line" | jq -e --argjson p "$1" '(.port // 0) == $p' >/dev/null 2>&1; }
+    host="$(jq -r '.host' <<< "$line")"
+    url="$(jq -r '.url // ("https://" + .host)' <<< "$line")"
+    local _has_sig  ; _has_sig()  { jq -e --arg p "$1" '(.signals // []) | any(test($p; "i"))' <<< "$line" >/dev/null 2>&1; }
+    local _has_tech ; _has_tech() { jq -e --arg p "$1" '(.tech // []) | any(. | ascii_downcase | test($p; "i"))' <<< "$line" >/dev/null 2>&1; }
+    local _has_port ; _has_port() { jq -e --argjson p "$1" '(.port // 0) == $p' <<< "$line" >/dev/null 2>&1; }
 
     if _has_port 2375 || _has_port 2376 || _has_sig 'port:docker-api'; then
       _probe_docker_api "$host" && _confirm "$host" "$url" "docker_api" "docker_version_exposed"
@@ -320,7 +327,14 @@ mode_active_checks() {
     if _has_tech 'confluence' || _has_sig 'tech:confluence'; then
       _probe_confluence_anon "$host" && _confirm "$host" "$url" "confluence_anon" "confluence_anon_space_listing"
     fi
+  }
+
+  local pids=()
+  while IFS= read -r line; do
+    _probe_host "$line" &
+    pids+=($!)
   done < "$tmp"
+  wait "${pids[@]}" 2>/dev/null || true
 
   date +%s > "$marker"
   log "active-checks done"
@@ -375,7 +389,8 @@ mode_js_scan() {
   [[ "$n" -eq 0 ]] && { log "no fresh targets"; return 0; }
   log "scanning $n fresh hosts for JS secrets/endpoints"
 
-  local ignore_re='(heroku|twilio|firebase|supabase|example|sample|test|public|demo|placeholder|your-|insert-|replace-me)'
+  # Ignore list: legitimate 3rd-party SDKs and placeholder strings that produce FPs.
+  local ignore_re='(heroku|twilio|firebase|supabase|example|sample|test|public|demo|placeholder|your-|insert-|replace-me|sentry\.io|segment\.io|segment\.com|amplitude\.com|honeybadger|rollbar|logrocket|analytics\.google|googletagmanager|hotjar|intercom\.io|crisp\.chat|drift\.com|hubspot\.net|salesforce\.com)'
   local aws_re='AKIA[0-9A-Z]{16}'
   local google_re='AIza[0-9A-Za-z_-]{35}'
   local priv_key_re='-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'
@@ -414,10 +429,43 @@ mode_js_scan() {
     local count=0
     while IFS= read -r js_url; do
       [[ "$count" -ge "$max_scripts" ]] && break
-      local safe; safe="$(printf '%s' "$js_url" | sha256sum | awk '{print $1}').js"
-      local js_path="$host_dir/$safe"
+      local safe; safe="$(printf '%s' "$js_url" | sha256sum | awk '{print $1}')"
+      local js_path="$host_dir/${safe}.js"
       if browser_curl -sSL -m 20 --max-filesize "$max_bytes" -o "$js_path" "$js_url" 2>/dev/null; then
-        [[ -s "$js_path" ]] && _scan_one "$host" "$js_path" "$js_url"
+        if [[ -s "$js_path" ]]; then
+          _scan_one "$host" "$js_path" "$js_url"
+          # Fetch source map if referenced — minified JS hides secrets that maps expose
+          local map_url="${js_url}.map"
+          # Also check for explicit sourceMappingURL comment inside the JS
+          local inline_map
+          inline_map="$(grep -aoP '//# sourceMappingURL=\K\S+' "$js_path" 2>/dev/null | head -1 || true)"
+          if [[ -n "$inline_map" && "$inline_map" != data:* ]]; then
+            # Resolve relative map URLs against the JS URL
+            local js_base="${js_url%/*}"
+            case "$inline_map" in
+              http://*|https://*) map_url="$inline_map" ;;
+              *) map_url="$js_base/$inline_map" ;;
+            esac
+          fi
+          local map_path="$host_dir/${safe}.map"
+          if browser_curl -sSL -m 15 --max-filesize "$max_bytes" -o "$map_path" "$map_url" 2>/dev/null \
+              && [[ -s "$map_path" ]]; then
+            # Source map contains original source in .sourcesContent[]
+            # Extract all source content blocks and scan them
+            local src_tmp="$host_dir/${safe}.src"
+            python3 -c "
+import json, sys, pathlib
+try:
+    m = json.loads(pathlib.Path(sys.argv[1]).read_text(errors='ignore'))
+    for block in m.get('sourcesContent') or []:
+        if isinstance(block, str):
+            print(block)
+except Exception:
+    pass
+" "$map_path" > "$src_tmp" 2>/dev/null || true
+            [[ -s "$src_tmp" ]] && _scan_one "$host" "$src_tmp" "${map_url}#sourcesContent"
+          fi
+        fi
       fi
       count=$((count + 1))
     done < <(extract_script_srcs "$html_file" "$url")

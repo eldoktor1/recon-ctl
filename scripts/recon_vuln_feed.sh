@@ -45,6 +45,9 @@ EPSS_URL="${EPSS_URL:-https://epss.empiricalsecurity.com/epss_scores-current.csv
 NUCLEI_CVES_URL="${NUCLEI_CVES_URL:-https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/cves.json}"
 NUCLEI_RELEASES_URL="${NUCLEI_RELEASES_URL:-https://api.github.com/repos/projectdiscovery/nuclei-templates/releases/latest}"
 VULNRICHMENT_COMMITS_URL="${VULNRICHMENT_COMMITS_URL:-https://api.github.com/repos/cisagov/vulnrichment/commits?per_page=100}"
+# GitHub Security Advisories GraphQL — free, no token needed for public advisories.
+# Returns the 100 most recently published critical/high advisories with PoC availability.
+GHSA_URL="${GHSA_URL:-https://api.github.com/advisories?per_page=100&sort=published&direction=desc&severity=critical,high}"
 
 mkdir -p "$VULN_DIR" "$RAW_DIR" "$STATE_DIR" "$STATE_DIR/kill"
 
@@ -80,6 +83,7 @@ fetch_feeds() {
   fetch_optional "ProjectDiscovery nuclei CVE index" "$NUCLEI_CVES_URL" "$RAW_DIR/nuclei_cves.json"
   fetch_optional "ProjectDiscovery latest release" "$NUCLEI_RELEASES_URL" "$RAW_DIR/nuclei_latest_release.json"
   fetch_optional "CISA Vulnrichment recent commits" "$VULNRICHMENT_COMMITS_URL" "$RAW_DIR/vulnrichment_commits.json"
+  fetch_optional "GitHub Security Advisories (critical+high)" "$GHSA_URL" "$RAW_DIR/ghsa_recent.json"
 }
 
 normalize_feed() {
@@ -309,6 +313,36 @@ for c in commits if isinstance(commits, list) else []:
     rec = get(cid)
     add_source(rec, "cisa_vulnrichment_recent")
     rec["vulnrichment_recent"] = True
+
+# GitHub Security Advisories — provides PoC signal (references[] with exploit URLs)
+# and frequently publishes before NVD completes enrichment, giving us a head start.
+ghsa = load_json(raw_dir / "ghsa_recent.json", [])
+if isinstance(ghsa, list):
+    for advisory in ghsa:
+        cids = [c for c in (advisory.get("cve_id") or "").split(",") if c.strip()]
+        # GHSA advisories may also embed CVEs in identifiers[]
+        for ident in advisory.get("identifiers") or []:
+            if ident.get("type") == "CVE" and ident.get("value"):
+                cids.append(ident["value"].strip())
+        cids = [c for c in set(cids) if re.match(r"CVE-\d{4}-\d+", c, re.I)]
+        for cid in cids:
+            rec = get(cid.upper())
+            add_source(rec, "github_advisory")
+            # GHSA severity → CVSS floor if we don't have one
+            ghsa_sev = (advisory.get("severity") or "").lower()
+            if not rec.get("cvss") or rec["cvss"] == 0:
+                rec["cvss"] = {"critical": 9.0, "high": 7.5, "medium": 5.0, "low": 2.0}.get(ghsa_sev, 0)
+                rec["severity"] = severity(rec["cvss"])
+            rec["title"] = rec["title"] or (advisory.get("summary") or "")[:120]
+            rec["summary"] = rec["summary"] or (advisory.get("description") or "")[:500]
+            rec["published"] = rec["published"] or (advisory.get("published_at") or "")
+            # Check references for PoC/exploit indicators
+            refs = advisory.get("references") or []
+            poc_keywords = ("poc", "exploit", "proof-of-concept", "metasploit", "exploit-db", "edb.id")
+            has_poc = any(any(kw in (r if isinstance(r, str) else "").lower() for kw in poc_keywords) for r in refs)
+            if has_poc:
+                rec["template_available"] = True  # treat known PoC as equivalent signal
+                add_source(rec, "github_advisory_poc")
 
 def infer_match_text(rec):
     parts = []

@@ -61,24 +61,44 @@ fetch_kev() {
 }
 
 # =============================================================================
-# NVD fetch (FIXED — proper rate-limit pacing + retry)
+# NVD fetch (incremental — avoids re-fetching the entire 30d window every cycle)
 #
 # NVD limits: 5 requests / 30 seconds without API key.
-# Strategy: 7s sleep between pages, 3 retries per page with exp backoff,
-# and bail gracefully if first page fails (NVD is sometimes flaky).
+# Strategy:
+#   - On first run: fetch pubStartDate window (last 30d) to build full baseline
+#   - On subsequent runs: use lastModStartDate from the cached last-success epoch,
+#     fetching only CVEs modified since then. Dramatically fewer pages needed.
+#   - 7s sleep between pages, 3 retries per page with exp backoff.
 # =============================================================================
+NVD_LAST_SUCCESS="$CVE_DIR/nvd_last_success.epoch"
+
 fetch_nvd() {
-  log "Fetching NVD recent CVEs (last 30d)"
-  local pub_start pub_end
-  pub_end="$(date -u +%Y-%m-%dT%H:%M:%S.000)"
-  pub_start="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
-              || date -u -v-30d +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
-              || python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000"))')"
+  local now_ts; now_ts="$(date -u +%Y-%m-%dT%H:%M:%S.000)"
+  local use_mod=false start_param="pubStartDate" start_ts
+
+  # Use incremental (lastModified) if we have a successful prior run AND existing data
+  if [[ -s "$NVD_LAST_SUCCESS" && -s "$CVE_DIR/nvd_recent.json" ]]; then
+    local last_epoch; last_epoch="$(cat "$NVD_LAST_SUCCESS")"
+    start_ts="$(date -u -d "@$last_epoch" +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
+               || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp(${last_epoch}).strftime('%Y-%m-%dT%H:%M:%S.000'))")"
+    start_param="lastModStartDate"
+    use_mod=true
+    log "Fetching NVD incremental (lastMod since ${start_ts})"
+  else
+    start_ts="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
+               || date -u -v-30d +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
+               || python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000"))')"
+    log "Fetching NVD baseline (last 30d)"
+  fi
+
+  local pub_start="$start_ts"
+  local pub_end="$now_ts"
 
   local out="$CVE_DIR/nvd_recent.json.tmp"
   echo '{"vulnerabilities":[]}' > "$out"
 
   local start_idx=0 page_size=2000 total=0 pages=0 keep=true
+  local success=false
 
   # Initial backoff before first call (NVD often 429s if hit cold)
   sleep 2
@@ -95,16 +115,14 @@ fetch_nvd() {
     local resp http_code attempt=0 ok=false
     while [[ "$attempt" -lt 3 ]]; do
       attempt=$((attempt + 1))
-      # Keep curl failures inside retry logic. Under `set -e -o pipefail`,
-      # command-substitution pipelines can otherwise abort the whole script.
       local curl_out curl_rc last_line
       set +e
       curl_out="$(curl_net -sS -G -m 60 \
         --no-keepalive \
         --output "$RAW_DIR/.nvd_page.json" \
         --write-out '%{http_code}\n' \
-        --data-urlencode "pubStartDate=$pub_start" \
-        --data-urlencode "pubEndDate=$pub_end" \
+        --data-urlencode "${start_param}=$pub_start" \
+        --data-urlencode "lastModEndDate=$pub_end" \
         --data-urlencode "startIndex=$start_idx" \
         --data-urlencode "resultsPerPage=$page_size" \
         "$NVD_API" 2>/dev/null </dev/null)"
@@ -141,6 +159,7 @@ fetch_nvd() {
     jq --slurpfile new "$RAW_DIR/.nvd_page.json" \
       '.vulnerabilities += $new[0].vulnerabilities' "$out" > "${out}.merged"
     mv "${out}.merged" "$out"
+    success=true
 
     log "  NVD page $pages: +${got} (cumulative: $(jq '.vulnerabilities | length' "$out"))"
 
@@ -153,13 +172,35 @@ fetch_nvd() {
 
   rm -f "$RAW_DIR/.nvd_page.json"
 
-  if jq -e '.vulnerabilities | length > 0' "$out" >/dev/null 2>&1; then
-    mv "$out" "$CVE_DIR/nvd_recent.json"
-    log "NVD: $(jq '.vulnerabilities | length' "$CVE_DIR/nvd_recent.json") CVEs"
+  local fetched_count; fetched_count="$(jq '.vulnerabilities | length' "$out" 2>/dev/null || echo 0)"
+
+  if [[ "$fetched_count" -gt 0 ]]; then
+    if $use_mod && [[ -s "$CVE_DIR/nvd_recent.json" ]]; then
+      # Incremental merge: add/update new CVEs into the existing 30d baseline.
+      # New CVEs get appended; existing ones (same .cve.id) get replaced by the
+      # freshly fetched version (which has updated metadata/status).
+      jq -n \
+        --slurpfile base "$CVE_DIR/nvd_recent.json" \
+        --slurpfile delta "$out" '
+        ($base[0].vulnerabilities + $delta[0].vulnerabilities)
+        | unique_by(.cve.id)
+        | {vulnerabilities: .}
+      ' > "$CVE_DIR/nvd_recent.json.merged" \
+        && mv "$CVE_DIR/nvd_recent.json.merged" "$CVE_DIR/nvd_recent.json"
+      log "NVD incremental merge: $(jq '.vulnerabilities | length' "$CVE_DIR/nvd_recent.json") total CVEs (+$fetched_count modified)"
+    else
+      mv "$out" "$CVE_DIR/nvd_recent.json"
+      log "NVD baseline: $fetched_count CVEs"
+    fi
+    date +%s > "$NVD_LAST_SUCCESS"
+  elif $use_mod; then
+    # Zero results on incremental = nothing modified since last run = still valid
+    log "NVD: no CVEs modified since last run (baseline unchanged)"
+    date +%s > "$NVD_LAST_SUCCESS"
   else
     warn "NVD result empty — keeping previous if exists"
-    rm -f "$out"
   fi
+  rm -f "$out"
 }
 
 # =============================================================================
