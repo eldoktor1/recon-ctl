@@ -214,7 +214,6 @@ mode_deep_scan() {
     echo "$url" > "$target_tmp"
     local out="$run_dir/${host//[^a-zA-Z0-9]/_}.jsonl"
     timeout 300 nuclei \
-      -proxy "$PROXY_URL" \
       -t "$bounty_dir" "${args[@]}" \
       -l "$target_tmp" \
       -severity critical,high,medium \

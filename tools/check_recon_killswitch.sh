@@ -23,8 +23,13 @@ if [[ "${RECON_RUN_LIVE_LEAK_TEST:-0}" == "1" ]]; then
 fi
 
 echo
-echo "== Tor should work =="
-sudo -n -u reconrun curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://ifconfig.me; echo
+echo "== VPN egress should work (and reveal a VPN IP, NOT your home IP) =="
+# v2.5.6: Tor removed. The kill-switch should now permit reconrun egress only
+# via the system VPN interface (assumed Mullvad WG). If this prints your home
+# IP, the kill-switch is misconfigured and you have a leak. Update
+# /usr/local/sbin/recon-safe-preflight + nftables rule accordingly.
+sudo -n -u reconrun curl -s --max-time 20 https://ifconfig.me; echo
+echo "(verify the IP above is your VPN's, not your home IP)"
 
 echo
 echo "== local ES should work =="

@@ -37,8 +37,11 @@ TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
 
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
-PROXY_URL="${PROXY_URL:-socks5h://127.0.0.1:9050}"
-USE_PROXYCHAINS="${USE_PROXYCHAINS:-1}"
+# v2.5.6: Tor / proxychains removed. Recon egress is now system-default
+# (assumed Mullvad WG, enforced by nftables kill-switch on reconrun uid).
+# These two env vars are kept as no-ops so existing call sites compile.
+PROXY_URL="${PROXY_URL:-}"
+USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
 
 prepare_scanner_dirs() {
   local shared_dirs=(
@@ -98,8 +101,8 @@ run_scanner() {
     BASE_DIR="$BASE_DIR"
     ES_URL="${ES_URL:-http://127.0.0.1:9200}"
     INDEX_NAME="${INDEX_NAME:-recon_alive}"
-    USE_PROXYCHAINS="$USE_PROXYCHAINS"
-    PROXY_URL="$PROXY_URL"
+    USE_PROXYCHAINS="0"
+    PROXY_URL=""
     HTTPX_THREADS="${HTTPX_THREADS:-15}"
     HTTPX_RATE="${HTTPX_RATE:-15}"
     HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
@@ -164,10 +167,11 @@ trap cleanup_exit EXIT
 
 # ---- Runtime env loader (v2.5.2: single capable config, no mode toggle) ----
 #
-# One sane production profile: multi-worker + higher output, but tempered so
-# Tor doesn't drown and the laptop doesn't melt. Tor SOCKS at 9050 is the
-# real bandwidth bottleneck — going past ~80 httpx threads at 100 rps each
-# saturates Tor without speeding anything up.
+# One sane production profile: multi-worker + higher output, tempered for
+# system-VPN egress (Mullvad WG). Without the Tor bottleneck, the practical
+# limit becomes httpx-side concurrency vs. laptop CPU/network. 80 threads
+# at 100 rps/worker keeps a typical residential gigabit link from
+# saturating while still ~10-50x the old Tor-routed throughput.
 #
 # On-battery auto-throttle: halve concurrency + rate when AC is unplugged.
 load_runtime_env() {

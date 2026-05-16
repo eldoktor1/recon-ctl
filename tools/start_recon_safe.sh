@@ -11,8 +11,11 @@ echo "[1/2] Running secure preflight..."
 sudo -n /usr/local/sbin/recon-safe-preflight
 
 echo "[2/2] Starting recon safely..."
+# v2.5.6: Tor/proxychains removed. Egress is now the host's default route,
+# expected to be Mullvad WireGuard, enforced by the nftables kill-switch
+# on the reconrun uid (operator-managed in /usr/local/sbin/recon-safe-preflight).
 ES_URL="${ES_URL:-http://127.0.0.1:9200}" \
 SCANNER_USER=reconrun \
-USE_PROXYCHAINS=1 \
-PROXY_URL="${PROXY_URL:-socks5h://127.0.0.1:9050}" \
+USE_PROXYCHAINS=0 \
+PROXY_URL="" \
 bash "$CTL_SCRIPT" start

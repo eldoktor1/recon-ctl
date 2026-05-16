@@ -77,14 +77,14 @@ The `recon-start` alias should point to:
 The safe startup script does this:
 
     sudo -n /usr/local/sbin/recon-safe-preflight
-    SCANNER_USER=reconrun USE_PROXYCHAINS=1 PROXY_URL=socks5h://127.0.0.1:9050 \
+    SCANNER_USER=reconrun USE_PROXYCHAINS=0 PROXY_URL= \
       ~/recon-pipeline/scripts/recon_ctl.sh start
 
-The preflight script:
+The preflight script (v2.5.6 — Tor removed, Mullvad-based):
 
 - reapplies the nftables kill switch
 - verifies direct outbound from `reconrun` is blocked
-- verifies Tor SOCKS works on `127.0.0.1:9050`
+- verifies the system VPN (Mullvad WG) is up and routing
 - verifies local Elasticsearch works on `127.0.0.1:9200`
 - refuses to start recon if any safety check fails
 
@@ -124,54 +124,45 @@ Allowed:
 
     127.0.0.1/8
     ::1
-    127.0.0.1:9050  Tor SOCKS
+    Mullvad WireGuard interface (e.g. wg0-mullvad) — public egress
     127.0.0.1:9200  local Elasticsearch
 
 Blocked:
 
-    Any direct public outbound traffic from reconrun
+    Any direct public outbound traffic from reconrun NOT via the VPN iface
 
-Expected nftables rule:
+Expected nftables rule (operator-adjusted to your wg iface name):
 
     table inet recon_killswitch {
         chain output {
             type filter hook output priority filter - 10; policy accept;
             meta skuid 996 ip daddr 127.0.0.0/8 accept
             meta skuid 996 ip6 daddr ::1 accept
+            meta skuid 996 oifname "wg0-mullvad" accept
             meta skuid 996 reject
         }
     }
 
-The kill switch is the real fail-closed protection.
+The kill switch is the real fail-closed protection: if the VPN drops, the
+WG interface goes down, and reconrun's egress is blackholed until it
+comes back. No leak window.
 
-Proxychains and native proxy flags are still used, but they are not the only security control.
+## No proxy flags
 
-## Native Proxy Flags
+v2.5.6 removed Tor + proxychains entirely. httpx / subfinder / nuclei are
+launched without `-proxy` flags; their traffic flows through the system's
+default route, which the kill-switch confines to the Mullvad WG interface
+for the `reconrun` uid.
 
-Tools with native proxy support are launched with SOCKS proxy flags:
+## VPN stability
 
-    httpx -http-proxy socks5h://127.0.0.1:9050
-    subfinder -proxy socks5h://127.0.0.1:9050
-    nuclei -proxy socks5h://127.0.0.1:9050
+If the Mullvad WG interface goes down, `reconrun` traffic stops cold (kill
+switch). The supervised loops will back off and resume cleanly when WG
+comes back. To inspect:
 
-`assetfinder` is skipped in proxy-safe mode because it does not provide a trusted native proxy flag.
-
-## Tor Stability
-
-Do not restart Tor on a tight cron. It creates short windows where
-`127.0.0.1:9050` disappears and the fail-closed network helper correctly
-refuses discovery, Discord polling, and feed fetches.
-
-Known bad crontab entry:
-
-    */3 * * * * /usr/bin/sudo /bin/systemctl restart tor >/dev/null 2>&1
-
-If Tor appears intermittent, check:
-
-    crontab -l
-    systemctl is-active tor
-    pgrep -af tor
-    nc -z -w 2 127.0.0.1 9050
+    sudo wg show
+    ip route show | grep wg
+    sudo -u reconrun curl -s --max-time 5 https://ifconfig.me  # should be VPN IP
     journalctl -u tor --no-pager | tail -40
 
 The May 10 fix removed the forced restart line and backed up the old crontab at:
@@ -383,8 +374,8 @@ Check reconrun scanner sockets:
 Expected:
 
 - git status clean
-- direct outbound from reconrun blocked
-- Tor SOCKS works
+- direct outbound from reconrun (outside VPN iface) blocked
+- system VPN (Mullvad WG) up and routing
 - local ES works
 - daemon running
 - ES green
@@ -557,19 +548,21 @@ Then start safely:
 
     recon-start
 
-### Tor is not working
+### VPN is not working
 
-Check listener:
+Check WG interface is up and routing:
 
-    ss -ltnp | grep ':9050'
+    sudo wg show
+    ip route show default
+    ip -br a show wg0-mullvad 2>/dev/null || mullvad status
 
-Start Tor:
+Start the VPN if down:
 
-    sudo service tor start
+    mullvad connect
 
-Then test:
+Then verify reconrun egress is via the VPN (and NOT your home IP):
 
-    sudo -u reconrun curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://ifconfig.me
+    sudo -u reconrun curl -s --max-time 5 https://ifconfig.me
 
 ### ES is not working
 

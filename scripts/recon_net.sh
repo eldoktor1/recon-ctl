@@ -1,64 +1,45 @@
 #!/usr/bin/env bash
-# Shared fail-closed network helpers.
+# Shared network helpers.
+#
+# v2.5.6: Tor/proxychains removed. All recon traffic now egresses via the
+# host's default route (assumed to be Mullvad WireGuard or equivalent
+# system-level VPN, enforced by the nftables kill-switch on the reconrun
+# uid). proxy_required(), ensure_proxy_ready(), curl_direct(), curl_net()
+# and run_net() are kept as thin direct wrappers so call sites continue
+# to compile — but they no longer wrap proxychains.
+#
+# IF you ever want to put a SOCKS proxy back in front of recon traffic,
+# the only place to change is this file: rewrite curl_net/run_net to
+# wrap curl --proxy / proxychains4 again and the rest of the pipeline
+# inherits that automatically.
 
-PROXY_URL="${PROXY_URL:-socks5h://127.0.0.1:9050}"
-USE_PROXYCHAINS="${USE_PROXYCHAINS:-1}"
+# Back-compat shims: scripts may still set/read these, but they're no-ops.
+PROXY_URL="${PROXY_URL:-}"
+USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
 
-proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
-
-proxy_listener_ready() {
-  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050'
-}
-
-ensure_proxy_ready() {
-  proxy_required || return 0
-  command -v proxychains4 >/dev/null 2>&1 || {
-    printf '[recon-net] USE_PROXYCHAINS=1 but proxychains4 is missing\n' >&2
-    return 1
-  }
-  proxy_listener_ready || {
-    printf '[recon-net] USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up\n' >&2
-    return 1
-  }
-}
+proxy_required()      { return 1; }                   # always false now
+proxy_listener_ready(){ return 0; }                   # always ready
+ensure_proxy_ready()  { return 0; }                   # no-op
 
 run_net() {
-  ensure_proxy_ready || return 1
-  if proxy_required; then
-    proxychains4 -q "$@"
-  else
-    "$@"
-  fi
-}
-
-# v2.5.5: curl_direct — bypass Tor entirely. Use for non-target-facing,
-# trusted-destination traffic ONLY: Discord (api.discord.com is on the public
-# internet but Discord blocks Tor exits, breaking webhooks + bot polling),
-# crt.sh polling, certstream, our local services. Never use this for any
-# scan/probe against a bug-bounty target — that's what curl_net is for.
-curl_direct() {
-  curl "$@"
+  "$@"
 }
 
 curl_net() {
-  if proxy_required; then
-    # curl_net uses --proxy, not proxychains4; only check the SOCKS listener.
-    proxy_listener_ready || {
-      printf '[recon-net] Tor SOCKS not available at 127.0.0.1:9050 — skipping call\n' >&2
-      return 1
-    }
-    curl --proxy "$PROXY_URL" "$@"
-  else
-    curl "$@"
-  fi
+  curl "$@"
+}
+
+# Alias kept for v2.5.5 intent documentation (Discord/non-target traffic).
+curl_direct() {
+  curl "$@"
 }
 
 # -----------------------------------------------------------------------------
 # Browser-like HTTP helpers (v2.5)
 # random_user_agent: prints one UA from $UA_FILE (one per line).
-# browser_curl: wraps curl_net with a random real-browser UA + matching headers.
-#   Any flags passed are appended after the synthesized headers, so callers can
-#   still set -m/-X/-o/-d/-H etc. Sec-Ch-Ua headers are added only for Chrome.
+# browser_curl: random real-browser UA + matching headers, direct egress
+# (system route → Mullvad VPN). Any flags passed are appended after the
+# synthesized headers.
 # -----------------------------------------------------------------------------
 UA_FILE="${UA_FILE:-$HOME/recon/state/user_agents.txt}"
 
@@ -95,7 +76,6 @@ browser_curl() {
   local ua plat chrome_major
   ua="$(random_user_agent)"
 
-  # Derive platform string for Sec-Ch-Ua-Platform
   case "$ua" in
     *"Windows"*)   plat="Windows" ;;
     *"Mac OS X"*|*"Macintosh"*) plat="macOS" ;;
@@ -126,5 +106,5 @@ browser_curl() {
     )
   fi
 
-  curl_net "${base_headers[@]}" --compressed "$@"
+  curl "${base_headers[@]}" --compressed "$@"
 }
