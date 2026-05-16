@@ -11,25 +11,10 @@ log()  { printf '[%s DISC] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s DISC WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s DISC FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
-# Network command wrapper.
-# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
-# Fail closed if proxychains/Tor is not available.
-proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
-
-ensure_proxy_ready() {
-  proxy_required || return 0
-  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
-  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
-}
-
-run_net() {
-  ensure_proxy_ready
-  if proxy_required; then
-    proxychains4 -q "$@"
-  else
-    "$@"
-  fi
-}
+# v2.5.6: Tor/proxychains removed. Egress via system route (Mullvad).
+proxy_required()     { return 1; }
+ensure_proxy_ready() { return 0; }
+run_net()            { "$@"; }
 
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
@@ -134,7 +119,7 @@ refresh_subfinder() {
   fi
   log "Running subfinder ($(wc -l < "$ROOT_DOMAINS") roots)"
   local tmp; tmp="$(mktemp)"
-  if timeout 1800 subfinder -proxy "$PROXY_URL" -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
+  if timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
     tr '[:upper:]' '[:lower:]' < "$tmp" | sed -E 's#[[:space:]]##g' \
       | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$SUB_CACHE.new"
     mv "$SUB_CACHE.new" "$SUB_CACHE"
@@ -147,11 +132,6 @@ refresh_subfinder() {
 refresh_assetfinder() {
   command -v assetfinder >/dev/null 2>&1 || return
   [[ -s "$ROOT_DOMAINS" ]] || return
-  if proxy_required; then
-    warn "Skipping assetfinder because USE_PROXYCHAINS=1 and assetfinder has no trusted native proxy flag"
-    : > "$ASSET_CACHE"
-    return 0
-  fi
   log "Running assetfinder"
   : > "$ASSET_CACHE.new"
   while IFS= read -r d; do

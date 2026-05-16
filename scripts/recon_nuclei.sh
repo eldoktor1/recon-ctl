@@ -29,25 +29,10 @@ log()  { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s ERROR] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
-# Network command wrapper.
-# If USE_PROXYCHAINS=1, target-facing tools MUST run through proxychains4.
-# Fail closed if proxychains/Tor is not available.
-proxy_required() { [[ "${USE_PROXYCHAINS:-1}" == "1" ]]; }
-
-ensure_proxy_ready() {
-  proxy_required || return 0
-  command -v proxychains4 >/dev/null 2>&1 || die "USE_PROXYCHAINS=1 but proxychains4 is missing"
-  ss -ltn 2>/dev/null | grep -q '127\.0\.0\.1:9050' || die "USE_PROXYCHAINS=1 but Tor SOCKS listener 127.0.0.1:9050 is not up"
-}
-
-run_net() {
-  ensure_proxy_ready
-  if proxy_required; then
-    proxychains4 -q "$@"
-  else
-    "$@"
-  fi
-}
+# v2.5.6: Tor/proxychains removed. Egress via system route (Mullvad).
+proxy_required()     { return 1; }
+ensure_proxy_ready() { return 0; }
+run_net()            { "$@"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
@@ -78,7 +63,6 @@ if [[ "${1:-}" == "bounty" ]]; then
   mkdir -p "$RUN_DIR"
   log "Bounty scan: $(wc -l < "$target_file" | tr -d ' ') targets, templates=$BOUNTY_TEMPLATES_DIR"
   timeout 900 nuclei \
-    -proxy "$PROXY_URL" \
     -l "$target_file" \
     -t "$BOUNTY_TEMPLATES_DIR" \
     -severity critical,high,medium \
@@ -305,7 +289,6 @@ scan_one() {
   # Run nuclei with strict params
   log "  scanning $host (CVEs: $cves)"
   timeout 300 nuclei \
-    -proxy "$PROXY_URL" \
     -target "$url" \
     "${templates[@]}" \
     -severity critical,high \

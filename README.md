@@ -7,7 +7,7 @@ Autonomous bug bounty recon pipeline.
 scripts/
   auto_recon.sh     — one recon cycle (Chaos + subfinder + httpx + ES ingest)
   triage.sh         — scoring engine → agent_targets.jsonl + Discord
-  recon_daemon.sh   — forever loop, mode-aware, proxychains support
+  recon_daemon.sh   — forever loop, single capable profile
   recon_ctl.sh      — control interface (status/mode/logs/top/health/clean)
   recon_vuln_feed.sh — passive CVE/advisory/template intelligence normalization
 docker/
@@ -54,7 +54,7 @@ archive the current active result/log views:
 
 ## Proxy / IP safety
 Default startup is fail-closed. Use `tools/start_recon_safe.sh`, which requires the
-root preflight, Tor SOCKS on `127.0.0.1:9050`, and the `reconrun` nftables kill
+root preflight (verifies system VPN is up, e.g. Mullvad WG), and the `reconrun` nftables kill
 switch before target-facing recon starts.
 
 Elasticsearch is expected to be Windows-local at `http://127.0.0.1:9200`; the

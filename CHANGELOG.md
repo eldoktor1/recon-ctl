@@ -1,5 +1,67 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.5.6-no-tor - 2026-05-15 - Strip Tor/proxychains, Mullvad-only egress
+
+### Removed
+- All Tor / proxychains4 plumbing. The pipeline now relies entirely on
+  the host's default route (assumed Mullvad WireGuard), enforced by the
+  nftables kill-switch on the `reconrun` uid.
+- `-proxy` / `-http-proxy` flags from every CLI tool call:
+  * recon_validate.sh:    httpx
+  * recon_nuclei.sh:      nuclei (bounty + KEV scan paths)
+  * recon_fresh_modules.sh: deep-scan nuclei
+  * recon_discovery.sh:   subfinder
+  * recon_scope_watch.sh: subfinder enrichment
+- The `proxy_required` / `ensure_proxy_ready` / `run_net` blocks that
+  were duplicated across 5 scripts. They now exist only in recon_net.sh
+  as no-op shims for back-compat (so any future call sites compile).
+- `USE_PROXYCHAINS=1` and `PROXY_URL=socks5h://127.0.0.1:9050` removed
+  from tools/start_recon_safe.sh, recon_daemon.sh defaults, and the
+  per-child env in `run_scanner`.
+- `recon_discovery.sh`: removed the "Skipping assetfinder because
+  USE_PROXYCHAINS=1" warning path — assetfinder now runs normally.
+- README + RUNBOOK rewritten: no more Tor SOCKS references, kill-switch
+  rule updated to allow only loopback + the Mullvad WG interface,
+  troubleshooting section now diagnoses VPN not Tor.
+
+### Changed
+- tools/check_recon_killswitch.sh now does a direct egress test (should
+  show VPN IP, not home IP) instead of a Tor-SOCKS test.
+- recon_net.sh `curl_net`, `curl_direct`, `run_net` are all direct
+  passthroughs; v2.5.5's `curl_direct` distinction (for Discord-bypass)
+  becomes trivially correct everywhere.
+- Single capable-mode profile commentary updated: bottleneck is now
+  laptop/network, not Tor.
+
+### Operator action required (NOT in repo)
+- `/usr/local/sbin/recon-safe-preflight` (root-owned, not in this repo)
+  must be updated: drop the "verify Tor SOCKS 9050" check, add a
+  "verify Mullvad WG interface up + has default route" check.
+- nftables kill-switch rule must be updated: instead of allowing
+  `127.0.0.1:9050`, allow `oifname "wg0-mullvad"` (or whatever your WG
+  interface is named). Loopback + local ES allowances unchanged.
+- Mullvad daemon must be running before `recon-start`. If WG drops mid-
+  run, the kill-switch correctly blackholes reconrun traffic — supervised
+  loops back off and resume when VPN comes back.
+
+## v2.5.5-day1-audit - 2026-05-15 - Perms, Tor-bypass, listener instrumentation
+
+### Fixed
+- v2.5.4 atomic mv left agent_targets.jsonl with mask::--- inherited
+  from mktemp, blocking every reader. chmod 0664 + setfacl mask reset
+  before mv.
+- Discord bot polling + ALL webhook POSTs went through Tor via curl_net;
+  Discord blocks Tor exits → HTTP=000 for 17h. Added curl_direct helper
+  and switched bot api_get/api_post + triage notify + nuclei notify +
+  smart-scan notify to bypass Tor for Discord traffic.
+- Certstream listener `lstrip("*.")` was character-stripping incorrectly.
+  Use explicit `startswith("*.")` prefix removal.
+
+### Added
+- Listener 5-min stats line (certs/domains_seen/matches/emit_errors/
+  scope_size) so we can see if matching is firing.
+- `emit()` failures surfaced instead of swallowed.
+
 ## v2.5.2-single-profile - 2026-05-14 - One sane multi-worker profile
 
 ### Removed
