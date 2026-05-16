@@ -29,11 +29,6 @@ log()  { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s ERROR] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
-# v2.5.6: Tor/proxychains removed. Egress via system route (Mullvad).
-proxy_required()     { return 1; }
-ensure_proxy_ready() { return 0; }
-run_net()            { "$@"; }
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
 
@@ -382,7 +377,6 @@ notify_discord_confirmed() {
       timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }]
   }')"
-  # v2.5.5: Discord blocks Tor exits — bypass Tor
   curl_direct -fsS -m 10 -H 'Content-Type: application/json' \
     -X POST -d "$payload" "$hook" >/dev/null 2>&1 || true
 }

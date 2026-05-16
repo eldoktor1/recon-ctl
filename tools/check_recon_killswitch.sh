@@ -11,6 +11,20 @@ need_sudo() {
 
 need_sudo
 
+# In WSL2, Mullvad runs on the Windows host and protects all egress via the
+# virtual eth0 adapter. There is no local nftables kill-switch — that's correct.
+if grep -qi 'microsoft\|WSL' /proc/version 2>/dev/null; then
+  echo "== WSL2 detected — nftables kill-switch is a no-op (Windows Mullvad handles egress) =="
+  echo ""
+  echo "== VPN egress check — should show a Mullvad IP, NOT your home IP =="
+  sudo -n -u reconrun curl -s --max-time 20 https://ifconfig.me; echo
+  echo "(verify the IP above is your VPN exit, not your home IP)"
+  echo ""
+  echo "== local ES check =="
+  sudo -n -u reconrun curl -s --max-time 5 -u "elastic:$(tr -d '[:space:]' < ~/.recon_es_pass)" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'
+  exit 0
+fi
+
 echo "== nft rule =="
 sudo -n nft list chain inet recon_killswitch output
 
@@ -24,10 +38,6 @@ fi
 
 echo
 echo "== VPN egress should work (and reveal a VPN IP, NOT your home IP) =="
-# v2.5.6: Tor removed. The kill-switch should now permit reconrun egress only
-# via the system VPN interface (assumed Mullvad WG). If this prints your home
-# IP, the kill-switch is misconfigured and you have a leak. Update
-# /usr/local/sbin/recon-safe-preflight + nftables rule accordingly.
 sudo -n -u reconrun curl -s --max-time 20 https://ifconfig.me; echo
 echo "(verify the IP above is your VPN's, not your home IP)"
 
