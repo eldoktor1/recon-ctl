@@ -48,12 +48,8 @@ echo $$ > "$PID_FILE"
 trap "rm -f '$PID_FILE'" EXIT
 
 # ---- API helpers ------------------------------------------------------------
-# v2.5.5: Discord API blocks Tor exits — bot polls + posts go direct, NOT
-# via curl_net. The bot communicates with our own Discord channel; it
-# never touches a bug-bounty target, so bypassing Tor is correct.
 api_get()  { curl_direct -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
 api_post() { curl_direct -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
-# v2.5.4 with v2.5.5 fix: same direct curl, with HTTP-code capture.
 api_get_with_code() {
   local code
   code="$(curl_direct -fsS -m 10 -o /tmp/_bot_resp.$$ -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"

@@ -15,9 +15,8 @@
 #     ~/recon/queue/inbox/ for the fast validator lane.
 #
 # EGRESS
-#   Direct (no Tor) — these sources are passive and the kill switch must
-#   allow them. The certstream WSS and crt.sh GET requests are not target-
-#   facing.
+#   Runs as d0k (not reconrun) — passive CT log feeds, no target-facing traffic.
+#   Certstream WSS and crt.sh GET requests egress via Mullvad like everything else.
 #
 # CLEANUP
 #   - Holding file deleted on every flush.

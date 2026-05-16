@@ -37,11 +37,6 @@ TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
 
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
-# v2.5.6: Tor / proxychains removed. Recon egress is now system-default
-# (assumed Mullvad WG, enforced by nftables kill-switch on reconrun uid).
-# These two env vars are kept as no-ops so existing call sites compile.
-PROXY_URL="${PROXY_URL:-}"
-USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
 
 prepare_scanner_dirs() {
   local shared_dirs=(
@@ -101,8 +96,6 @@ run_scanner() {
     BASE_DIR="$BASE_DIR"
     ES_URL="${ES_URL:-http://127.0.0.1:9200}"
     INDEX_NAME="${INDEX_NAME:-recon_alive}"
-    USE_PROXYCHAINS="0"
-    PROXY_URL=""
     HTTPX_THREADS="${HTTPX_THREADS:-15}"
     HTTPX_RATE="${HTTPX_RATE:-15}"
     HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
@@ -165,18 +158,12 @@ cleanup_exit() {
 }
 trap cleanup_exit EXIT
 
-# ---- Runtime env loader (v2.5.2: single capable config, no mode toggle) ----
-#
-# One sane production profile: multi-worker + higher output, tempered for
-# system-VPN egress (Mullvad WG). Without the Tor bottleneck, the practical
-# limit becomes httpx-side concurrency vs. laptop CPU/network. 80 threads
-# at 100 rps/worker keeps a typical residential gigabit link from
-# saturating while still ~10-50x the old Tor-routed throughput.
-#
-# On-battery auto-throttle: halve concurrency + rate when AC is unplugged.
+# ---- Runtime env loader ----
+# Single production profile: 80 threads at 100 rps/worker via Mullvad WG.
+# On-battery: auto-throttle to half concurrency.
 load_runtime_env() {
   export HTTPX_THREADS="${HTTPX_THREADS_OVERRIDE:-80}"
-  export HTTPX_RATE="${HTTPX_RATE_OVERRIDE:-100}"   # per worker; Tor throttles total
+  export HTTPX_RATE="${HTTPX_RATE_OVERRIDE:-100}"
   export HTTPX_TIMEOUT=10
   export HTTPX_MAX_RUNTIME=1200                      # 20 min hard cap
   export BATCHES_PER_CYCLE=8
@@ -296,8 +283,8 @@ run_nuclei_v21() {
   run_scanner bash "$V21_NUCLEI"
 }
 
-# ---- True-Fresh engine (v2.5) ---------------------------------------------
-# Passive (CT logs + crt.sh). Direct egress — does NOT run under reconrun/Tor.
+# ---- True-Fresh engine (CT logs + crt.sh) ---------------------------------
+# Passive feeds — runs as d0k, not reconrun (no scanning, no target traffic).
 TRUE_FRESH_SCRIPT="${TRUE_FRESH_SCRIPT:-$(script_path recon_true_fresh.sh)}"
 TRUE_FRESH_SLEEP="${TRUE_FRESH_SLEEP:-120}"
 run_true_fresh() { bash "$TRUE_FRESH_SCRIPT"; }

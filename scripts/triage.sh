@@ -1087,7 +1087,6 @@ notify_discord_findings() {
 
   local n_emb; n_emb="$(echo "$payload" | jq '.embeds|length')"
   if [[ "$n_emb" -le 10 ]]; then
-    # v2.5.5: Discord blocks Tor exits — bypass Tor for webhook POSTs
     curl_direct -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
   else
     local i=0

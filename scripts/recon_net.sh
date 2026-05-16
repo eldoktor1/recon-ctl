@@ -1,38 +1,12 @@
 #!/usr/bin/env bash
 # Shared network helpers.
-#
-# v2.5.6: Tor/proxychains removed. All recon traffic now egresses via the
-# host's default route (assumed to be Mullvad WireGuard or equivalent
-# system-level VPN, enforced by the nftables kill-switch on the reconrun
-# uid). proxy_required(), ensure_proxy_ready(), curl_direct(), curl_net()
-# and run_net() are kept as thin direct wrappers so call sites continue
-# to compile — but they no longer wrap proxychains.
-#
-# IF you ever want to put a SOCKS proxy back in front of recon traffic,
-# the only place to change is this file: rewrite curl_net/run_net to
-# wrap curl --proxy / proxychains4 again and the rest of the pipeline
-# inherits that automatically.
+# All recon traffic egresses via the host's default route (Mullvad WireGuard).
 
-# Back-compat shims: scripts may still set/read these, but they're no-ops.
-PROXY_URL="${PROXY_URL:-}"
-USE_PROXYCHAINS="${USE_PROXYCHAINS:-0}"
-
-proxy_required()      { return 1; }                   # always false now
-proxy_listener_ready(){ return 0; }                   # always ready
-ensure_proxy_ready()  { return 0; }                   # no-op
-
-run_net() {
-  "$@"
-}
-
-curl_net() {
-  curl "$@"
-}
-
-# Alias kept for v2.5.5 intent documentation (Discord/non-target traffic).
-curl_direct() {
-  curl "$@"
-}
+# Thin wrappers — call sites use these so any future proxy layer only needs
+# to change here.
+run_net()    { "$@"; }
+curl_net()   { curl "$@"; }
+curl_direct() { curl "$@"; }
 
 # -----------------------------------------------------------------------------
 # Browser-like HTTP helpers (v2.5)

@@ -192,9 +192,9 @@ cmd_status() {
 
 cmd_mode() {
   cat <<EOF
-Mode toggling was removed in v2.5.2. The daemon now runs a single sane
-"capable" profile (multi-worker, higher output, Tor-friendly). It auto-
-throttles to 50% concurrency when the laptop is on battery.
+Mode toggling was removed in v2.5.2. The daemon now runs a single profile:
+multi-worker, 80 threads at 100 rps via Mullvad WireGuard. It auto-throttles
+to 50% concurrency when the laptop is on battery.
 See \`recon_ctl status\` for current power state.
 EOF
 }

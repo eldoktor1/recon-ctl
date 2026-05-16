@@ -16,12 +16,6 @@ log()  { printf '[%s VAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s VAL WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s VAL FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 
-# v2.5.6: Tor/proxychains removed. Egress via system route (Mullvad).
-proxy_required()     { return 1; }
-ensure_proxy_ready() { return 0; }
-run_net()            { "$@"; }
-
-
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="$BASE_DIR/state"
 QUEUE_DIR="$BASE_DIR/queue"

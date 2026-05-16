@@ -190,18 +190,6 @@ load_fingerprints() {
 # =============================================================================
 multi_resolve_cname() {
   local host="$1"
-  if proxy_required; then
-    local cname
-    cname="$(doh_cname "$host")"
-    if [[ -n "$cname" ]]; then
-      printf '%s\tcname\tproxy-doh\n' "$cname"
-    elif doh_nxdomain "$host"; then
-      printf '%s\tnxdomain\tproxy-doh\n' "$host"
-    else
-      printf '\terr\t0/3\n'
-    fi
-    return 0
-  fi
   local r cname_target
   declare -A cname_votes nx_votes
   local total=0 dns_errs=0
@@ -246,10 +234,6 @@ multi_resolve_cname() {
 # Check if CNAME target itself NXDOMAINs (multi-resolver)
 target_nxdomains() {
   local target="$1"
-  if proxy_required; then
-    doh_nxdomain "$target"
-    return $?
-  fi
   local nxcount=0
   for r in "${RESOLVERS[@]}"; do
     local stat
@@ -257,21 +241,6 @@ target_nxdomains() {
     [[ "$stat" == "NXDOMAIN" ]] && nxcount=$((nxcount + 1))
   done
   [[ "$nxcount" -ge 2 ]]
-}
-
-doh_cname() {
-  local host="$1" resp
-  resp="$(curl_net -fsS -m "$DIG_TIMEOUT" -H 'accept: application/dns-json' \
-    "https://cloudflare-dns.com/dns-query?name=$host&type=CNAME" 2>/dev/null)" || return 1
-  echo "$resp" | jq -r '.Answer[]? | select(.type == 5) | .data' 2>/dev/null \
-    | sed 's/\.$//' | tail -1
-}
-
-doh_nxdomain() {
-  local host="$1" resp
-  resp="$(curl_net -fsS -m "$DIG_TIMEOUT" -H 'accept: application/dns-json' \
-    "https://cloudflare-dns.com/dns-query?name=$host&type=A" 2>/dev/null)" || return 1
-  [[ "$(echo "$resp" | jq -r '.Status // 2' 2>/dev/null)" == "3" ]]
 }
 
 # =============================================================================

@@ -9,12 +9,7 @@ set -uo pipefail
 log()  { printf '[%s SCOPE] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s SCOPE WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 die()  { printf '[%s SCOPE FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
-# v2.5.6: Tor/proxychains removed. Egress via system route (Mullvad).
-proxy_required()     { return 1; }
-ensure_proxy_ready() { return 0; }
-run_net()            { "$@"; }
-
-
+source "$(dirname "${BASH_SOURCE[0]}")/recon_net.sh"
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 INBOX="$BASE_DIR/queue/inbox"
