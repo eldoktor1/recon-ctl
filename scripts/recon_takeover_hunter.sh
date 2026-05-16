@@ -719,6 +719,24 @@ mode_recheck() {
   mv "$lp_new" "$lp_file"
 
   mv "$tmp_keep" "$WATCH_FILE"
+
+  # Prune WATCH entries older than WATCH_MAX_AGE_DAYS (default 30).
+  # Dangling CNAMEs that stay MEDIUM for a month are almost certainly gone.
+  local max_age="${WATCH_MAX_AGE_DAYS:-30}"
+  local cutoff_epoch; cutoff_epoch=$(( $(date +%s) - max_age * 86400 ))
+  local pruned; pruned="$(mktemp)"
+  while IFS=$'\t' read -r ts host rest; do
+    [[ -z "$host" ]] && continue
+    local entry_epoch
+    entry_epoch="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
+    [[ "$entry_epoch" -ge "$cutoff_epoch" ]] && printf '%s\t%s\t%s\n' "$ts" "$host" "$rest"
+  done < "$WATCH_FILE" > "$pruned"
+  local before after
+  before="$(wc -l < "$WATCH_FILE" | tr -d ' ')"
+  after="$(wc -l < "$pruned" | tr -d ' ')"
+  mv "$pruned" "$WATCH_FILE"
+  [[ "$before" -gt "$after" ]] && log "  Pruned $(( before - after )) stale WATCH entries (>${max_age}d old)"
+
   log "Recheck done. Remaining in WATCH: $(wc -l < "$WATCH_FILE" | tr -d ' ')"
 }
 

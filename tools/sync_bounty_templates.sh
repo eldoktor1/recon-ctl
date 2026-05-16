@@ -22,7 +22,7 @@ CACHE_DIR="$NUCLEI_DIR/_templates_cache"
 DEST_DIR="$NUCLEI_DIR/bounty_templates"
 REPO_URL="${REPO_URL:-https://github.com/projectdiscovery/nuclei-templates.git}"
 
-KEEP_TAGS=(exposed-panels exposures cors open-redirect idor ssrf xss auth-bypass misconfig)
+KEEP_TAGS=(exposed-panels exposures cors open-redirect idor ssrf xss auth-bypass misconfig default-creds cves rce)
 
 # Auto-elevate when needed: ~/recon/nuclei is normally owned by the locked
 # `reconrun` user (created by recon_daemon.sh prepare_scanner_dirs). If we

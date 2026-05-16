@@ -16,8 +16,8 @@ REJECTED_DIR="$AI_DIR/rejected"
 
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
-AI_MAX_LEADS="${AI_MAX_LEADS:-25}"
-AI_MIN_SCORE="${AI_MIN_SCORE:-15}"
+AI_MAX_LEADS="${AI_MAX_LEADS:-50}"
+AI_MIN_SCORE="${AI_MIN_SCORE:-12}"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
@@ -118,7 +118,6 @@ trap "rm -f '$updates_tmp' '$candidates_tmp' '$all_candidates_tmp'" EXIT
 jq -c --argjson min "$AI_MIN_SCORE" '
   select((.priority == "P0" or .priority == "P1") and (.score // 0) >= $min)
   | select((.out_of_scope // false) == false)
-  | select((.payout_tier // "none") != "none")
   | select(((.signals // []) | length) > 0)
 ' "$IN" > "$all_candidates_tmp"
 head -n "$AI_MAX_LEADS" "$all_candidates_tmp" > "$candidates_tmp"
@@ -138,11 +137,47 @@ while IFS= read -r lead; do
   reject_file="$REJECTED_DIR/${host//[^a-zA-Z0-9_.-]/_}.raw.txt"
 
   jq -r '
-    "Assess this already-filtered bug bounty recon lead.\n\n" +
-    "Return strict JSON with keys: ai_relevance_score, confidence, recommendation, route, reason, safe_checks, risk_flags.\n" +
-    "Allowed recommendations: skip, watch, manual_review, test_now.\n" +
-    "Allowed routes: none, codex, claude, human.\n" +
-    "Only low-impact verification is allowed.\n\nLead JSON:\n" +
+    "You are a senior bug bounty hunter reviewing a pre-filtered recon lead.\n\n" +
+    "LEAD SUMMARY:\n" +
+    "  score=" + (.score|tostring) + "  priority=" + (.priority // "?") +
+    "  payout=" + (.payout_tier // "unclassified") + "\n" +
+    "  signals: " + ((.signals // []) | join(", ")) + "\n" +
+    "  technologies: " + ((.tech // []) | join(", ")) + "\n" +
+    (if ((.cves // []) | length) > 0 then "  CVEs matched: " + ((.cves // []) | join(", ")) + "\n" else "" end) +
+    (if .kev_hit // false then "  *** KEV FLAG: actively exploited CVE matched ***\n" else "" end) +
+    (if .template_available // false then "  Nuclei template or public PoC exists\n" else "" end) +
+    "\nSIGNAL GUIDE (use for safe_checks):\n" +
+    "  tech:jenkins        -> /script Groovy console, /asynchPeople, unauthenticated API\n" +
+    "  tech:grafana        -> CVE-2021-43798 path traversal /public/plugins/<id>/../../../\n" +
+    "  tech:confluence     -> CVE-2023-22515 /setup/setupadministrator.action, CVE-2022-26134 OGNL\n" +
+    "  tech:gitlab         -> unauthenticated GraphQL, registry exposure, runner token leak\n" +
+    "  tech:kubernetes     -> /api/v1 unauth, /metrics, dashboard on :8001/:10250\n" +
+    "  tech:phpmyadmin     -> default creds root/root, unauthenticated setup\n" +
+    "  tech:wordpress      -> xmlrpc.php, /wp-json/wp/v2/users, plugin vulns\n" +
+    "  tech:spring         -> /actuator/env, /actuator/heapdump, /actuator/mappings\n" +
+    "  tech:tomcat         -> manager/html default creds, CVE-2019-0232\n" +
+    "  tech:elasticsearch  -> /_cat/indices, /_cluster/settings unauth\n" +
+    "  cors_misconfig      -> ACAO reflected with ACAC credentials header\n" +
+    "  open_redirect       -> chain with OAuth/SSO for account takeover\n" +
+    "  exposed_panel       -> default creds, version disclosure, unauthenticated access\n" +
+    "  default_creds       -> enumerate service type, try vendor defaults passively\n" +
+    "\nSCORING GUIDE:\n" +
+    "  90-100: KEV CVE matched, RCE/auth-bypass signal, or exposed admin panel with known default creds\n" +
+    "  70-89:  high-confidence misconfig, SSRF/CORS exploitable, nuclei template + responsive target\n" +
+    "  50-69:  partial signal (1-2 indicators), manual confirmation needed\n" +
+    "  20-49:  weak signal, version disclosure only, or low-impact class\n" +
+    "  0-19:   likely FP, CDN/WAF blocked, or insufficient signal\n" +
+    "\nBe aggressive: if multiple signals align with a known exploit path, score high.\n\n" +
+    "Return ONLY valid JSON — no markdown fences, no text outside the JSON object:\n" +
+    "{\n" +
+    "  \"ai_relevance_score\": <0-100 integer>,\n" +
+    "  \"confidence\": \"low|medium|high\",\n" +
+    "  \"recommendation\": \"skip|watch|manual_review|test_now\",\n" +
+    "  \"route\": \"none|codex|claude|human\",\n" +
+    "  \"reason\": \"<1-2 sentences citing specific signals and why they matter>\",\n" +
+    "  \"safe_checks\": [\"<passive or low-impact verification step>\"],\n" +
+    "  \"risk_flags\": [\"<FP risk or reason score might be inflated>\"]\n" +
+    "}\n\nFull lead JSON:\n" +
     tostring
   ' <<< "$lead" > "$prompt"
 
