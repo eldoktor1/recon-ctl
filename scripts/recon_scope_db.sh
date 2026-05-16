@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# recon_scope_db.sh v2.1.1
-#
-# Fixes from v2.1:
-#   - Intigriti: targets.in_scope[].endpoint (was .domains/.targets blind guess)
-#   - Intigriti pays: max_bounty.value > 0 (was max_bounty/maxBounty mix)
-#   - YesWeHack: targets.in_scope[].target with type filter
-#   - YesWeHack pays: max_bounty (number) > 0
-#   - Federacy: targets.in_scope[].target (was .targets/.in_scope blind guess)
-#   - Federacy pays: offers_awards
-#   - All: explicit set -uo pipefail (no errexit) so jq partial fails are tolerated
+# recon_scope_db.sh — Fetch and normalize scope from H1/Bugcrowd/Intigriti/YWH/Federacy
 # =============================================================================
 
 set -uo pipefail

@@ -43,8 +43,7 @@ queues so old matches do not pollute a clean restart.
 - It does not run nuclei.
 - It does not probe targets.
 - It does not let AI-created templates run automatically.
-- Worker execution stays under `reconrun`; the nftables kill switch and Tor
-  proxy model remain the security boundary.
+- Worker execution stays under `reconrun`; Windows Mullvad is the egress security boundary.
 
 ## Commands
 
