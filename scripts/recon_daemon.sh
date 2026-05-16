@@ -113,8 +113,8 @@ run_scanner() {
     ENABLE_OLLAMA_AI="${ENABLE_OLLAMA_AI:-1}"
     OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
     OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
-    AI_MAX_LEADS="${AI_MAX_LEADS:-25}"
-    AI_MIN_SCORE="${AI_MIN_SCORE:-15}"
+    AI_MAX_LEADS="${AI_MAX_LEADS:-50}"
+    AI_MIN_SCORE="${AI_MIN_SCORE:-12}"
     MIN_AI_RELEVANCE="${MIN_AI_RELEVANCE:-7}"
     PATH="$PATH"
   )
@@ -179,10 +179,10 @@ load_runtime_env() {
   export HTTPX_RATE="${HTTPX_RATE_OVERRIDE:-100}"   # per worker; Tor throttles total
   export HTTPX_TIMEOUT=10
   export HTTPX_MAX_RUNTIME=1200                      # 20 min hard cap
-  export BATCHES_PER_CYCLE=3
+  export BATCHES_PER_CYCLE=8
   export INBOX_FILE_CAP=200
   export BATCH_SIZE=2500
-  VALIDATE_SLEEP=420                                 # 7 min
+  VALIDATE_SLEEP=120                                 # 2 min — responsive; was 7 min which caused 10hr backlogs
   DISCOVERY_SLEEP=1800                               # 30 min
   HOT_SEED_SLEEP=300                                 # 5 min
   SCOPE_SLEEP=5400                                   # 90 min
@@ -190,7 +190,7 @@ load_runtime_env() {
   if command -v acpi >/dev/null 2>&1 && acpi -a 2>/dev/null | grep -qi 'off-line'; then
     export HTTPX_THREADS=$(( HTTPX_THREADS / 2 ))
     export HTTPX_RATE=$(( HTTPX_RATE / 2 ))
-    BATCHES_PER_CYCLE=2
+    BATCHES_PER_CYCLE=3
     POWER_STATE="battery"
   else
     POWER_STATE="ac"
