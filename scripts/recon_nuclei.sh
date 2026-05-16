@@ -118,7 +118,7 @@ fi
 [[ -f "$SCOPE_CHECK" ]] || die "recon_scope_check.sh missing"
 
 # =============================================================================
-# Build target list — apply all gates (v2.1.2: batch scope check)
+# Build target list — apply all gates (batch scope check)
 # =============================================================================
 log "Building scoped KEV target list (batch mode)"
 

@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# recon_cve_intel.sh v2.1.1
-#
-# Fixes from v2.1:
-#   1. NVD curl: %{http_code} returned concatenated codes (200000) on retries.
-#      Now captures curl status explicitly so transient NVD failures retry cleanly.
-#   2. KEV→ES match: was case-sensitive wildcard against capitalized "Jenkins".
-#      Now uses case_insensitive: true (ES 7.10+).
-#   3. SIG_TO_TECH: trimmed to terms that exist in real data, expanded coverage
-#      to 37 signals (was 24).
-#   4. kev_targets.jsonl deduped on host (was duplicating when one host had
-#      multiple matching tech entries).
+# recon_cve_intel.sh — CISA KEV + NVD CVE intel fetch and ES match
 # =============================================================================
 
 set -Eeuo pipefail
@@ -468,7 +458,7 @@ match_kev_targets() {
                   "$CVE_DIR/tech_cve_map.json")"
 
     local query
-    # FIXED v2.1.1: case_insensitive: true — ES tech values are capitalized
+    # case_insensitive: true — ES tech values are capitalized
     # (e.g. "Jenkins", "Microsoft SharePoint") but our terms are lowercase.
     # Without this, every match returned 0.
     # Also: size 5000 (was 1000) since some tech has many hosts.

@@ -113,9 +113,6 @@ cmd_help() {
 !takeovers       high-confidence takeover candidates
 !watching        medium-confidence watching list
 !logs [N]        last N daemon log lines (default 20)
-!mode            show current mode
-!mode boost      switch to faster mode
-!mode browse     switch to polite mode
 !clean           archive stale sent spool and old done files
 !start           start daemon if stopped
 !stop            stop daemon
@@ -181,22 +178,6 @@ cmd_logs() {
     local out
     out="$(tail -n "$n" "$LOG_DIR/recon_daemon.log" 2>/dev/null || echo "(no log)")"
     info "Daemon log (last $n)" "$out"
-}
-
-cmd_mode() {
-    local m="${1:-}"
-    if [[ -z "$m" ]]; then
-        info "Mode" "Current: $(cat "$HOME/.recon_mode" 2>/dev/null || echo browse)"
-        return
-    fi
-    [[ "$m" == "night" ]] && m="boost"
-    case "$m" in
-        browse|boost)
-            echo "$m" > "$HOME/.recon_mode"
-            ok "Mode" "Switched to $m (effective next cycle)"
-            ;;
-        *) err "Mode" "Usage: !mode browse|boost" ;;
-    esac
 }
 
 cmd_start() {
@@ -347,7 +328,6 @@ dispatch() {
         '!takeovers') cmd_takeovers ;;
         '!watching')  cmd_watching ;;
         '!logs')      cmd_logs "$arg" ;;
-        '!mode')      cmd_mode "$arg" ;;
         '!clean')     cmd_clean ;;
         '!start')     cmd_start ;;
         '!stop')      cmd_stop ;;

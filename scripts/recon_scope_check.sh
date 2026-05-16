@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# recon_scope_check.sh v2.1.2
-#
-# Fixes from v2.1.1:
-#   - Single-host check no longer forks awk twice (was reading both TSVs per call)
-#   - NEW: --batch mode reads stdin/file, single awk pass = 1000x faster
-#   - NEW: --count-in-scope-paying mode for stats (returns just a number)
+# recon_scope_check.sh — Scope TSV lookup with batch support
 #
 # Single-host (slow, for one-off lookups):
 #   ./recon_scope_check.sh <host>

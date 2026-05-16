@@ -14,8 +14,7 @@
 #       * scope-watch-loop (detects new bounty programs)
 #       * takeover-watch  (long-running takeover hunter for re-checks)
 #   - Each loop: backoff on failure, NEVER dies permanently
-#   - Reads ~/.recon_mode each cycle for browse|boost profile
-#   - Auto-downgrades boost/night to browse on battery (saves laptop)
+#   - Auto-throttles to 50% concurrency on battery (AC = full speed)
 # =============================================================================
 set -uo pipefail
 IFS=$'\n\t'
