@@ -48,14 +48,15 @@ echo $$ > "$PID_FILE"
 trap "rm -f '$PID_FILE'" EXIT
 
 # ---- API helpers ------------------------------------------------------------
-api_get()  { curl_net -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
-api_post() { curl_net -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
-# v2.5.4: poll-failure context. The plain `|| warn "Poll failed"` told us
-# nothing — could be 429, network drop, expired token. Now we capture the
-# HTTP code so the cause is visible in the log.
+# v2.5.5: Discord API blocks Tor exits — bot polls + posts go direct, NOT
+# via curl_net. The bot communicates with our own Discord channel; it
+# never touches a bug-bounty target, so bypassing Tor is correct.
+api_get()  { curl_direct -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
+api_post() { curl_direct -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
+# v2.5.4 with v2.5.5 fix: same direct curl, with HTTP-code capture.
 api_get_with_code() {
   local code
-  code="$(curl_net -fsS -m 10 -o /tmp/_bot_resp.$$ -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"
+  code="$(curl_direct -fsS -m 10 -o /tmp/_bot_resp.$$ -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"
   if [[ "$code" =~ ^2 ]]; then
     cat /tmp/_bot_resp.$$ 2>/dev/null
     rm -f /tmp/_bot_resp.$$

@@ -88,7 +88,8 @@ fresh_paid_urls() {
 discord_send() {
   local payload="$1"
   [[ -z "$DISCORD_WEBHOOK" ]] && return 0
-  curl_net -fsS -m 10 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+  # v2.5.5: Discord blocks Tor exits — bypass curl_net for webhook POSTs
+  curl_direct -fsS -m 10 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
 }
 
 # =============================================================================

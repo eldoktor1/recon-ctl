@@ -31,6 +31,15 @@ run_net() {
   fi
 }
 
+# v2.5.5: curl_direct — bypass Tor entirely. Use for non-target-facing,
+# trusted-destination traffic ONLY: Discord (api.discord.com is on the public
+# internet but Discord blocks Tor exits, breaking webhooks + bot polling),
+# crt.sh polling, certstream, our local services. Never use this for any
+# scan/probe against a bug-bounty target — that's what curl_net is for.
+curl_direct() {
+  curl "$@"
+}
+
 curl_net() {
   if proxy_required; then
     # curl_net uses --proxy, not proxychains4; only check the SOCKS listener.

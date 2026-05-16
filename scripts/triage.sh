@@ -1087,12 +1087,13 @@ notify_discord_findings() {
 
   local n_emb; n_emb="$(echo "$payload" | jq '.embeds|length')"
   if [[ "$n_emb" -le 10 ]]; then
-    curl_net -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+    # v2.5.5: Discord blocks Tor exits — bypass Tor for webhook POSTs
+    curl_direct -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
   else
     local i=0
     while [[ $i -lt $n_emb ]]; do
       local chunk; chunk="$(echo "$payload" | jq --argjson s "$i" '{content:.content,embeds:(.embeds[$s:$s+10])}')"
-      curl_net -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$chunk" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+      curl_direct -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$chunk" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
       i=$((i + 10)); sleep 1
     done
   fi
@@ -1135,11 +1136,18 @@ main() {
   log "Phase 2: cluster + submission dampening + tier-aware sort"
   apply_cluster_and_submission "$enriched2" "$scored"
 
-  # v2.5.4: atomic write. Multiple readers (fresh_modules, recon_ctl top,
-  # recon_brain, recon_ai_score) can be reading TARGETS_OUT while triage runs.
-  # `cp` is not atomic — readers could catch a half-written file. mv into
-  # place on the same filesystem IS atomic by POSIX rename(2).
-  cp "$scored" "$TARGETS_OUT.tmp" && mv -f "$TARGETS_OUT.tmp" "$TARGETS_OUT"
+  # v2.5.4: atomic write via tmp+rename.
+  # v2.5.5: also fix perms/ACL — mktemp creates source with 0600 + mask::---
+  # which mv preserves on the destination, locking every other reader out
+  # (recon_ctl top, recon_inspect, recon_brain, fresh_modules all silently
+  # got Permission denied). chmod 0664 + reset ACL mask so dir-default ACL
+  # takes effect.
+  cp "$scored" "$TARGETS_OUT.tmp"
+  chmod 0664 "$TARGETS_OUT.tmp" 2>/dev/null || true
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -m u::rw- -m u:d0k:rw- -m u:reconrun:rw- -m g::r-- -m m::rw- "$TARGETS_OUT.tmp" 2>/dev/null || true
+  fi
+  mv -f "$TARGETS_OUT.tmp" "$TARGETS_OUT"
   log "Targets: $TARGETS_OUT ($(wc -l < "$TARGETS_OUT" | tr -d ' ') entries)"
 
   generate_report "$scored" "$REPORT_OUT"
