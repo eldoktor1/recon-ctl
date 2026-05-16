@@ -399,7 +399,8 @@ notify_discord_confirmed() {
       timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }]
   }')"
-  curl_net -fsS -m 10 -H 'Content-Type: application/json' \
+  # v2.5.5: Discord blocks Tor exits — bypass Tor
+  curl_direct -fsS -m 10 -H 'Content-Type: application/json' \
     -X POST -d "$payload" "$hook" >/dev/null 2>&1 || true
 }
 
@@ -439,7 +440,7 @@ if [[ "$CONFIRMED_THIS_RUN" -gt 10 ]]; then
 
   # Send alert
   hook="${DISCORD_KEV_WEBHOOK:-$DISCORD_WEBHOOK}"
-  [[ -n "$hook" ]] && curl_net -fsS -m 10 -H 'Content-Type: application/json' \
+  [[ -n "$hook" ]] && curl_direct -fsS -m 10 -H 'Content-Type: application/json' \
     -X POST -d "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" \
     "$hook" >/dev/null 2>&1 || true
 fi

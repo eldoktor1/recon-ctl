@@ -177,10 +177,33 @@ def emit(host, src):
             fcntl.flock(f, fcntl.LOCK_EX)
             f.write(line)
             fcntl.flock(f, fcntl.LOCK_UN)
-    except Exception:
-        pass
+    except Exception as e:
+        # v2.5.5: surface emit failures instead of swallowing them silently
+        _stats["emit_errors"] += 1
+        if _stats["emit_errors"] <= 5:
+            sys.stderr.write("emit failed: %s (host=%s)\n" % (e, host))
+            sys.stderr.flush()
+
+# v2.5.5: counters + periodic stats line so we can SEE what the listener is
+# actually doing. Without these the script could appear "alive" while
+# matching zero hosts forever (which we just observed for 17h).
+_stats = {"certs": 0, "domains_seen": 0, "matches": 0, "emit_errors": 0}
+_last_stats = time.time()
+def _maybe_log_stats():
+    global _last_stats
+    now = time.time()
+    if now - _last_stats >= 300:  # every 5 min
+        sys.stderr.write(
+            "stats: certs=%d domains_seen=%d matches=%d emit_errors=%d scope=%d+%d\n"
+            % (_stats["certs"], _stats["domains_seen"], _stats["matches"],
+               _stats["emit_errors"], len(exact), len(suffixes))
+        )
+        sys.stderr.flush()
+        _last_stats = now
 
 def callback(message, context):
+    _stats["certs"] += 1
+    _maybe_log_stats()
     if message.get("message_type") != "certificate_update":
         return
     leaf = message.get("data", {}).get("leaf_cert", {})
@@ -192,11 +215,16 @@ def callback(message, context):
         if d:
             all_domains.add(d)
     for d in all_domains:
-        d = d.strip().lstrip("*.")
-        if not d or not VALID_HOST.match("*." + d if d.count(".") == 1 else d):
-            # accept anyway if it parses as a domain; CT logs often have edge cases
-            pass
+        _stats["domains_seen"] += 1
+        # Strip leading wildcard *. but NOT a bare wildcard
+        d = d.strip()
+        if d.startswith("*."):
+            d = d[2:]
+        d = d.lower().rstrip(".")
+        if not d:
+            continue
         if matches(d):
+            _stats["matches"] += 1
             emit(d, "certstream")
 
 # Reload scope periodically without restart
