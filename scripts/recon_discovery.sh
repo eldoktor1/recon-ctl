@@ -36,6 +36,7 @@ CHAOS_INDEX="$CACHE_DIR/chaos_index.json"
 SUB_CACHE="$CACHE_DIR/subfinder_merged.txt"
 ASSET_CACHE="$CACHE_DIR/assetfinder_merged.txt"
 ROOT_DOMAINS="$STATE_DIR/root_domains.txt"
+INSCOPE_TSV="${INSCOPE_TSV:-$BASE_DIR/scope/inscope_patterns.tsv}"
 KNOWN_HOSTS="$STATE_DIR/known_hosts.txt"
 LAST_CHAOS="$STATE_DIR/last_chaos.epoch"
 LAST_SUB="$STATE_DIR/last_subfinder.epoch"
@@ -97,12 +98,36 @@ refresh_chaos() {
   fi
 }
 
+# Root domains for subfinder/assetfinder. Union of two sources:
+#   1. In-scope PAYING program apexes from the scope DB — the programs the
+#      operator actually cares about. Listed FIRST so they're never starved.
+#   2. Chaos-derived roots (ProjectDiscovery's public dataset) — broad coverage
+#      but picked-over, lower priority.
+# Pre-v2.6 this used Chaos ONLY, so fresh paying programs absent from Chaos were
+# never enumerated — the opposite of the "fresh-first" goal.
 extract_roots() {
-  [[ -s "$CHAOS_CACHE" ]] || return
-  awk -F. '{ if (NF >= 2) print $(NF-1)"."$NF }' "$CHAOS_CACHE" \
-    | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$ROOT_DOMAINS.new"
+  local chaos_roots paying_roots
+  chaos_roots="$(mktemp)"; paying_roots="$(mktemp)"
+
+  if [[ -s "$CHAOS_CACHE" ]]; then
+    awk -F. '{ if (NF >= 2) print $(NF-1)"."$NF }' "$CHAOS_CACHE" \
+      | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$chaos_roots"
+  fi
+
+  if [[ -s "$INSCOPE_TSV" ]]; then
+    awk -F'\t' '$4=="true" {
+      pat=$1; sub(/^\*\./, "", pat)
+      n=split(pat, p, "."); if (n >= 2) print p[n-1]"."p[n]
+    }' "$INSCOPE_TSV" | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$paying_roots"
+  fi
+
+  # Paying roots first, then chaos; dedup preserving first occurrence (priority).
+  cat "$paying_roots" "$chaos_roots" | awk 'NF && !seen[$0]++' > "$ROOT_DOMAINS.new"
   mv "$ROOT_DOMAINS.new" "$ROOT_DOMAINS"
-  log "Roots: $(wc -l < "$ROOT_DOMAINS")"
+  local pn cn; pn="$(wc -l < "$paying_roots" | tr -d ' ')"; cn="$(wc -l < "$chaos_roots" | tr -d ' ')"
+  rm -f "$chaos_roots" "$paying_roots"
+  [[ -s "$ROOT_DOMAINS" ]] || { log "No roots (no chaos cache, no scope DB)"; return; }
+  log "Roots: $(wc -l < "$ROOT_DOMAINS") (paying-scope: $pn first, chaos: $cn)"
 }
 
 # ---- Subfinder (refresh sparingly) ----
@@ -115,7 +140,11 @@ refresh_subfinder() {
   fi
   log "Running subfinder ($(wc -l < "$ROOT_DOMAINS") roots)"
   local tmp; tmp="$(mktemp)"
-  if timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" 2>/dev/null; then
+  # NOTE: redirect stdout to /dev/null. In -silent mode subfinder prints results
+  # to BOTH stdout and the -o file; without this redirect every discovered
+  # subdomain leaks into the daemon log (hundreds of lines per run). We read
+  # results from "$tmp" (the -o file), so dropping stdout is safe.
+  if timeout 1800 subfinder -dL "$ROOT_DOMAINS" -all -silent -nc -timeout 30 -o "$tmp" >/dev/null 2>&1; then
     tr '[:upper:]' '[:lower:]' < "$tmp" | sed -E 's#[[:space:]]##g' \
       | grep -E '^[a-z0-9.-]+\.[a-z]{2,}$' | sort -u > "$SUB_CACHE.new"
     mv "$SUB_CACHE.new" "$SUB_CACHE"

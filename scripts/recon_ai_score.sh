@@ -115,11 +115,20 @@ all_candidates_tmp="$(mktemp)"
 updates_tmp="$(mktemp)"
 trap "rm -f '$updates_tmp' '$candidates_tmp' '$all_candidates_tmp'" EXIT
 
+# v2.6: require in_scope (a real matched program), not merely "not out-of-scope".
+# With the AI_MAX_LEADS budget cap, also prioritise the candidates that matter:
+# true-fresh first, then paying, then score — so Ollama cycles are spent on
+# fresh paying leads, not stale unmatched hosts.
 jq -c --argjson min "$AI_MIN_SCORE" '
   select((.priority == "P0" or .priority == "P1") and (.score // 0) >= $min)
+  | select((.in_scope // false) == true)
   | select((.out_of_scope // false) == false)
   | select(((.signals // []) | length) > 0)
-' "$IN" > "$all_candidates_tmp"
+' "$IN" \
+| jq -s -c 'sort_by([ (if (.triage_true_fresh // false) then 0 else 1 end),
+                      (if (.pays // false) then 0 else 1 end),
+                      -(.score // 0) ]) | .[]' \
+> "$all_candidates_tmp"
 head -n "$AI_MAX_LEADS" "$all_candidates_tmp" > "$candidates_tmp"
 
 total_candidates="$(wc -l < "$candidates_tmp" | tr -d ' ')"
