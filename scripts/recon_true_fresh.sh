@@ -397,7 +397,11 @@ _certspotter_page() {
   [[ -n "$token" ]] && auth=(-H "Authorization: Bearer $token")
   local resp hdrs code
   resp="$(mktemp)"; hdrs="$(mktemp)"
-  code="$(curl -sS -m "$CERTSPOTTER_TIMEOUT" -D "$hdrs" -o "$resp" -w '%{http_code}' \
+  # `timeout` is the outer hard-kill guard for WSL2 where curl's -m flag can get
+  # stuck in an uninterruptible kernel sleep on a half-open TCP connection.
+  code="$(timeout "$CERTSPOTTER_TIMEOUT" \
+          curl -sS -m "$CERTSPOTTER_TIMEOUT" --connect-timeout 10 \
+          -D "$hdrs" -o "$resp" -w '%{http_code}' \
           "${auth[@]}" -A 'recon-pipeline true-fresh' "$url" 2>/dev/null || echo 000)"
   if [[ "$code" == "429" ]]; then
     # Honour Retry-After: write per-key cooldown file so poll_certspotter skips
@@ -605,7 +609,8 @@ poll_crt_sh() {
     [[ -z "$root" ]] && continue
     resp="$(mktemp)"
     polled=$((polled + 1))
-    if curl -fsS -m "$CRT_SH_TIMEOUT" --connect-timeout 8 -A 'Mozilla/5.0 recon-pipeline true-fresh' \
+    if timeout "$CRT_SH_TIMEOUT" \
+         curl -fsS -m "$CRT_SH_TIMEOUT" --connect-timeout 8 -A 'Mozilla/5.0 recon-pipeline true-fresh' \
          "https://crt.sh/?q=%25.${root}&output=json" -o "$resp" 2>/dev/null; then
       fail_streak=0
       crt_tmp="$(mktemp)"
