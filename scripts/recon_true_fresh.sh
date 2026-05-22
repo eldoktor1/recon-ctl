@@ -61,9 +61,17 @@ MAX_PER_FLUSH="${TRUE_FRESH_MAX_PER_FLUSH:-5000}"
 # we rotate through paying roots a bounded batch at a time and resume where a
 # 429 stopped us. Drop a token at ~/.recon_certspotter_token to raise limits.
 CERTSPOTTER_API="${CERTSPOTTER_API:-https://api.certspotter.com/v1/issuances}"
-CERTSPOTTER_TOKEN="${CERTSPOTTER_TOKEN:-}"
-[[ -z "$CERTSPOTTER_TOKEN" && -f "$HOME/.recon_certspotter_token" ]] && \
-  CERTSPOTTER_TOKEN="$(tr -d '[:space:]' < "$HOME/.recon_certspotter_token" 2>/dev/null || true)"
+# Load all tokens from ~/.recon_certspotter_token (one per line, blank lines ok).
+# Multiple tokens rotate round-robin — each contributes 8 roots/cycle so throughput
+# scales linearly: 4 keys → 32 roots/cycle → ~192 roots/hr → first pass in ~11h.
+CERTSPOTTER_TOKENS=()
+if [[ -f "$HOME/.recon_certspotter_token" ]]; then
+  while IFS= read -r _tok; do
+    _tok="${_tok//[[:space:]]/}"
+    [[ -n "$_tok" ]] && CERTSPOTTER_TOKENS+=("$_tok")
+  done < "$HOME/.recon_certspotter_token"
+fi
+CERTSPOTTER_NUM_TOKENS="${#CERTSPOTTER_TOKENS[@]}"
 CERTSPOTTER_INTERVAL="${CERTSPOTTER_INTERVAL:-600}"      # poll cadence (10 min)
 CERTSPOTTER_TIMEOUT="${CERTSPOTTER_TIMEOUT:-25}"
 # Cert Spotter paginates issuances OLDEST-first at 100/page (forward-only via
@@ -73,21 +81,19 @@ CERTSPOTTER_TIMEOUT="${CERTSPOTTER_TIMEOUT:-25}"
 # correctness is independent of cursor position; paging only affects how fast
 # we reach the tip.
 CERTSPOTTER_MAX_PAGES="${CERTSPOTTER_MAX_PAGES:-3}"
-if [[ -n "$CERTSPOTTER_TOKEN" ]]; then
-  # Measured free-token rate limit: ~3-5 successful requests per 330s window.
-  # With INTERVAL=600s the window resets between cycles. BATCH=8 = 48 roots/hr.
-  # Domains sorted elite-first so the limited quota hits the best programs.
-  # Sleep 3s between requests to stay under burst thresholds.
-  # To unlock higher throughput, upgrade SSLMate CT Search subscription.
-  CERTSPOTTER_BATCH="${CERTSPOTTER_BATCH:-8}"            # roots per cycle (token)
+if [[ "$CERTSPOTTER_NUM_TOKENS" -gt 0 ]]; then
+  # 8 roots per key per cycle; batch scales linearly with number of keys.
+  CERTSPOTTER_BATCH="${CERTSPOTTER_BATCH:-$(( 8 * CERTSPOTTER_NUM_TOKENS ))}"
   CERTSPOTTER_SLEEP="${CERTSPOTTER_SLEEP:-3}"
 else
-  CERTSPOTTER_BATCH="${CERTSPOTTER_BATCH:-5}"            # roots per cycle (free, no token)
+  CERTSPOTTER_BATCH="${CERTSPOTTER_BATCH:-5}"            # no-token fallback
   CERTSPOTTER_SLEEP="${CERTSPOTTER_SLEEP:-5}"
 fi
 CURSOR_FILE="$TF_DIR/certspotter_cursors.tsv"            # root<TAB>last_issuance_id
 ROOT_IDX_FILE="$TF_DIR/.certspotter_root_idx"            # rotating offset into root list
-CS_RATELIMIT_FILE="$TF_DIR/.certspotter_ratelimit_until" # epoch when global cooldown expires
+CS_KEY_IDX_FILE="$TF_DIR/.certspotter_key_idx"           # which token to use next (multi-key)
+# Per-key ratelimit: $TF_DIR/.certspotter_ratelimit_<idx> or _global for no-token path
+CS_RATELIMIT_FILE="$TF_DIR/.certspotter_ratelimit_global"
 PAYING_ROOTS_CACHE="$TF_DIR/.paying_roots_cache"         # built once per invocation, shared by all pollers
 
 # crt.sh HTTP — bounded fallback only. Old code iterated ALL ~900 roots at 30s each,
@@ -384,21 +390,21 @@ certspotter_due() {
 # fresh hosts emitted). Runs in a $() subshell, so it returns state via stdout,
 # not globals. Exit code: 0 ok, 2 rate-limited (429), 1 other error.
 _certspotter_page() {
-  local root="$1" after="$2" window_iso="$3"
+  local root="$1" after="$2" window_iso="$3" token="${4:-}" key_idx="${5:-global}"
   local url="${CERTSPOTTER_API}?domain=${root}&include_subdomains=true&expand=dns_names&expand=not_before"
   [[ -n "$after" ]] && url="${url}&after=${after}"
+  local auth=()
+  [[ -n "$token" ]] && auth=(-H "Authorization: Bearer $token")
   local resp hdrs code
   resp="$(mktemp)"; hdrs="$(mktemp)"
   code="$(curl -sS -m "$CERTSPOTTER_TIMEOUT" -D "$hdrs" -o "$resp" -w '%{http_code}' \
-          "${CS_AUTH[@]}" -A 'recon-pipeline true-fresh' "$url" 2>/dev/null || echo 000)"
+          "${auth[@]}" -A 'recon-pipeline true-fresh' "$url" 2>/dev/null || echo 000)"
   if [[ "$code" == "429" ]]; then
-    # Honour Retry-After: record the epoch when the global cooldown expires so
-    # poll_certspotter can skip entire cycles instead of hammering through the ban.
+    # Honour Retry-After: write per-key cooldown file so poll_certspotter skips
+    # this key and tries the next one instead of stalling the whole batch.
     local retry_after
     retry_after="$(grep -i '^Retry-After:' "$hdrs" 2>/dev/null | tr -d '\r' | awk '{print $2}')"
-    if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
-      echo $(( $(date +%s) + retry_after + 30 )) > "$CS_RATELIMIT_FILE"  # +30s safety margin
-    fi
+    echo $(( $(date +%s) + ${retry_after:-330} + 30 )) > "$TF_DIR/.certspotter_ratelimit_${key_idx}"
     rm -f "$resp" "$hdrs"; return 2
   fi
   rm -f "$hdrs"
@@ -441,9 +447,8 @@ _certspotter_page() {
 poll_certspotter() {
   command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
 
-  # Global rate-limit cooldown: if the last 429 included a Retry-After header,
-  # skip this entire cycle and wait for the server-specified window to expire.
-  if [[ -f "$CS_RATELIMIT_FILE" ]]; then
+  # No-token path: check global cooldown file before doing any work.
+  if [[ "$CERTSPOTTER_NUM_TOKENS" -eq 0 && -f "$CS_RATELIMIT_FILE" ]]; then
     local limit_until now_epoch
     limit_until="$(cat "$CS_RATELIMIT_FILE" 2>/dev/null || echo 0)"
     now_epoch="$(date +%s)"
@@ -451,7 +456,7 @@ poll_certspotter() {
       log "certspotter rate-limit cooldown active — $(( limit_until - now_epoch ))s remaining, skipping cycle"
       return 0
     fi
-    rm -f "$CS_RATELIMIT_FILE"  # cooldown expired, clear it
+    rm -f "$CS_RATELIMIT_FILE"
   fi
 
   touch "$CURSOR_FILE"
@@ -464,7 +469,35 @@ poll_certspotter() {
   (( start >= total )) && start=0
 
   local window_iso; window_iso="$(date -u -d "-${COOLDOWN_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "1970-01-01T00:00:00Z")"
-  CS_AUTH=(); [[ -n "$CERTSPOTTER_TOKEN" ]] && CS_AUTH=(-H "Authorization: Bearer $CERTSPOTTER_TOKEN")
+
+  # Multi-key: load rotation state. cur_key rotates round-robin; on 429, the key's
+  # ratelimit file is written by _certspotter_page and _pick_key skips it next time.
+  local cur_key=0
+  if [[ "$CERTSPOTTER_NUM_TOKENS" -gt 1 ]]; then
+    cur_key="$(cat "$CS_KEY_IDX_FILE" 2>/dev/null || echo 0)"
+    [[ "$cur_key" =~ ^[0-9]+$ ]] || cur_key=0
+    (( cur_key >= CERTSPOTTER_NUM_TOKENS )) && cur_key=0
+  fi
+
+  # Sets cur_key to the next non-rate-limited key index. Returns 1 if all keys
+  # are currently rate-limited (caller should bail early).
+  _pick_key() {
+    [[ "$CERTSPOTTER_NUM_TOKENS" -eq 0 ]] && return 0   # no-token: always ok
+    local now; now=$(date +%s)
+    local k ki rl until
+    for (( k=0; k<CERTSPOTTER_NUM_TOKENS; k++ )); do
+      ki=$(( (cur_key + k) % CERTSPOTTER_NUM_TOKENS ))
+      rl="$TF_DIR/.certspotter_ratelimit_${ki}"
+      if [[ -f "$rl" ]]; then
+        until="$(cat "$rl" 2>/dev/null || echo 0)"
+        (( now < until )) && continue
+        rm -f "$rl"
+      fi
+      cur_key=$ki
+      return 0
+    done
+    return 1  # all keys rate-limited
+  }
 
   local added=0 polled=0 i idx root cursor page after rc ratelimited=0 next_idx
   local result maxid pcount padded _cursor_updates
@@ -485,16 +518,30 @@ poll_certspotter() {
     idx=$(( (start + i) % total ))
     root="$(sed -n "$((idx+1))p" "$roots")"
     [[ -z "$root" ]] && continue
+
+    # Pick the next available (non-rate-limited) key before polling this root.
+    # If all keys are exhausted, end the batch early rather than requesting unauthenticated.
+    local sel_key="global" tok=""
+    if [[ "$CERTSPOTTER_NUM_TOKENS" -gt 0 ]]; then
+      if ! _pick_key; then
+        warn "certspotter: all $CERTSPOTTER_NUM_TOKENS keys rate-limited — ending batch early"
+        ratelimited=1; break
+      fi
+      sel_key="$cur_key"
+      tok="${CERTSPOTTER_TOKENS[$cur_key]}"
+      cur_key=$(( (cur_key + 1) % CERTSPOTTER_NUM_TOKENS ))  # advance for next root
+    fi
+
     cursor="$(cursor_lookup "$root")"
     # New domain: seed cursor near the current tip so we only fetch recent certs
     [[ -z "$cursor" && -n "$bootstrap_cursor" ]] && cursor="$bootstrap_cursor"
     after="$cursor"
     polled=$((polled + 1))
     for (( page=0; page<CERTSPOTTER_MAX_PAGES; page++ )); do
-      result="$(_certspotter_page "$root" "$after" "$window_iso")"; rc=$?
+      result="$(_certspotter_page "$root" "$after" "$window_iso" "$tok" "$sel_key")"; rc=$?
       if [[ "$rc" == "2" ]]; then
         ratelimited=1
-        warn "certspotter 429 at root '$root' (idx $idx) — skipping root, continuing batch"
+        warn "certspotter 429 at root '$root' (idx $idx, key $sel_key) — skipping root, continuing batch"
         break   # break page loop only; outer root loop continues to next domain
       fi
       [[ "$rc" != "0" ]] && break
@@ -521,8 +568,12 @@ poll_certspotter() {
   # immediately) so a single 429 domain can't stall the entire rotation forever.
   next_idx=$(( (start + CERTSPOTTER_BATCH) % total ))
   echo "$next_idx" > "$ROOT_IDX_FILE"
+  # Persist key rotation position so the next cycle continues round-robin.
+  [[ "$CERTSPOTTER_NUM_TOKENS" -gt 1 ]] && echo "$cur_key" > "$CS_KEY_IDX_FILE"
   date +%s > "$TF_DIR/.last_certspotter"
-  log "certspotter: polled $polled roots (idx $start→$next_idx/$total), +$added fresh host entries"
+  local key_msg=""
+  [[ "$CERTSPOTTER_NUM_TOKENS" -gt 1 ]] && key_msg=" (${CERTSPOTTER_NUM_TOKENS} keys rotating)"
+  log "certspotter: polled $polled roots (idx $start→$next_idx/$total), +$added fresh host entries${key_msg}"
 }
 
 crt_sh_due() {
