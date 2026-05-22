@@ -98,14 +98,6 @@ CRT_SH_TIMEOUT="${CRT_SH_TIMEOUT:-15}"
 CRT_SH_BATCH="${CRT_SH_BATCH:-40}"
 CRT_SH_IDX_FILE="$TF_DIR/.crtsh_root_idx"
 
-# crt.sh Postgres — bypasses Cloudflare entirely. Same data, no HTTP rate-limit.
-# Requires: sudo apt install postgresql-client   (no API key, public read-only replica)
-# host=crt.sh port=5432 user=guest db=certwatch  (no password needed)
-CRT_SH_PG_INTERVAL="${CRT_SH_PG_INTERVAL:-1800}"        # 30-min cadence
-CRT_SH_PG_TIMEOUT="${CRT_SH_PG_TIMEOUT:-10}"            # connect + statement timeout (s)
-CRT_SH_PG_BATCH="${CRT_SH_PG_BATCH:-30}"                # roots per cycle
-CRT_SH_PG_IDX_FILE="$TF_DIR/.crtsh_pg_root_idx"
-
 mkdir -p "$TF_DIR" "$QUEUE_INBOX" "$BASE_DIR/logs"
 touch "$HOLDING_FILE" "$SEEN_FILE" "$PERSIST_JSONL"
 
@@ -602,72 +594,7 @@ poll_crt_sh() {
   log "crt.sh: polled $polled/$CRT_SH_BATCH roots (idx $start/$total), +$added raw entries"
 }
 
-crt_sh_pg_due() {
-  local last; last="$(cat "$TF_DIR/.last_crt_sh_pg" 2>/dev/null || echo 0)"
-  (( $(date +%s) - last >= CRT_SH_PG_INTERVAL ))
-}
-
-# crt.sh Postgres poller — rotating batch, same pattern as the HTTP poller but
-# using psql against crt.sh's public read-only replica. Bypasses Cloudflare and
-# gives SQL-level timestamp filtering. Requires: sudo apt install postgresql-client
-poll_crt_sh_pg() {
-  command -v psql >/dev/null 2>&1 || return 0
-  local roots="$PAYING_ROOTS_CACHE"
-  local total; total="$(wc -l < "$roots" | tr -d ' ')"
-  [[ "$total" -eq 0 ]] && return 0
-
-  local start; start="$(cat "$CRT_SH_PG_IDX_FILE" 2>/dev/null || echo 0)"
-  [[ "$start" =~ ^[0-9]+$ ]] || start=0
-  (( start >= total )) && start=0
-
-  local since_iso; since_iso="$(date -u -d "-${COOLDOWN_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')"
-  local stmt_timeout=$(( CRT_SH_PG_TIMEOUT * 1000 ))
-  local fail_streak=0 max_fails=3 added=0 polled=0 i idx root pg_tmp
-
-  for (( i=0; i<CRT_SH_PG_BATCH && i<total; i++ )); do
-    idx=$(( (start + i) % total ))
-    root="$(sed -n "$((idx+1))p" "$roots")"
-    [[ -z "$root" ]] && continue
-    # Validate: build_paying_roots already enforces apex format, but be explicit
-    [[ "$root" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || continue
-    polled=$((polled + 1))
-    pg_tmp="$(mktemp)"
-    # psql -w: never prompt for password. PGPASSWORD="" suppresses .pgpass lookup.
-    # statement_timeout prevents slow plans from hanging the loop.
-    # certificate_and_identities view: name_value + certificate (bytea).
-    # not_before is computed via x509_notbefore(certificate); no separate column.
-    if printf "SET statement_timeout = %d;\nSELECT DISTINCT LOWER(name_value),\n  to_char(x509_notbefore(certificate),'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')\nFROM certificate_and_identities\nWHERE (name_value ILIKE '%%.%s' OR LOWER(name_value) = '%s')\n  AND x509_notbefore(certificate) IS NOT NULL\n  AND x509_notbefore(certificate) > '%s'\n  AND name_value NOT ILIKE '%%*%%'\nLIMIT 500;\n" \
-         "$stmt_timeout" "$root" "$root" "$since_iso" \
-      | PGPASSWORD="" PGCONNECT_TIMEOUT="$CRT_SH_PG_TIMEOUT" \
-        psql -h crt.sh -p 5432 -U guest -d certwatch -w -t -A -F'|' \
-        > "$pg_tmp" 2>/dev/null && [[ -s "$pg_tmp" ]]; then
-      fail_streak=0
-      local new_count=0
-      while IFS='|' read -r host nb; do
-        host="${host// /}"
-        [[ -z "$host" || ! "$host" =~ \. ]] && continue
-        printf '{"host":"%s","external_first_seen":"%s","src":"crt.sh-pg"}\n' \
-          "$host" "${nb:-$since_iso}" >> "$HOLDING_FILE"
-        new_count=$((new_count + 1))
-      done < "$pg_tmp"
-      added=$((added + new_count))
-    else
-      fail_streak=$((fail_streak + 1))
-      if (( fail_streak >= max_fails )); then
-        rm -f "$pg_tmp"
-        warn "crt.sh Postgres unreachable ($fail_streak consecutive fails) — circuit-break"
-        break
-      fi
-    fi
-    rm -f "$pg_tmp"
-  done
-
-  echo "$(( (start + polled) % total ))" > "$CRT_SH_PG_IDX_FILE"
-  date +%s > "$TF_DIR/.last_crt_sh_pg"
-  log "crt.sh-pg: polled $polled/$CRT_SH_PG_BATCH roots (idx $start/$total), +$added raw entries"
-}
-
-# Build paying roots once — shared by certspotter, crt.sh HTTP, and crt.sh Postgres
+# Build paying roots once — shared by certspotter and crt.sh HTTP
 build_paying_roots > "$PAYING_ROOTS_CACHE"
 
 if certspotter_due; then
@@ -675,9 +602,6 @@ if certspotter_due; then
 fi
 if crt_sh_due; then
   poll_crt_sh || warn "crt.sh poll had errors (continuing)"
-fi
-if crt_sh_pg_due; then
-  poll_crt_sh_pg || warn "crt.sh-pg poll had errors (continuing)"
 fi
 
 rm -f "$PAYING_ROOTS_CACHE"
