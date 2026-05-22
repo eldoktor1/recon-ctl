@@ -555,10 +555,14 @@ apply_scope_kev_enrichment() {
   [[ ! -s "$in" ]] && { : > "$out"; return 0; }
 
   # ---- Build host->scope JSON map (single batch awk pass) ------------------
+  # NOTE: invoke via `bash "$SCOPE_CHECK"` and guard on -f (not -x). A stripped
+  # execute bit (Windows-UNC git checkouts do this) must NOT silently disable
+  # scope enrichment — that cascades into in_scope=false everywhere, no tier
+  # bonuses, and a dead Discord gate. The whole pipeline depends on this.
   local scope_map; scope_map="$(mktemp)"
-  if [[ -x "$SCOPE_CHECK" ]] && [[ -s "${SCOPE_DIR:-$HOME/recon/scope}/inscope_patterns.tsv" ]]; then
+  if [[ -f "$SCOPE_CHECK" ]] && [[ -s "${SCOPE_DIR:-$HOME/recon/scope}/inscope_patterns.tsv" ]]; then
     jq -r '.host' "$in" 2>/dev/null \
-      | "$SCOPE_CHECK" --batch 2>/dev/null \
+      | bash "$SCOPE_CHECK" --batch 2>/dev/null \
       | jq -sc 'map({(.host): .}) | add // {}' > "$scope_map" 2>/dev/null \
       || echo '{}' > "$scope_map"
   else
