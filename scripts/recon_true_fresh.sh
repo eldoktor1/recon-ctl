@@ -393,26 +393,40 @@ _certspotter_page() {
   local root="$1" after="$2" window_iso="$3" token="${4:-}" key_idx="${5:-global}"
   local url="${CERTSPOTTER_API}?domain=${root}&include_subdomains=true&expand=dns_names&expand=not_before"
   [[ -n "$after" ]] && url="${url}&after=${after}"
-  local auth=()
-  [[ -n "$token" ]] && auth=(-H "Authorization: Bearer $token")
-  local resp hdrs code
-  resp="$(mktemp)"; hdrs="$(mktemp)"
-  # `timeout` is the outer hard-kill guard for WSL2 where curl's -m flag can get
-  # stuck in an uninterruptible kernel sleep on a half-open TCP connection.
-  code="$(timeout "$CERTSPOTTER_TIMEOUT" \
-          curl -sS -m "$CERTSPOTTER_TIMEOUT" --connect-timeout 10 \
-          -D "$hdrs" -o "$resp" -w '%{http_code}' \
-          "${auth[@]}" -A 'recon-pipeline true-fresh' "$url" 2>/dev/null || echo 000)"
-  if [[ "$code" == "429" ]]; then
+  local resp code rl_file="$TF_DIR/.certspotter_ratelimit_${key_idx}"
+  resp="$(mktemp)"
+  # Use Python requests instead of curl: requests uses select()-based non-blocking
+  # I/O which remains interruptible even in WSL2, unlike curl which can enter
+  # kernel D-state (uninterruptible sleep) on half-open Mullvad WireGuard connections
+  # — making curl immune to SIGKILL and permanently blocking the pipeline.
+  code="$(python3 - "$url" "$token" "$resp" "$CERTSPOTTER_TIMEOUT" <<'PYEOF' 2>/dev/null
+import sys, json
+try:
+    import requests as req
+except ImportError:
+    print("000"); sys.exit(0)
+url, token, outfile, tmo = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+hdrs = {"User-Agent": "recon-pipeline true-fresh"}
+if token: hdrs["Authorization"] = "Bearer " + token
+try:
+    r = req.get(url, headers=hdrs, timeout=(10, tmo))
+    with open(outfile, "wb") as f: f.write(r.content)
+    print(r.status_code)
+    ra = r.headers.get("Retry-After", "")
+    if ra: print("retry-after:" + str(ra))
+except Exception: print("000")
+PYEOF
+  )"
+  local http_code retry_after
+  http_code="$(printf '%s' "$code" | head -1)"
+  retry_after="$(printf '%s' "$code" | grep '^retry-after:' | cut -d: -f2 | tr -d ' ')"
+  if [[ "$http_code" == "429" ]]; then
     # Honour Retry-After: write per-key cooldown file so poll_certspotter skips
     # this key and tries the next one instead of stalling the whole batch.
-    local retry_after
-    retry_after="$(grep -i '^Retry-After:' "$hdrs" 2>/dev/null | tr -d '\r' | awk '{print $2}')"
-    echo $(( $(date +%s) + ${retry_after:-330} + 30 )) > "$TF_DIR/.certspotter_ratelimit_${key_idx}"
-    rm -f "$resp" "$hdrs"; return 2
+    echo $(( $(date +%s) + ${retry_after:-330} + 30 )) > "$rl_file"
+    rm -f "$resp"; return 2
   fi
-  rm -f "$hdrs"
-  if [[ "$code" != "200" ]] || ! jq -e 'type=="array"' "$resp" >/dev/null 2>&1; then
+  if [[ "$http_code" != "200" ]] || ! jq -e 'type=="array"' "$resp" >/dev/null 2>&1; then
     rm -f "$resp"; return 1
   fi
   # Always window-filter: a lagging cursor must never emit a stale subdomain.
@@ -609,9 +623,23 @@ poll_crt_sh() {
     [[ -z "$root" ]] && continue
     resp="$(mktemp)"
     polled=$((polled + 1))
-    if timeout "$CRT_SH_TIMEOUT" \
-         curl -fsS -m "$CRT_SH_TIMEOUT" --connect-timeout 8 -A 'Mozilla/5.0 recon-pipeline true-fresh' \
-         "https://crt.sh/?q=%25.${root}&output=json" -o "$resp" 2>/dev/null; then
+    if python3 - "https://crt.sh/?q=%25.${root}&output=json" "" "$resp" "$CRT_SH_TIMEOUT" <<'PYEOF' 2>/dev/null
+import sys
+try:
+    import requests as req
+except ImportError:
+    sys.exit(1)
+url, _, outfile, tmo = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+try:
+    r = req.get(url, headers={"User-Agent":"Mozilla/5.0 recon-pipeline true-fresh"}, timeout=(8, tmo))
+    if r.status_code == 200:
+        with open(outfile, "wb") as f: f.write(r.content)
+        sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+PYEOF
+    then
       fail_streak=0
       crt_tmp="$(mktemp)"
       # Emit JSON directly from jq with actual cert not_before as external_first_seen.
