@@ -62,6 +62,7 @@ if [[ "${1:-}" == "bounty" ]]; then
     -t "$BOUNTY_TEMPLATES_DIR" \
     -severity critical,high,medium \
     -rate-limit "${RATE_LIMIT:-10}" \
+    -bulk-size "${NUCLEI_BULK_SIZE:-25}" \
     -timeout "${TIMEOUT:-60}" \
     -retries 1 -no-color -silent -nc \
     -jsonl -o "$out_file" 2>/dev/null || true

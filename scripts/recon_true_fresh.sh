@@ -1,26 +1,38 @@
 #!/usr/bin/env bash
 # =============================================================================
-# recon_true_fresh.sh — True-freshness engine (v2.5)
+# recon_true_fresh.sh — True-freshness engine (v2.8 — gungnir)
 #
 # DESIGN
-#   - Certstream listener (background Python child, single-instance via pidfile)
-#     streams real-time CT log entries, in-memory scope filters them, and
-#     appends in-scope-paying matches to a holding file.
-#   - crt.sh poller (every CRT_SH_INTERVAL seconds, when due) fetches recent
-#     certs for each root domain in scope and adds entries with not_before ≤ 24h
-#     to the same holding file.
+#   - gungnir listener (background Go binary, single-instance via pidfile)
+#     connects DIRECTLY to ~30+ certificate-transparency logs (Google, Cloudflare,
+#     Sectigo, Let's Encrypt, DigiCert + static/tiled logs) and streams newly
+#     issued certs in real time. We run it with `-r <paying-roots> -f` so it only
+#     emits hosts under our paying scope and auto-reloads when scope changes.
+#     Its stdout is piped into a tiny flock-append reader (zero network I/O, so it
+#     can never enter WSL2 D-state) that wraps each host as a holding-file record.
+#   - certspotter poller (BACKFILL only, low-frequency): gungnir is forward-only
+#     (it catches certs issued AFTER it starts watching a root), so certspotter
+#     fills two gaps — historical certs for newly-added roots, and any issuances
+#     missed during a gungnir outage. Bounded batch, cursor-based, multi-key.
 #   - Flush phase: dedupes against a 24h cooldown file, writes to
 #     ~/recon/state/true_fresh.jsonl (the durable feed), splits into
 #     500-line batches named 00_truefresh_<iso_ts>_<batch>.txt under
 #     ~/recon/queue/inbox/ for the fast validator lane.
 #
+# WHY gungnir REPLACED certstream + crt.sh (v2.8)
+#   certstream.calidog.io was chronically degraded (its Python client wedged in
+#   D-state for 24h); crt.sh is Cloudflare-rate-limited to uselessness. Both hit
+#   single aggregator chokepoints over curl/python sockets that block
+#   uninterruptibly on half-open Mullvad WireGuard connections. gungnir talks to
+#   the CT logs directly with Go's epoll-based netpoller + ctx-aware backoff, so a
+#   stalled log never blocks the others and the process always stays killable.
+#
 # EGRESS
 #   Runs as d0k (not reconrun) — passive CT log feeds, no target-facing traffic.
-#   Certstream WSS and crt.sh GET requests egress via Mullvad like everything else.
+#   gungnir CT-log fetches and certspotter GETs egress via Mullvad like everything else.
 #
 # CLEANUP
-#   - Holding file deleted on every flush.
-#   - crt.sh JSON responses deleted immediately after extraction.
+#   - Holding file truncated on every flush.
 #   - seen_hosts cooldown file pruned to a rolling 24h window each flush.
 # =============================================================================
 set -uo pipefail
@@ -41,7 +53,7 @@ SCOPE_DIR="${SCOPE_DIR:-$BASE_DIR/scope}"
 HOLDING_FILE="$TF_DIR/holding.jsonl"
 SEEN_FILE="$TF_DIR/seen_hosts.txt"
 PERSIST_JSONL="$TF_DIR/../true_fresh.jsonl"   # i.e. ~/recon/state/true_fresh.jsonl
-PIDFILE="$TF_DIR/certstream.pid"
+GUNGNIR_PIDFILE="$TF_DIR/gungnir.pid"
 LISTENER_LOG="$BASE_DIR/logs/true_fresh_listener.log"
 LOCK_FILE="$STATE_DIR/true_fresh.lock"
 
@@ -49,21 +61,21 @@ BATCH_SIZE="${TRUE_FRESH_BATCH_SIZE:-500}"
 COOLDOWN_HOURS="${TRUE_FRESH_COOLDOWN_HOURS:-24}"
 MAX_PER_FLUSH="${TRUE_FRESH_MAX_PER_FLUSH:-5000}"
 
-# === CT-log freshness sources (v2.6) ========================================
-# Reality check (2026-05): certstream.calidog.io's WSS stream is degraded and
-# crt.sh is Cloudflare-rate-limited to the point of returning nothing. So the
-# load-bearing source is now Cert Spotter's API, polled incrementally with a
-# per-domain cursor (the `after` position param) so each poll returns only
-# NEW issuances. certstream stays as a best-effort real-time firehose; crt.sh
-# is a bounded last-resort fallback. All three feed the same holding file.
-#
-# Cert Spotter free tier works tokenless but is aggressively rate-limited, so
-# we rotate through paying roots a bounded batch at a time and resume where a
-# 429 stopped us. Drop a token at ~/.recon_certspotter_token to raise limits.
+# === gungnir CT-log streamer (primary, v2.8) ================================
+# gungnir watches PAYING_ROOTS with -f and live-reloads on change; certspotter
+# reads the same file. It is refreshed (cmp-guarded) every invocation so adding a
+# paying program propagates to the live stream without a restart.
+GUNGNIR_BIN="${GUNGNIR_BIN:-$HOME/go/bin/gungnir}"
+PAYING_ROOTS="$TF_DIR/paying_roots.txt"   # stable paying-apex list (gungnir -r + certspotter)
+
+# === certspotter backfill (secondary, low-frequency) =======================
+# gungnir is forward-only (it sees certs issued AFTER it starts watching a root),
+# so certspotter backfills two gaps: historical certs for newly-added roots, and
+# issuances missed during a gungnir outage. Bounded + cursor-based so it never
+# hammers the API. Set CERTSPOTTER_BACKFILL=0 to disable entirely.
+CERTSPOTTER_BACKFILL="${CERTSPOTTER_BACKFILL:-1}"
 CERTSPOTTER_API="${CERTSPOTTER_API:-https://api.certspotter.com/v1/issuances}"
-# Load all tokens from ~/.recon_certspotter_token (one per line, blank lines ok).
-# Multiple tokens rotate round-robin — each contributes 8 roots/cycle so throughput
-# scales linearly: 4 keys → 32 roots/cycle → ~192 roots/hr → first pass in ~11h.
+# Tokens from ~/.recon_certspotter_token (one per line). Multiple rotate round-robin.
 CERTSPOTTER_TOKENS=()
 if [[ -f "$HOME/.recon_certspotter_token" ]]; then
   while IFS= read -r _tok; do
@@ -72,17 +84,15 @@ if [[ -f "$HOME/.recon_certspotter_token" ]]; then
   done < "$HOME/.recon_certspotter_token"
 fi
 CERTSPOTTER_NUM_TOKENS="${#CERTSPOTTER_TOKENS[@]}"
-CERTSPOTTER_INTERVAL="${CERTSPOTTER_INTERVAL:-600}"      # poll cadence (10 min)
+# Backfill cadence: hourly by default. gungnir carries real-time freshness, so
+# this is only a safety net — no need to poll aggressively.
+CERTSPOTTER_INTERVAL="${CERTSPOTTER_INTERVAL:-3600}"
 CERTSPOTTER_TIMEOUT="${CERTSPOTTER_TIMEOUT:-25}"
-# Cert Spotter paginates issuances OLDEST-first at 100/page (forward-only via
-# the `after` id). To converge a domain's cursor toward the present we follow
-# up to MAX_PAGES pages per root per cycle. The not_before window filter is
-# applied on EVERY page, so a lagging cursor can never emit a stale subdomain —
-# correctness is independent of cursor position; paging only affects how fast
-# we reach the tip.
+# Oldest-first pagination at 100/page; follow up to MAX_PAGES/root/cycle. The
+# not_before window filter is applied on EVERY page, so a lagging cursor can never
+# emit a stale subdomain — correctness is independent of cursor position.
 CERTSPOTTER_MAX_PAGES="${CERTSPOTTER_MAX_PAGES:-3}"
 if [[ "$CERTSPOTTER_NUM_TOKENS" -gt 0 ]]; then
-  # 8 roots per key per cycle; batch scales linearly with number of keys.
   CERTSPOTTER_BATCH="${CERTSPOTTER_BATCH:-$(( 8 * CERTSPOTTER_NUM_TOKENS ))}"
   CERTSPOTTER_SLEEP="${CERTSPOTTER_SLEEP:-3}"
 else
@@ -94,15 +104,6 @@ ROOT_IDX_FILE="$TF_DIR/.certspotter_root_idx"            # rotating offset into 
 CS_KEY_IDX_FILE="$TF_DIR/.certspotter_key_idx"           # which token to use next (multi-key)
 # Per-key ratelimit: $TF_DIR/.certspotter_ratelimit_<idx> or _global for no-token path
 CS_RATELIMIT_FILE="$TF_DIR/.certspotter_ratelimit_global"
-PAYING_ROOTS_CACHE="$TF_DIR/.paying_roots_cache"         # built once per invocation, shared by all pollers
-
-# crt.sh HTTP — bounded fallback only. Old code iterated ALL ~900 roots at 30s each,
-# which could hang the whole loop for hours when crt.sh was unreachable. Now it
-# polls a small rotating batch with a short timeout.
-CRT_SH_INTERVAL="${CRT_SH_INTERVAL:-3600}"
-CRT_SH_TIMEOUT="${CRT_SH_TIMEOUT:-15}"
-CRT_SH_BATCH="${CRT_SH_BATCH:-40}"
-CRT_SH_IDX_FILE="$TF_DIR/.crtsh_root_idx"
 
 mkdir -p "$TF_DIR" "$QUEUE_INBOX" "$BASE_DIR/logs"
 touch "$HOLDING_FILE" "$SEEN_FILE" "$PERSIST_JSONL"
@@ -121,240 +122,153 @@ if [[ ! -s "$INSCOPE_TSV" ]]; then
   exit 0
 fi
 
-# ---- 1. Ensure certstream listener is running ------------------------------
-certstream_alive() {
-  [[ -s "$PIDFILE" ]] || return 1
-  local pid; pid="$(cat "$PIDFILE" 2>/dev/null)"
+# ---- 1. gungnir CT-log listener (function definitions; invoked in footer) --
+# A single long-lived gungnir process per host, tracked by pidfile. Launched in
+# its own session (setsid) so the daemon can terminate the whole pipeline
+# (gungnir + reader) with one process-group kill on shutdown.
+gungnir_alive() {
+  [[ -s "$GUNGNIR_PIDFILE" ]] || return 1
+  local pid; pid="$(cat "$GUNGNIR_PIDFILE" 2>/dev/null)"
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-# Locate a python3 interpreter that can `import certstream`. Probes (in order):
-#   1. $BASE_DIR/.venv         — repo-local venv we manage ourselves
-#   2. ~/.local/share/pipx/venvs/certstream  — `pipx install certstream`
-#   3. ~/.local/pipx/venvs/certstream        — alt pipx prefix
-#   4. system python3 (rare; PEP-668 blocks pip on Kali/Debian)
-# If none works, auto-bootstrap (1): create the repo venv and pip-install
-# certstream into it. After first run, every restart is instant.
-resolve_certstream_python() {
-  command -v python3 >/dev/null 2>&1 || { warn "python3 missing"; return 1; }
-  local candidates=(
-    "$BASE_DIR/.venv/bin/python3"
-    "$HOME/.local/share/pipx/venvs/certstream/bin/python3"
-    "$HOME/.local/pipx/venvs/certstream/bin/python3"
-    "$(command -v python3)"
-  )
-  for py in "${candidates[@]}"; do
-    [[ -x "$py" ]] || continue
-    if "$py" -c 'import certstream' >/dev/null 2>&1; then
-      printf '%s\n' "$py"; return 0
-    fi
-  done
-
-  # Nothing has it — bootstrap the repo venv.
-  log "certstream not found anywhere; bootstrapping $BASE_DIR/.venv (one-time, ~30s)"
-  if ! python3 -m venv "$BASE_DIR/.venv" >>"$LISTENER_LOG" 2>&1; then
-    warn "venv creation failed; install certstream manually:"
-    warn "  python3 -m venv $BASE_DIR/.venv && $BASE_DIR/.venv/bin/pip install certstream"
-    return 1
+# Rebuild the paying-roots file only when its content actually changes, so
+# gungnir's -f watcher doesn't needlessly restart its scan (which re-fetches each
+# log's STH and loses ~20 entries of position) on every cycle.
+refresh_paying_roots() {
+  local tmp; tmp="$(mktemp)"
+  build_paying_roots > "$tmp" 2>/dev/null
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"; return 1
   fi
-  "$BASE_DIR/.venv/bin/pip" install --quiet --upgrade pip >>"$LISTENER_LOG" 2>&1 || true
-  if ! "$BASE_DIR/.venv/bin/pip" install --quiet certstream >>"$LISTENER_LOG" 2>&1; then
-    warn "pip install certstream failed; see $LISTENER_LOG"
-    return 1
+  if [[ ! -f "$PAYING_ROOTS" ]] || ! cmp -s "$tmp" "$PAYING_ROOTS"; then
+    mv "$tmp" "$PAYING_ROOTS"
+    log "paying roots refreshed ($(wc -l < "$PAYING_ROOTS" | tr -d ' ') apexes)"
+  else
+    rm -f "$tmp"
   fi
-  if "$BASE_DIR/.venv/bin/python3" -c 'import certstream' >/dev/null 2>&1; then
-    printf '%s\n' "$BASE_DIR/.venv/bin/python3"; return 0
-  fi
-  warn "post-bootstrap import still fails; see $LISTENER_LOG"
-  return 1
+  return 0
 }
 
-start_certstream() {
-  local PY
-  PY="$(resolve_certstream_python)" || return 1
-  log "Starting certstream listener via $PY"
-  # CRITICAL: 9>&- closes the script lock fd in the child. Without this, the
-  # long-lived listener inherits fd 9 and keeps the flock held forever — every
-  # supervise_loop iteration after the first then bails with "true_fresh
-  # already running", silently disabling crt.sh polling and the flush phase.
-  nohup "$PY" - "$INSCOPE_TSV" "$HOLDING_FILE" 9>&- >>"$LISTENER_LOG" 2>&1 <<'PY' &
-import sys, os, json, time, fcntl, re
-import certstream
-
-inscope_tsv = sys.argv[1]
-holding_file = sys.argv[2]
-
-# --- Load scope patterns into memory once -----------------------------------
-# TSV columns (from recon_scope_check.sh): pattern, program, platform, pays, payout_tier
-exact = set()
-suffixes = []  # list of (suffix_with_dot, apex)
-def load():
-    try:
-        with open(inscope_tsv, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                if not line:
-                    continue
-                fields = line.split("\t")
-                pat = fields[0].strip().lower()
-                pays = (fields[3].strip().lower() if len(fields) > 3 else "false") == "true"
-                if not pays:
-                    continue  # only paying scope
-                if pat.startswith("*."):
-                    suf = pat[1:]            # ".example.com"
-                    apex = pat[2:]            # "example.com"
-                    suffixes.append((suf, apex))
-                else:
-                    exact.add(pat)
-    except Exception as e:
-        sys.stderr.write("scope load error: %s\n" % e)
-load()
-
-def matches(host):
-    h = host.lower().rstrip(".")
-    if h in exact:
-        return True
-    for suf, apex in suffixes:
-        if h == apex:
-            return True
-        if h.endswith(suf):
-            return True
-    return False
-
-VALID_HOST = re.compile(r"^(?!-)[A-Za-z0-9*_-]+(\.(?!-)[A-Za-z0-9_-]+)+$")
-
-def emit(host, src):
+# Reader: wraps each hostname gungnir prints into a holding-file record. It does
+# NO network I/O (only reads a pipe and appends a local file under flock), so
+# unlike curl/python-requests it can never enter WSL2 D-state.
+GUNGNIR_READER='
+import sys, json, time, fcntl
+hf = sys.argv[1]
+for line in iter(sys.stdin.readline, ""):
+    h = line.strip().lower().rstrip(".")
+    if not h:
+        continue
+    if h.startswith("*."):
+        h = h[2:]
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    line = json.dumps({"host": host.lower().rstrip("."), "external_first_seen": ts, "src": src}, separators=(",", ":")) + "\n"
+    rec = json.dumps({"host": h, "external_first_seen": ts, "src": "gungnir"}, separators=(",", ":")) + "\n"
     try:
-        with open(holding_file, "a", encoding="utf-8") as f:
+        with open(hf, "a", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            f.write(line)
+            f.write(rec)
             fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
-        # v2.5.5: surface emit failures instead of swallowing them silently
-        _stats["emit_errors"] += 1
-        if _stats["emit_errors"] <= 5:
-            sys.stderr.write("emit failed: %s (host=%s)\n" % (e, host))
-            sys.stderr.flush()
+        sys.stderr.write("reader emit failed: %s\n" % e); sys.stderr.flush()
+'
 
-# v2.5.5: counters + periodic stats line so we can SEE what the listener is
-# actually doing. Without these the script could appear "alive" while
-# matching zero hosts forever (which we just observed for 17h).
-_stats = {"certs": 0, "domains_seen": 0, "matches": 0, "emit_errors": 0}
-_last_stats = time.time()
-def _maybe_log_stats():
-    global _last_stats
-    now = time.time()
-    if now - _last_stats >= 300:  # every 5 min
-        sys.stderr.write(
-            "stats: certs=%d domains_seen=%d matches=%d emit_errors=%d scope=%d+%d\n"
-            % (_stats["certs"], _stats["domains_seen"], _stats["matches"],
-               _stats["emit_errors"], len(exact), len(suffixes))
-        )
-        sys.stderr.flush()
-        _last_stats = now
-
-def callback(message, context):
-    _stats["certs"] += 1
-    _maybe_log_stats()
-    if message.get("message_type") != "certificate_update":
-        return
-    leaf = message.get("data", {}).get("leaf_cert", {})
-    all_domains = set()
-    cn = leaf.get("subject", {}).get("CN") or ""
-    if cn:
-        all_domains.add(cn)
-    for d in (leaf.get("all_domains") or []):
-        if d:
-            all_domains.add(d)
-    for d in all_domains:
-        _stats["domains_seen"] += 1
-        # Strip leading wildcard *. but NOT a bare wildcard
-        d = d.strip()
-        if d.startswith("*."):
-            d = d[2:]
-        d = d.lower().rstrip(".")
-        if not d:
-            continue
-        if matches(d):
-            _stats["matches"] += 1
-            emit(d, "certstream")
-
-# Reload scope periodically without restart.
-# Builds into temp sets/lists first, then atomically swaps — avoids the brief
-# window where exact and suffixes are both empty and incoming certs are silently
-# dropped (no match possible during an in-progress clear+reload).
-import threading
-def reload_loop():
-    while True:
-        time.sleep(900)
-        new_exact = set()
-        new_suffixes = []
-        try:
-            with open(inscope_tsv, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.rstrip("\r\n")
-                    if not line:
-                        continue
-                    fields = line.split("\t")
-                    pat = fields[0].strip().lower()
-                    pays = (fields[3].strip().lower() if len(fields) > 3 else "false") == "true"
-                    if not pays:
-                        continue
-                    if pat.startswith("*."):
-                        suf = pat[1:]
-                        apex = pat[2:]
-                        new_suffixes.append((suf, apex))
-                    else:
-                        new_exact.add(pat)
-        except Exception as e:
-            sys.stderr.write("scope reload error: %s\n" % e)
-            continue  # keep old lists on error
-        exact.clear(); exact.update(new_exact)
-        suffixes[:] = new_suffixes
-threading.Thread(target=reload_loop, daemon=True).start()
-
-# v2.5.4: exponential backoff on reconnect. certstream.calidog.io drops
-# connections frequently; constant 10s reconnects spam the log without
-# helping. Start at 30s, double up to 300s.
-backoff = 30
-while True:
-    try:
-        certstream.listen_for_events(callback, url="wss://certstream.calidog.io/")
-        backoff = 30  # reset on clean exit (rare)
-    except Exception as e:
-        sys.stderr.write("certstream reconnect in %ds: %s\n" % (backoff, e))
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 300)
-PY
-  local cspid=$!
-  echo "$cspid" > "$PIDFILE"
-  log "certstream listener started (pid $cspid)"
+start_gungnir() {
+  if [[ ! -x "$GUNGNIR_BIN" ]]; then
+    warn "gungnir not found/executable at $GUNGNIR_BIN — install with:"
+    warn "  go install github.com/g0ldencybersec/gungnir/cmd/gungnir@latest"
+    return 1
+  fi
+  if [[ ! -s "$PAYING_ROOTS" ]]; then
+    warn "paying roots file empty — not starting gungnir this cycle"
+    return 1
+  fi
+  log "Starting gungnir listener ($GUNGNIR_BIN -r $PAYING_ROOTS -f)"
+  # setsid: own session/process group so the daemon can kill gungnir + reader
+  # together with one group kill. 9>&-: close the script lock fd in the child so
+  # the long-lived listener never inherits/holds the flock (the bug that silently
+  # disabled the loop for 18h with the old certstream child).
+  setsid bash -c "exec '$GUNGNIR_BIN' -r '$PAYING_ROOTS' -f 2>>'$LISTENER_LOG' | exec python3 -u -c '$GUNGNIR_READER' '$HOLDING_FILE'" 9>&- >>"$LISTENER_LOG" 2>&1 &
+  local gpid=$!
+  echo "$gpid" > "$GUNGNIR_PIDFILE"
+  log "gungnir listener started (pgid $gpid)"
 }
-
-if ! certstream_alive; then
-  start_certstream || true
-fi
 
 # ---- 2. API pollers (Cert Spotter primary, crt.sh fallback) ----------------
 
 # Paying roots (apex), de-duplicated, ordered by payout tier (elite first) so a
 # bounded per-cycle batch always covers the highest-value programs soonest.
 build_paying_roots() {
+  # Stage 1 (awk): emit rank<TAB>cleaned-host for every paying pattern. The host
+  # is the pattern with its leading *. stripped, lightly sanity-checked.
+  # Stage 2 (python/publicsuffixlist): collapse each host to its REGISTRABLE
+  # domain (eTLD+1) using the Public Suffix List. This is critical: naive
+  # last-two-labels turns *.foo.com.br into "com.br" (a public suffix), which
+  # makes gungnir match the ENTIRE suffix and floods holding with out-of-scope
+  # hosts. privatesuffix() returns None for bare public suffixes, dropping them.
+  # No network — publicsuffixlist ships an offline PSL snapshot, so this can
+  # never hang. Dedups by apex keeping the best (lowest) payout rank.
+  # NOTE: python3 -c (not `python3 - <<HEREDOC`) so the awk output stays on
+  # Python's stdin — a heredoc would replace stdin with the program text.
   awk -F'\t' '
     $4=="true" {
       pat=$1; sub(/^\*\./, "", pat)
-      n=split(pat, p, "."); if (n < 2) next
-      apex = p[n-1] "." p[n]
+      if (pat !~ /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/) next
       rank = ($5=="elite"?0:$5=="high"?1:$5=="mid"?2:$5=="low"?3:4)
-      if (!(apex in best) || rank < best[apex]) best[apex] = rank
+      print rank "\t" pat
     }
-    END { for (a in best) printf "%d\t%s\n", best[a], a }
-  ' "$INSCOPE_TSV" | sort -t"$(printf '\t')" -k1,1n -k2,2 | cut -f2 \
+  ' "$INSCOPE_TSV" | python3 -c '
+import sys
+# Shared cloud/CDN/PaaS infra apexes. CT-watching these yields only other
+# tenants every AWS/Azure/CDN customer issues certs under them, so they flood
+# holding with thousands of out-of-scope hosts (vpce.amazonaws.com etc.) and
+# can push genuinely-fresh in-scope hosts past the flush MAX_PER_FLUSH cap. A
+# program that scopes its OWN cloud assets is reached via its own apex, not these.
+DENY = {
+    "amazonaws.com","amazonaws.com.cn","awsapps.com","awsglobalaccelerator.com",
+    "elasticbeanstalk.com","cloudfront.net","azurewebsites.net","azure-api.net",
+    "azureedge.net","azurefd.net","azurecontainer.io","cloudapp.net","cloudapp.azure.com",
+    "trafficmanager.net","windows.net","appspot.com","run.app","web.app",
+    "firebaseapp.com","firebaseio.com","cloudfunctions.net","googleusercontent.com",
+    "herokuapp.com","herokudns.com","herokussl.com","netlify.app","vercel.app",
+    "now.sh","workers.dev","pages.dev","cloudflare.net","cloudflareworkers.com",
+    "fastly.net","fastlylb.net","akamai.net","akamaiedge.net","akamaihd.net",
+    "edgekey.net","edgesuite.net","llnwd.net","digitaloceanspaces.com",
+    "nflxvideo.net","nflxext.com","nflximg.net","github.io","githubusercontent.com",
+    # Multi-tenant SaaS NOT in the PSL private section, so they collapse to the
+    # shared apex and flood with other customers tenant portals (e.g. 160
+    # <customer>.zendesk.com in 500). A program scoping its OWN tenant is still
+    # reached via that program apex elsewhere in scope; the bare SaaS apex is noise.
+    "zendesk.com","auth0app.com","myshopify.com","freshdesk.com","desk.com",
+    "statuspage.io","pantheonsite.io","wpengine.com","wixsite.com","zohohost.com",
+}
+try:
+    from publicsuffixlist import PublicSuffixList
+    psl = PublicSuffixList()
+    def apex(h): return psl.privatesuffix(h)
+except Exception:
+    def apex(h):
+        labs = h.split(".")
+        return ".".join(labs[-2:]) if len(labs) >= 2 else None
+best = {}
+for line in sys.stdin:
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 2:
+        continue
+    try:
+        rank = int(parts[0])
+    except ValueError:
+        rank = 4
+    a = apex(parts[1].lower().strip("."))
+    if not a or a in DENY or any(a.endswith("." + d) for d in DENY):
+        continue
+    if a not in best or rank < best[a]:
+        best[a] = rank
+for a, r in best.items():
+    print("%d\t%s" % (r, a))
+' | sort -t"$(printf '\t')" -k1,1n -k2,2 | cut -f2 \
     | grep -E '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,}$'
-  # ↑ Rejects junk from scope DB: prose descriptions, IP fragments (100.0, 127.0),
-  # regex alternations (doctolib.(fr|de|it)), trailing tabs, and notes in parens.
+  # Final grep also rejects residual junk: prose, IP fragments, regex alternations.
 }
 
 cursor_lookup()  { awk -F'\t' -v r="$1" '$1==r{print $2; exit}' "$CURSOR_FILE" 2>/dev/null; }
@@ -467,7 +381,7 @@ PYEOF
 # correct regardless of cursor position. Stops cleanly on 429 and resumes at
 # the same root next cycle so we never lose ground or hammer the API.
 poll_certspotter() {
-  command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || return 0
 
   # No-token path: check global cooldown file before doing any work.
   if [[ "$CERTSPOTTER_NUM_TOKENS" -eq 0 && -f "$CS_RATELIMIT_FILE" ]]; then
@@ -482,7 +396,7 @@ poll_certspotter() {
   fi
 
   touch "$CURSOR_FILE"
-  local roots="$PAYING_ROOTS_CACHE"
+  local roots="$PAYING_ROOTS"
   local total; total="$(wc -l < "$roots" | tr -d ' ')"
   [[ "$total" -eq 0 ]] && return 0
 
@@ -598,101 +512,21 @@ poll_certspotter() {
   log "certspotter: polled $polled roots (idx $start→$next_idx/$total), +$added fresh host entries${key_msg}"
 }
 
-crt_sh_due() {
-  local last; last="$(cat "$TF_DIR/.last_crt_sh" 2>/dev/null || echo 0)"
-  (( $(date +%s) - last >= CRT_SH_INTERVAL ))
-}
+# ---- Orchestration: refresh roots, ensure gungnir, run certspotter backfill --
+# Refresh the paying-roots file (cmp-guarded). gungnir watches it via -f and
+# certspotter reads it, so both stay in sync with the live scope DB.
+refresh_paying_roots || warn "paying roots refresh failed (using previous list)"
 
-# crt.sh — bounded rotating fallback. Short timeout + small batch so an
-# unreachable crt.sh can never hang the loop for more than a few seconds/root.
-poll_crt_sh() {
-  command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || return 0
-  local roots="$PAYING_ROOTS_CACHE"
-  local total; total="$(wc -l < "$roots" | tr -d ' ')"
-  [[ "$total" -eq 0 ]] && return 0
-
-  local start; start="$(cat "$CRT_SH_IDX_FILE" 2>/dev/null || echo 0)"
-  [[ "$start" =~ ^[0-9]+$ ]] || start=0
-  (( start >= total )) && start=0
-
-  local since; since="$(date -u -d "-${COOLDOWN_HOURS} hours" +%s 2>/dev/null || echo 0)"
-  # Circuit breaker: crt.sh is frequently fully unreachable (Cloudflare). Rather
-  # than burn CRT_SH_BATCH × timeout seconds confirming it's down, bail after a
-  # run of consecutive failures and let certspotter carry freshness this cycle.
-  local fail_streak=0 max_fails="${CRT_SH_MAX_FAILS:-4}"
-  local added=0 i idx root resp polled=0 crt_tmp
-  for (( i=0; i<CRT_SH_BATCH && i<total; i++ )); do
-    idx=$(( (start + i) % total ))
-    root="$(sed -n "$((idx+1))p" "$roots")"
-    [[ -z "$root" ]] && continue
-    resp="$(mktemp)"
-    polled=$((polled + 1))
-    if python3 - "https://crt.sh/?q=%25.${root}&output=json" "" "$resp" "$CRT_SH_TIMEOUT" <<'PYEOF' 2>/dev/null
-import sys
-try:
-    import requests as req
-except ImportError:
-    sys.exit(1)
-url, _, outfile, tmo = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
-try:
-    r = req.get(url, headers={"User-Agent":"Mozilla/5.0 recon-pipeline true-fresh"}, timeout=(8, tmo))
-    if r.status_code == 200:
-        with open(outfile, "wb") as f: f.write(r.content)
-        sys.exit(0)
-except Exception:
-    pass
-sys.exit(1)
-PYEOF
-    then
-      fail_streak=0
-      crt_tmp="$(mktemp)"
-      # Emit JSON directly from jq with actual cert not_before as external_first_seen.
-      # Previous code used $(date) (current time) — wrong: crt.sh entries should carry
-      # the real issuance timestamp so triage freshness windows are accurate.
-      jq -rc --argjson since "$since" '
-        if type=="array" then
-          .[] | select((.not_before // "") != "") |
-          (.not_before | sub(" "; "T") + "Z" | sub("ZZ$"; "Z")) as $nb |
-          ($nb | try fromdate catch 0) as $epoch |
-          select($epoch >= $since) |
-          (.name_value // "") | split("\n")[] | ascii_downcase |
-          select(. != "") | sub("^\\*\\."; "") |
-          {host:., external_first_seen:$nb, src:"crt.sh"}
-        else empty end
-      ' "$resp" 2>/dev/null | awk '!seen[$0]++' > "$crt_tmp"
-      if [[ -s "$crt_tmp" ]]; then
-        cat "$crt_tmp" >> "$HOLDING_FILE"
-        added=$(( added + $(wc -l < "$crt_tmp" | tr -d ' ') ))
-      fi
-      rm -f "$crt_tmp"
-    else
-      fail_streak=$((fail_streak + 1))
-      if (( fail_streak >= max_fails )); then
-        rm -f "$resp"
-        warn "crt.sh unreachable ($fail_streak consecutive fails) — circuit-break, certspotter carries this cycle"
-        break
-      fi
-    fi
-    rm -f "$resp"
-  done
-  # Advance only past the roots we actually polled (so a circuit-break doesn't
-  # skip the unpolled tail of this batch).
-  echo "$(( (start + polled) % total ))" > "$CRT_SH_IDX_FILE"
-  date +%s > "$TF_DIR/.last_crt_sh"
-  log "crt.sh: polled $polled/$CRT_SH_BATCH roots (idx $start/$total), +$added raw entries"
-}
-
-# Build paying roots once — shared by certspotter and crt.sh HTTP
-build_paying_roots > "$PAYING_ROOTS_CACHE"
-
-if certspotter_due; then
-  poll_certspotter || warn "certspotter poll had errors (continuing)"
-fi
-if crt_sh_due; then
-  poll_crt_sh || warn "crt.sh poll had errors (continuing)"
+# Ensure the gungnir real-time listener is running (primary freshness source).
+if ! gungnir_alive; then
+  start_gungnir || true
 fi
 
-rm -f "$PAYING_ROOTS_CACHE"
+# certspotter backfill (secondary). Forward-only gungnir misses historical certs
+# for newly-added roots and any outage gap; this fills them in, bounded + hourly.
+if [[ "$CERTSPOTTER_BACKFILL" == "1" ]] && certspotter_due; then
+  poll_certspotter || warn "certspotter backfill had errors (continuing)"
+fi
 
 # ---- 3. Flush phase --------------------------------------------------------
 # Holding entries may include non-scope entries (e.g. crt.sh raw). Scope-filter

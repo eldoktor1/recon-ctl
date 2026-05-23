@@ -140,14 +140,17 @@ cmd_stop() {
       kill -KILL "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
-    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|true_fresh|fresh_modules)\.sh' 2>/dev/null || true
-    # Stop certstream listener spawned by recon_true_fresh.sh
-    if [[ -s "$BASE_DIR/state/true_fresh/certstream.pid" ]]; then
-      kill "$(cat "$BASE_DIR/state/true_fresh/certstream.pid" 2>/dev/null)" 2>/dev/null || true
-      rm -f "$BASE_DIR/state/true_fresh/certstream.pid"
+    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|true_fresh|fresh_modules|cloudrecon|dast)\.sh' 2>/dev/null || true
+    # Stop gungnir CT-log listener spawned by recon_true_fresh.sh (setsid group)
+    if [[ -s "$BASE_DIR/state/true_fresh/gungnir.pid" ]]; then
+      gpid="$(cat "$BASE_DIR/state/true_fresh/gungnir.pid" 2>/dev/null)"
+      [[ -n "$gpid" ]] && { kill -TERM -- "-$gpid" 2>/dev/null || kill -TERM "$gpid" 2>/dev/null || true; }
+      rm -f "$BASE_DIR/state/true_fresh/gungnir.pid"
     fi
+    pkill -f 'gungnir -r' 2>/dev/null || true
     pkill -f 'triage\.sh' 2>/dev/null || true
     pkill -f 'httpx|subfinder|assetfinder|nuclei.*-target' 2>/dev/null || true
+    pkill -f 'caduceus|katana|dalfox|\bgau\b' 2>/dev/null || true
     echo "Stopped."
   else
     echo "Not running"
