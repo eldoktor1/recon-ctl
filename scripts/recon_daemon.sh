@@ -147,21 +147,33 @@ cleanup_exit() {
   jobs -p 2>/dev/null | xargs -r kill -TERM 2>/dev/null || true
   sleep 5
   jobs -p 2>/dev/null | xargs -r kill -KILL 2>/dev/null || true
-  # Stop certstream listener (long-lived child of recon_true_fresh.sh)
-  if [[ -s "$STATE_DIR/true_fresh/certstream.pid" ]]; then
-    local cspid; cspid="$(cat "$STATE_DIR/true_fresh/certstream.pid" 2>/dev/null)"
-    [[ -n "$cspid" ]] && kill "$cspid" 2>/dev/null || true
-    rm -f "$STATE_DIR/true_fresh/certstream.pid"
+  # Stop gungnir CT-log listener (long-lived child of recon_true_fresh.sh).
+  # Started under setsid, so the pidfile holds a process-group leader — kill the
+  # whole group to take down gungnir AND its flock-append reader together.
+  if [[ -s "$STATE_DIR/true_fresh/gungnir.pid" ]]; then
+    local gpid; gpid="$(cat "$STATE_DIR/true_fresh/gungnir.pid" 2>/dev/null)"
+    if [[ -n "$gpid" ]]; then
+      kill -TERM -- "-$gpid" 2>/dev/null || kill -TERM "$gpid" 2>/dev/null || true
+    fi
+    rm -f "$STATE_DIR/true_fresh/gungnir.pid"
   fi
   rm -f "$PID_FILE"
 }
 trap cleanup_exit EXIT
 
 # ---- Runtime env loader ----
-# Single production profile: 80 threads at 100 rps/worker via Mullvad WG.
-# On-battery: auto-throttle to half concurrency.
+# Single production profile: 150 threads at 100 rps via Mullvad WG.
+# httpx is a BREADTH tool (≈1-2 requests across many distinct hosts), so higher
+# thread concurrency is safe — total request rate stays capped by HTTPX_RATE, so
+# no single target is hammered. Local headroom is large (20 CPU, conntrack ~0%
+# used); the binding constraint is tunnel reliability + per-target politeness,
+# not threads. On-battery: auto-throttle to half concurrency.
 load_runtime_env() {
-  export HTTPX_THREADS="${HTTPX_THREADS_OVERRIDE:-80}"
+  # FD headroom for high-concurrency scanners (hard limit is 1048576). Free, no
+  # root. reconrun scanners run via sudo and may reset to their own limit, but
+  # at this concurrency (~150 sockets) the 10240 default is already ample.
+  ulimit -n 65536 2>/dev/null || true
+  export HTTPX_THREADS="${HTTPX_THREADS_OVERRIDE:-150}"
   export HTTPX_RATE="${HTTPX_RATE_OVERRIDE:-100}"
   export HTTPX_TIMEOUT=10
   export HTTPX_MAX_RUNTIME=1200                      # 20 min hard cap
@@ -302,6 +314,18 @@ run_deep_scan()     { v21_killed nuclei && return 0; [[ -f "$FRESH_MODULES_SCRIP
 run_active_checks() { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" active-checks || true; }
 run_js_scanner()    { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" js-scan       || true; }
 
+# ---- Cloud cert-recon (Caduceus) + DAST param-fuzz (v2.8) -----------------
+# Both target-facing -> run as reconrun via run_scanner. cloudrecon neighbor-
+# scans known in-scope IPs for co-hosted certs; dast crawls+fuzzes fresh-first
+# in-scope-paying hosts. Gated by the killswitch (v2_cloudrecon / v2_dast).
+CLOUDRECON_SCRIPT="${CLOUDRECON_SCRIPT:-$(script_path recon_cloudrecon.sh)}"
+CLOUDRECON_INTERVAL="${CLOUDRECON_INTERVAL:-3600}"
+run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT" ]] && run_scanner bash "$CLOUDRECON_SCRIPT" || true; }
+
+DAST_SCRIPT="${DAST_SCRIPT:-$(script_path recon_dast.sh)}"
+DAST_INTERVAL="${DAST_INTERVAL:-1800}"
+run_dast() { v21_killed dast && return 0; [[ -f "$DAST_SCRIPT" ]] && run_scanner bash "$DAST_SCRIPT" || true; }
+
 run_validate()        { run_scanner bash "$VALIDATE" --exclude-prefix 00_; }
 run_validate_fast()   { run_scanner bash "$VALIDATE" --prefix 00_;          }
 run_discovery()       { run_scanner bash "$DISCOVERY";                      }
@@ -373,6 +397,8 @@ run_discord_bot() {
   supervise_loop "deep-scan"      "DEEP_SCAN_INTERVAL"     run_deep_scan      &
   supervise_loop "active-checks"  "ACTIVE_CHECKS_INTERVAL" run_active_checks  &
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
+  supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
+  supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &
 
     # Long-running — supervised with simple restart loops
   (

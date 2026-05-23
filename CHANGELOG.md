@@ -1,5 +1,68 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.8 - 2026-05-23 - gungnir freshness engine, cloud/DAST lanes, Mullvad-safe parallelism
+
+Studied g0ldencybersec (Gunnar Andrews) — gungnir, CloudRecon/Caduceus, sus_params,
+and the DEF CON 32 "Efficient Bug Bounty Automation" talk — and rebuilt the most
+fragile parts of the pipeline around his real-time-CT approach.
+
+### Changed — freshness engine (recon_true_fresh.sh)
+- PRIMARY freshness source is now **gungnir** (`~/go/bin/gungnir`, Go): a long-lived
+  listener that streams ~30+ CT logs DIRECTLY in real time, filtered by
+  `paying_roots.txt` (`-r ... -f`), piped into a no-network flock-append reader.
+  Replaces certstream + crt.sh entirely.
+- Why: certstream.calidog.io was chronically degraded (its Python client wedged in
+  WSL2 D-state for 24h) and crt.sh is Cloudflare-blocked. Both hit single aggregator
+  chokepoints over curl/python sockets that block uninterruptibly on half-open
+  Mullvad WireGuard connections. gungnir uses Go's epoll netpoller + ctx-aware
+  backoff, so a stalled log never blocks the others and the process stays killable.
+- **certspotter** demoted to a low-frequency (hourly), bounded BACKFILL for
+  newly-added roots / outage gaps (`CERTSPOTTER_BACKFILL=1`); gungnir carries realtime.
+- `build_paying_roots` is now **PSL-aware** (`publicsuffixlist`, offline): emits true
+  registrable domains (eTLD+1) instead of naive last-2-labels — which previously
+  collapsed `*.foo.com.br` → `com.br` and made gungnir match the whole public suffix
+  (flooded holding ~750 hosts/s, pushing real hosts past the flush cap). Plus a DENY
+  set of shared cloud/CDN/multi-tenant-SaaS apexes (amazonaws.com, zendesk.com,
+  auth0app.com, cloudfront.net, …). Net ~240x volume drop to real brand subdomains.
+- gungnir listener launched under `setsid`; pidfile holds the process-GROUP id so the
+  daemon and recon_ctl terminate gungnir + its reader together.
+
+### Added — recon lanes (g0ldencybersec-derived)
+- **recon_cloudrecon.sh** (daemon loop "cloudrecon", hourly): **Caduceus** neighbor
+  cert-scan. Pulls IPs of already-validated in-scope hosts from ES, scans those exact
+  IPs :443 for TLS certs, extracts co-hosted vhost domains from cert SANs,
+  scope-filters in-scope-paying, queues `11_cloudrecon_*` batches. Deliberately NOT
+  asnmap-based (asnmap returns hyperscaler ranges for cloud-hosted targets =
+  infeasible/noisy). `CLOUDRECON_EXPAND_24=1` widens to each seed IP's /24.
+- **recon_dast.sh** (daemon loop "dast", 30 min): **fresh-first** param-fuzz lane.
+  Pulls in-scope-paying hosts from ES sorted `triage_true_fresh` DESC (gungnir feed
+  first), then newest; skips hosts scanned within `DAST_COOLDOWN_DAYS` (7). Per host:
+  katana + gau crawl → qsreplace dedup → `gf` filter (sus_params patterns in ~/.gf)
+  → dalfox (XSS) + `nuclei -dast` (sqli/ssrf/lfi/…). Findings → ~/recon/dast/findings.jsonl
+  + Discord. NOTE: live dalfox/nuclei fuzz path not yet exercised end-to-end (public
+  test target was unreachable via Mullvad); chain components verified individually.
+- Both lanes run as `reconrun` via Mullvad, killswitch-gated (`touch
+  ~/recon/state/kill/v2_cloudrecon` / `v2_dast`).
+- New tools installed: gungnir, caduceus, katana, gau, gf, qsreplace (`~/go/bin`);
+  sus_params' gf-patterns copied to `~/.gf/`.
+
+### Changed — Mullvad-safe parallelism (local resources idle; ceiling is tunnel + per-target)
+- httpx (breadth: many hosts, ~1-2 req each): threads 80 → **150** (total rps still
+  capped at 100, so no target is hammered). `ulimit -n 65536` in the daemon.
+- caduceus (breadth: distinct IPs) `-c 100`.
+- DAST depth tools made gentle PER HOST (protects the shared Mullvad exit IP from WAF
+  bans): katana `-rl 15`, `nuclei -dast -rl 15`, dalfox `-w 20 --delay 50`.
+- nuclei bounty scan `-bulk-size 25` (parallel across hosts, keeps its 10 rps cap).
+- Did NOT add IP-rotation: for bug bounty it tends to backfire (programs want stable/
+  allowlistable source IPs; rotation is a bot signal) and it doesn't fix the real
+  ceiling (per-target politeness + tunnel health), which the above changes target.
+
+### Operator action required (root; not done by the agent)
+- Run `sudo bash scripts/setup_mtu.sh` to pin WSL eth0 MTU 1500 → 1380 (live + a
+  systemd unit for persistence) so packets fit the WireGuard tunnel and stop
+  blackholing under load. Cheap insurance; Mullvad's MSS clamping may already cover
+  TCP today.
+
 ## v2.5.6-no-tor - 2026-05-15 - Strip Tor/proxychains, Mullvad-only egress
 
 ### Removed
