@@ -109,6 +109,10 @@ touch "$HOLDING_FILE" "$SEEN_FILE" "$PERSIST_JSONL"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || { warn "true_fresh already running"; exit 0; }
+# FD_CLOEXEC on the lock fd: any exec'd child (python3, jq, curl, awk) will
+# NOT inherit fd 9. This prevents D-state network processes from holding the
+# flock and blocking the daemon's true-fresh loop indefinitely.
+python3 -c "import fcntl; fcntl.fcntl(9, fcntl.F_SETFD, fcntl.FD_CLOEXEC)" 2>/dev/null || true
 
 # ---- Scope DB presence check (otherwise nothing matches) -------------------
 INSCOPE_TSV="$SCOPE_DIR/inscope_patterns.tsv"
