@@ -989,12 +989,12 @@ usage() {
   printf "  ${G}recon-queue${R}                    Queue depth per lane\n"
   printf "  ${G}recon-space${R}                    Disk usage breakdown\n\n"
 
-  printf "${B}── RATE / MODE ─────────────────────────────────────────────────────${R}\n"
-  printf "  ${G}recon-rate${R} [preset|N M]        Live rate control (no restart needed)\n"
+  printf "${B}── RATE ────────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-rate${R} [preset|N M]        Show or set live scan rate (no restart)\n"
   printf "             presets: light easy medium full reset\n"
   printf "             raw:     recon-rate 80 60\n"
-  printf "  ${G}recon-boost${R}                    Switch to boost/power mode\n"
-  printf "  ${G}recon-browse${R}                   Switch to light browse mode\n\n"
+  printf "  ${G}recon-boost${R}                    Rate: full  (150t / 100 rps)\n"
+  printf "  ${G}recon-browse${R}                   Rate: light  (30t / 20 rps)\n\n"
 
   printf "${B}── TARGETS ─────────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-top${R} [N]                  Top N triage leads (default 15)\n"
@@ -1019,7 +1019,7 @@ usage() {
   printf "  ${G}recon-scope${R} <host>             Check host against all program scopes\n"
   printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
-  printf "             classes: sqli xss ssrf lfi ssti cmdi redirect idor\n\n"
+  printf "             classes: sqli xss ssrf lfi ssti cmdi rce redirect idor img-traversal\n\n"
 
   printf "${B}── TAKEOVERS ───────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-takeovers${R}                High-confidence CLAIM file\n"
