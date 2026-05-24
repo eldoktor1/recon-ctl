@@ -1019,7 +1019,7 @@ usage() {
   printf "  ${G}recon-scope${R} <host>             Check host against all program scopes\n"
   printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
-  printf "             classes: sqli xss ssrf lfi ssti cmdi rce redirect idor img-traversal\n\n"
+  printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n\n"
 
   printf "${B}── TAKEOVERS ───────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-takeovers${R}                High-confidence CLAIM file\n"
