@@ -108,6 +108,20 @@ CS_RATELIMIT_FILE="$TF_DIR/.certspotter_ratelimit_global"
 mkdir -p "$TF_DIR" "$QUEUE_INBOX" "$BASE_DIR/logs"
 touch "$HOLDING_FILE" "$SEEN_FILE" "$PERSIST_JSONL"
 
+# The true_fresh feed is consumed by triage.sh, which runs as the SCANNER user
+# (reconrun) via sudo. mktemp creates 0600 files and `mv` does NOT inherit the
+# state dir's default ACL — so the 7d-prune rewrite below silently strips
+# reconrun's read access. When that happens triage's `jq ... || echo '{}'` map
+# build reads nothing, the true_fresh map is empty, and EVERY host is scored
+# triage_true_fresh=false — which kills DAST fresh-first prioritisation AND the
+# Discord true-fresh alert gate. Re-grant reconrun read after every feed write.
+TF_SCANNER_USER="${SCANNER_USER:-reconrun}"
+grant_feed_read() {
+  setfacl -m "u:${TF_SCANNER_USER}:r" "$PERSIST_JSONL" 2>/dev/null \
+    || chmod 0644 "$PERSIST_JSONL" 2>/dev/null || true
+}
+grant_feed_read
+
 exec 9>"$LOCK_FILE"
 flock -n 9 || { warn "true_fresh already running"; exit 0; }
 # FD_CLOEXEC on the lock fd: any exec'd child (python3, jq, curl, awk) will
@@ -600,6 +614,7 @@ TMP_TF="$(mktemp)"
 SEVEN_DAYS_AGO="$(date -u -d '-7 days' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
 jq -c --arg cutoff "$SEVEN_DAYS_AGO" 'select((.external_first_seen // "") >= $cutoff)' \
    "$PERSIST_JSONL" 2>/dev/null > "$TMP_TF" && mv "$TMP_TF" "$PERSIST_JSONL"
+grant_feed_read   # mktemp+mv just stripped reconrun's read access — restore it
 
 # ---- Split into 500-line batches under queue/inbox with 00_ prefix --------
 BATCH_TS="$(date -u +%Y%m%dT%H%M%SZ)"

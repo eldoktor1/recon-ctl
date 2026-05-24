@@ -90,6 +90,12 @@ prepare_scanner_dirs() {
 }
 
 run_scanner() {
+  # Hard VPN gate: never launch a target-facing scanner while egress is not on
+  # Mullvad. recon_vpnguard maintains $STATE_DIR/vpn_down.
+  if [[ -f "$STATE_DIR/vpn_down" ]]; then
+    log "[run_scanner] BLOCKED — VPN down, refusing to launch: $*"
+    return 0
+  fi
   local env_args=(
     HOME="$HOME"
     BASE_DIR="$BASE_DIR"
@@ -230,6 +236,15 @@ supervise_loop() {
   local backoff=10 max_backoff=600
 
   while [[ "$SHUTDOWN" -eq 0 ]]; do
+    # VPN gate: if recon_vpnguard tripped the vpn_down flag (egress not on
+    # Mullvad), EVERY loop except the guard itself pauses — no scanner or feed
+    # runs until Mullvad is reconfirmed and the guard clears the flag. This is
+    # what stops the pipeline from scanning over the real IP if the VPN drops.
+    if [[ "$name" != "vpnguard" && -f "$STATE_DIR/vpn_down" ]]; then
+      log "[$name] paused — VPN down (vpn_down set); not running until VPN restored"
+      sleep 15
+      continue
+    fi
     load_runtime_env  # so children always see fresh env (re-checks AC/battery)
     local sleep_secs="${!sleep_var}"
 
@@ -326,6 +341,15 @@ DAST_SCRIPT="${DAST_SCRIPT:-$(script_path recon_dast.sh)}"
 DAST_INTERVAL="${DAST_INTERVAL:-1800}"
 run_dast() { v21_killed dast && return 0; [[ -f "$DAST_SCRIPT" ]] && run_scanner bash "$DAST_SCRIPT" || true; }
 
+# ---- VPN leak guard (v2.8) -------------------------------------------------
+# Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
+# gate, and the guard must keep running while down to detect recovery). Fast
+# interval = small exposure window. On leak it sets vpn_down (pausing every
+# other loop) and kills all egress; on recovery it clears the flag (auto-resume).
+VPNGUARD_SCRIPT="${VPNGUARD_SCRIPT:-$(script_path recon_vpnguard.sh)}"
+VPNGUARD_INTERVAL="${VPNGUARD_INTERVAL:-20}"
+run_vpnguard() { [[ -f "$VPNGUARD_SCRIPT" ]] && SCANNER_USER="$SCANNER_USER" bash "$VPNGUARD_SCRIPT" || true; }
+
 run_validate()        { run_scanner bash "$VALIDATE" --exclude-prefix 00_; }
 run_validate_fast()   { run_scanner bash "$VALIDATE" --prefix 00_;          }
 run_discovery()       { run_scanner bash "$DISCOVERY";                      }
@@ -379,6 +403,9 @@ run_discord_bot() {
   last_cleanup=0
 
   # Launch all sub-loops as background jobs
+  # VPN leak guard FIRST — it must be watching before any scanner egresses.
+  supervise_loop "vpnguard"      "VPNGUARD_INTERVAL"   run_vpnguard      &
+
   supervise_loop "validate"      "VALIDATE_SLEEP"      run_validate      &
   supervise_loop "validate-fast" "VALIDATE_FAST_SLEEP" run_validate_fast &
   supervise_loop "discovery"     "DISCOVERY_SLEEP"     run_discovery     &
@@ -412,6 +439,8 @@ run_discord_bot() {
   ) &
   (
     while [[ "$SHUTDOWN" -eq 0 ]]; do
+      # Bot egresses to Discord — also pause it while VPN is down.
+      if [[ -f "$STATE_DIR/vpn_down" ]]; then sleep 30; continue; fi
       run_discord_bot || log "[bot] died, restarting in 60s"
       sleep 60
     done
