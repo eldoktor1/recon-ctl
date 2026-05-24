@@ -1,5 +1,56 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
+
+### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)
+- The kill logic no longer gates on the pidfile. The old code printed "Not
+  running" and killed NOTHING when the pidfile was missing/stale — which left
+  orphaned supervise_loop subshells (reparented to PID 1, shown as
+  `bash recon_daemon.sh`) firing scanners forever, plus in-flight reconrun-owned
+  scanners still sending traffic. (Observed live: a "stopped" pipeline with ~19
+  orphaned daemon procs and reconrun httpx still running.)
+- Now ALWAYS pkills recon_daemon.sh (master + orphaned loops) + every module
+  loop + the discord bot, kills gungnir's setsid process group, and kills
+  reconrun-owned scanners/tools via `sudo -n -u reconrun pkill` (recon_ctl runs
+  as d0k and otherwise cannot signal reconrun procs). Verifies + reports leftovers.
+
+### Added — VPN leak guard (recon_vpnguard.sh + daemon wiring)
+- Fail-closed guard as the FIRST, fastest daemon loop (VPNGUARD_INTERVAL=20s).
+  Authoritative check: am.i.mullvad.net `mullvad_exit_ip`.
+  * CONFIRMED leak (reachable, says NOT a Mullvad exit = real VPN drop) → trips
+    immediately (LEAK_THRESHOLD=1): sets $STATE_DIR/vpn_down and kills ALL egress
+    (reconrun scanners + tools + gungnir + passive feeds + discord bot).
+  * "unknown" (check service unreachable — usually transient/rate-limit under
+    scan load, NOT a leak) → 3 retries/check, tolerated to UNKNOWN_THRESHOLD=6
+    before a fail-closed backstop trip. (Initial naive fail-closed-on-unknown
+    false-tripped a healthy pipeline once under load — fixed by this split.)
+  * Auto-resumes (clears vpn_down) once Mullvad is reconfirmed.
+- Daemon enforcement: supervise_loop pauses EVERY loop (guard exempt) while
+  vpn_down is set; run_scanner hard-blocks launching any target-facing scanner;
+  the discord bot loop also pauses. The pipeline cannot scan over the real IP.
+- cmd_start refuses to launch unless egress is a confirmed Mullvad exit — the
+  WSL2 preflight explicitly does NOT verify the tunnel. Override: RECON_SKIP_VPN_CHECK=1.
+- Verified live: trip → kill-egress → pause → auto-resume cycle observed end to
+  end; fail-closed on confirmed leak; stable (no false trips) under 150-thread load.
+
+### Fixed — triage_true_fresh was ALWAYS false (recon_true_fresh.sh)
+- The CT feed (true_fresh.jsonl) is written by recon_true_fresh as d0k, but
+  triage runs as reconrun. mktemp(0600)+mv on the 7-day prune stripped the state
+  dir's default reconrun ACL, so triage read an EMPTY true_fresh map and scored
+  triage_true_fresh=false on every host — silently starving DAST fresh-first AND
+  the Discord true-fresh alert gate. Now re-grants reconrun read after every feed
+  write (setfacl u:reconrun:r, chmod 0644 fallback). Confirmed: runtime map went
+  from {} to ~2000 entries readable as reconrun.
+
+### Operator notes
+- TRUE kill-switch: this guard DETECTS a drop and halts within a check interval
+  but cannot block traffic at the instant a tunnel drops (the tunnel lives on
+  Windows). For zero-exposure, ALSO enable Mullvad "Lockdown mode" in the Windows
+  app — the OS/network-layer kill-switch WSL cannot provide itself.
+- WSL interface churn: the active NIC migrates (eth0→eth7→eth8) across VPN/network
+  events, which also wedged WSL twice. The v2.8 eth0-pinned MTU is therefore
+  fragile; a udev rule setting MTU 1380 on any eth* is the durable fix (pending).
+
 ## v2.8 - 2026-05-23 - gungnir freshness engine, cloud/DAST lanes, Mullvad-safe parallelism
 
 Studied g0ldencybersec (Gunnar Andrews) — gungnir, CloudRecon/Caduceus, sus_params,

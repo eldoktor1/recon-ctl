@@ -117,6 +117,19 @@ cmd_start() {
       return 1
     fi
   fi
+  # VPN gate at launch (fail-closed): the WSL2 preflight does NOT verify the
+  # tunnel, so confirm egress is a Mullvad exit before starting any target-facing
+  # recon. recon_vpnguard then keeps watching during the run.
+  if [[ "${RECON_SKIP_VPN_CHECK:-0}" != "1" ]]; then
+    local mexit
+    mexit="$(timeout 8 curl -sS --max-time 7 https://am.i.mullvad.net/json 2>/dev/null | jq -r '.mullvad_exit_ip // "null"' 2>/dev/null)"
+    if [[ "$mexit" != "true" ]]; then
+      echo "REFUSING to start: egress is NOT a confirmed Mullvad exit (mullvad_exit_ip=$mexit)."
+      echo "Reconnect Mullvad and retry.  (override for testing: RECON_SKIP_VPN_CHECK=1)"
+      return 1
+    fi
+    echo "VPN OK — Mullvad exit confirmed."
+  fi
   nohup bash "$DAEMON" >/dev/null 2>&1 &
   sleep 1
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -127,33 +140,66 @@ cmd_start() {
 }
 
 cmd_stop() {
-  if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    local pid; pid="$(cat "$PID_FILE")"
-    echo "Stopping pid $pid (graceful)"
-    kill -TERM "$pid"
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Force-killing"
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
-    rm -f "$PID_FILE"
-    pkill -f 'recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|nuclei|true_fresh|fresh_modules|cloudrecon|dast)\.sh' 2>/dev/null || true
-    # Stop gungnir CT-log listener spawned by recon_true_fresh.sh (setsid group)
-    if [[ -s "$BASE_DIR/state/true_fresh/gungnir.pid" ]]; then
-      gpid="$(cat "$BASE_DIR/state/true_fresh/gungnir.pid" 2>/dev/null)"
-      [[ -n "$gpid" ]] && { kill -TERM -- "-$gpid" 2>/dev/null || kill -TERM "$gpid" 2>/dev/null || true; }
-      rm -f "$BASE_DIR/state/true_fresh/gungnir.pid"
-    fi
-    pkill -f 'gungnir -r' 2>/dev/null || true
-    pkill -f 'triage\.sh' 2>/dev/null || true
-    pkill -f 'httpx|subfinder|assetfinder|nuclei.*-target' 2>/dev/null || true
-    pkill -f 'caduceus|katana|dalfox|\bgau\b' 2>/dev/null || true
-    echo "Stopped."
+  # Bulletproof full stop. NEVER gate the kill logic on the pidfile: if the
+  # master died/was-killed without a clean trap, its supervise_loop subshells
+  # orphan to PID 1 (showing as `bash recon_daemon.sh`) and keep firing
+  # scanners. The old code printed "Not running" and killed nothing in that case.
+  local su="${SCANNER_USER:-reconrun}"
+  echo "Stopping recon pipeline (full)..."
+
+  # 1) Graceful TERM the master (if pidfile valid) so its EXIT trap can clean up.
+  local pid=""
+  [[ -s "$PID_FILE" ]] && pid="$(cat "$PID_FILE" 2>/dev/null)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "  graceful TERM master pid $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    for i in $(seq 1 8); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  fi
+  rm -f "$PID_FILE"
+
+  # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
+  #    module loop + the discord bot. d0k-owned, so plain pkill works here.
+  local DAEMON_PAT='recon_daemon\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|vpnguard|brain|ai_score)\.sh'
+  pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
+  pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
+  pkill -TERM -f 'triage\.sh'  2>/dev/null || true
+
+  # 3) gungnir CT listener (setsid process group)
+  if [[ -s "$BASE_DIR/state/true_fresh/gungnir.pid" ]]; then
+    local gpid; gpid="$(cat "$BASE_DIR/state/true_fresh/gungnir.pid" 2>/dev/null)"
+    [[ -n "$gpid" ]] && { kill -TERM -- "-$gpid" 2>/dev/null || kill -TERM "$gpid" 2>/dev/null || true; }
+    rm -f "$BASE_DIR/state/true_fresh/gungnir.pid"
+  fi
+  pkill -TERM -f 'gungnir -r' 2>/dev/null || true
+
+  # 4) reconrun-owned scanners + tools. recon_ctl runs as d0k and CANNOT signal
+  #    reconrun procs directly — but the passwordless `sudo -u reconrun` rule
+  #    lets us kill them AS reconrun. Without this, in-flight target-facing
+  #    scanners (httpx/nuclei/katana/...) survive a stop and keep sending traffic.
+  local TOOL_PAT='httpx|nuclei|katana|caduceus|dalfox|subfinder|assetfinder|dnsx|\bgau\b'
+  sudo -n -u "$su" pkill -TERM -f "recon_|triage\.sh|$TOOL_PAT" 2>/dev/null || true
+  pkill -TERM -f "$TOOL_PAT" 2>/dev/null || true
+
+  # 5) Grace, then force-kill stragglers (both users).
+  sleep 3
+  pkill -KILL -f "$DAEMON_PAT" 2>/dev/null || true
+  pkill -KILL -f "$LOOP_PAT"   2>/dev/null || true
+  pkill -KILL -f 'triage\.sh|gungnir -r' 2>/dev/null || true
+  pkill -KILL -f "$TOOL_PAT"   2>/dev/null || true
+  sudo -n -u "$su" pkill -KILL -f "recon_|triage\.sh|$TOOL_PAT" 2>/dev/null || true
+
+  # 6) Verify (exclude this recon_ctl process itself).
+  sleep 1
+  local left dleft
+  left="$(pgrep -af "recon_daemon|$LOOP_PAT|gungnir|triage\.sh|$TOOL_PAT" 2>/dev/null | grep -vE 'recon_ctl|grep' | wc -l | tr -d ' ')"
+  dleft="$(ps -eo stat 2>/dev/null | grep -c '^D')"
+  if [[ "$left" -eq 0 ]]; then
+    echo "Stopped — all recon processes terminated."
   else
-    echo "Not running"
+    echo "WARNING: $left recon process(es) still present:"
+    pgrep -af "recon_daemon|$LOOP_PAT|gungnir|triage\.sh|$TOOL_PAT" 2>/dev/null | grep -vE 'recon_ctl|grep' | head
+    [[ "$dleft" -gt 0 ]] && echo "  ($dleft in uninterruptible D-state — only 'wsl --shutdown' clears those)"
   fi
 }
 
