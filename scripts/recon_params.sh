@@ -40,10 +40,12 @@ GF="${GF:-$(command -v gf 2>/dev/null || echo "$GOBIN/gf")}"; QSREPLACE="${QSREP
 
 # Classify against EVERY gf pattern installed in ~/.gf — not a fixed list — so
 # adding a new pattern automatically extends the catalog. Override with PARAMS_CLASSES.
+# Exact sus_params class set (g0ldencybersec/sus_params).
+# Hardcoded — not auto-detected from ~/.gf — so collect always uses the same
+# classes regardless of which user runs it and what extra patterns d0k may have.
+# These are the only patterns installed in reconrun's home (/home/reconrun/.gf).
 if [[ -z "${PARAMS_CLASSES:-}" ]]; then
-  # Keep newline-separated so the for loop works under IFS=$'\n\t' (no space splitting)
-  PARAMS_CLASSES="$(ls "$HOME/.gf"/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.json$//')"
-  [[ -z "$PARAMS_CLASSES" ]] && PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\nrce\nredirect\nidor\nimg-traversal'
+  PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\nrce\nredirect\nidor\nimg-traversal'
 fi
 PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-10}"
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
