@@ -266,20 +266,46 @@ cmd_rate() {
   local arg1="${1:-}" arg2="${2:-}"
   case "$arg1" in
     ""|show|status)
-      hdr "Rate control"
+      hdr "Rate"
+      local t r label source
       if [[ -f "$STATE_DIR/rate_override" ]]; then
-        local t r
         t="$(grep '^THREADS=' "$STATE_DIR/rate_override" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
         r="$(grep '^RATE='   "$STATE_DIR/rate_override" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
-        printf '  override active : %st / %s rps\n' "$t" "$r"
+        source="override"
       else
-        printf '  no override     : daemon default 150t / 100 rps (halved on battery)\n'
+        t=150; r=100; source="daemon default"
       fi
-      local last; last="$(grep 'power=' "$LOG_DIR/recon_daemon.log" 2>/dev/null | tail -1 | grep -oE 'threads=[0-9]+' | head -1)"
-      printf '  last daemon log : %s\n' "${last:-unknown}"
+      case "${t}/${r}" in
+        30/20)   label="light"  ;;
+        60/40)   label="easy"   ;;
+        100/65)  label="medium" ;;
+        150/100) label="full"   ;;
+        *)       label="custom" ;;
+      esac
+      # Power source + daemon thread budget from most recent daemon log line
+      local power daemon_threads
+      power="$(grep -oE 'power=[a-z]+' "$LOG_DIR/recon_daemon.log" 2>/dev/null | tail -1 | cut -d= -f2)"
+      daemon_threads="$(grep -oE '\(power=[a-z]+ threads=[0-9]+\)' "$LOG_DIR/recon_daemon.log" 2>/dev/null | tail -1 | grep -oE 'threads=[0-9]+' | cut -d= -f2)"
+      # Actual httpx rate from most recent validate run
+      local last_val
+      last_val="$(grep 'VAL\].*threads=[0-9].*rate=[0-9]' "$LOG_DIR/recon_daemon.log" 2>/dev/null | tail -1 | grep -oE 'threads=[0-9]+ rate=[0-9]+')"
+      # Live httpx worker count (pgrep -c exits 1 with no matches, so capture separately)
+      local httpx_n; httpx_n="$(pgrep -x httpx 2>/dev/null | wc -l | tr -d '[:space:]')"
+
+      printf '  %-20s %st / %s rps  [%s]  (source: %s)\n' \
+        "effective rate:" "$t" "$r" "$label" "$source"
+      printf '  %-20s %s  (daemon thread budget: %s)\n' \
+        "power:" "${power:-unknown}" "${daemon_threads:--}"
+      [[ -n "$last_val" ]] && \
+        printf '  %-20s %s\n' "last httpx run:" "$last_val"
+      if [[ "$httpx_n" -gt 0 ]]; then
+        printf '  %-20s %s instance(s) active\n' "live httpx:" "$httpx_n"
+      else
+        printf '  %-20s none\n' "live httpx:"
+      fi
       printf '\n'
       printf '  presets : light=30t/20rps  easy=60t/40rps  medium=100t/65rps  full=150t/100rps\n'
-      printf '  custom  : recon-rate <threads> <rps>\n'
+      printf '  set     : recon-rate <preset>  or  recon-rate <threads> <rps>\n'
       printf '  reset   : recon-rate reset\n'
       ;;
     reset|off|default)
