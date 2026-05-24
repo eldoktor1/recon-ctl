@@ -12,8 +12,12 @@
 #                  manual). Target-facing → run as reconrun via Mullvad.
 #   list <class> [N]   print in-scope param-URLs for a class, fresh-first,
 #                  tagged with program / tier / (FRESH). Read-only.
+#   verify <xss|sqli> [N]   actively probe top N catalog URLs for the class:
+#                  xss  → inject d0k_recon canary, check if it reflects in body
+#                  sqli → inject ' payload, check response for DB error strings
+#                  Confirmed hits printed live + appended to params/verify_<class>.jsonl
 #
-# Classes (from ~/.gf): sqli xss ssrf lfi ssti cmdi redirect idor
+# Classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal
 # =============================================================================
 set -uo pipefail
 IFS=$'\n\t'
@@ -228,8 +232,96 @@ cmd_list() {
   printf -- '--- %s: %s of %s in-scope-paying URL(s) ---\n' "$cls" "$(( hits < n ? hits : n ))" "$hits" >&2
 }
 
+# ---------------------------------------------------------------------------
+cmd_verify() {
+  local cls="${1:-}" n="${2:-50}"
+  case "$cls" in
+    xss|sqli) ;;
+    "")
+      printf 'usage: recon-params verify <xss|sqli> [N]\n' >&2
+      printf '  xss  — inject d0k_recon canary, check if param reflects it in response\n' >&2
+      printf '  sqli — inject '"'"''"'"' payload, check response for DB error signatures\n' >&2
+      exit 2
+      ;;
+    *) printf 'verify supports: xss sqli\n' >&2; exit 2 ;;
+  esac
+  [[ "$n" =~ ^[0-9]+$ ]] || n=50
+
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping verify"; exit 0; }
+  es_up || { warn "ES not reachable"; exit 1; }
+  [[ -x "$QSREPLACE" ]] || { warn "qsreplace not found: $QSREPLACE"; exit 1; }
+
+  local resp
+  resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
+    \"size\": $n,
+    \"_source\": [\"url\",\"program\",\"payout_tier\",\"true_fresh\"],
+    \"query\": {\"term\": {\"vuln_classes\": \"$cls\"}},
+    \"sort\": [{\"true_fresh\": {\"order\": \"desc\"}}, {\"cataloged_at\": {\"order\": \"desc\"}}]
+  }" 2>/dev/null)"
+
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+  local WORK; WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
+  printf '%s' "$resp" \
+    | jq -r '.hits.hits[]?._source | [.url, (.program//"?"), (.payout_tier//"?"), (if .true_fresh then "FRESH" else "" end)] | @tsv' \
+    2>/dev/null > "$WORK/urls.tsv"
+
+  local url_count; url_count="$(wc -l < "$WORK/urls.tsv" | tr -d ' ')"
+  if [[ "$url_count" -eq 0 ]]; then
+    log "verify($cls): no URLs in catalog — run collect first"
+    exit 0
+  fi
+  log "verify($cls): probing $url_count / $total catalog entries"
+
+  local canary="d0k_recon"
+  local sqli_re='SQL syntax|mysql_num_rows|ORA-[0-9]+|SQLSTATE|You have an error in your SQL|Microsoft OLE DB|ODBC SQL Server|Warning.*mysql_|Unclosed quotation mark|quoted string not properly terminated|pg_query\(\)|supplied argument is not a valid MySQL'
+  local ua='Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0'
+  local out_file="$PARAMS_DIR/verify_${cls}.jsonl"
+  mkdir -p "$PARAMS_DIR"
+
+  local hits=0 checked=0
+  while IFS=$'\t' read -r url program tier fresh_tag; do
+    [[ -z "$url" ]] && continue
+    checked=$((checked+1))
+
+    local probe_url
+    case "$cls" in
+      xss)  probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "$canary" 2>/dev/null)" ;;
+      sqli) probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "'" 2>/dev/null)" ;;
+    esac
+    [[ -z "$probe_url" ]] && continue
+
+    local body
+    body="$(curl -sS -m10 -k -L --max-redirs 2 -A "$ua" "$probe_url" 2>/dev/null | head -c 65536)"
+
+    local hit=0
+    case "$cls" in
+      xss)  printf '%s' "$body" | grep -qi "$canary" && hit=1 ;;
+      sqli) printf '%s' "$body" | grep -qiE "$sqli_re" && hit=1 ;;
+    esac
+
+    if [[ "$hit" -eq 1 ]]; then
+      hits=$((hits+1))
+      local label="[${cls^^} CONFIRMED]"
+      [[ "$fresh_tag" == "FRESH" ]] && label="$label [FRESH]"
+      printf '%s  %s [%s]  %s\n' "$label" "$program" "$tier" "$probe_url"
+      jq -nc --arg u "$url" --arg p "$probe_url" --arg c "$cls" \
+             --arg pr "$program" --arg ti "$tier" --arg fr "$fresh_tag" \
+             --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        '{url:$u, probe_url:$p, class:$c, program:$pr, tier:$ti, fresh:($fr=="FRESH"), confirmed_at:$ts}' \
+        >> "$out_file" 2>/dev/null || true
+    fi
+
+    sleep 0.3
+  done < "$WORK/urls.tsv"
+
+  printf -- '--- verify(%s): %s confirmed / %s probed  (catalog total: %s) ---\n' \
+    "$cls" "$hits" "$checked" "$total" >&2
+  [[ "$hits" -gt 0 ]] && printf '    saved → %s\n' "$out_file" >&2
+}
+
 case "${1:-}" in
   collect) shift; cmd_collect "$@" ;;
   list)    shift; cmd_list "$@" ;;
-  *) echo "usage: recon_params.sh {collect | list <class> [N]}" >&2; exit 2 ;;
+  verify)  shift; cmd_verify "$@" ;;
+  *) echo "usage: recon_params.sh {collect | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
 esac

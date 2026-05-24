@@ -1019,7 +1019,8 @@ usage() {
   printf "  ${G}recon-scope${R} <host>             Check host against all program scopes\n"
   printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
-  printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n\n"
+  printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
+  printf "  ${G}recon-params verify${R} <xss|sqli> [N]  Probe top N URLs — xss=canary reflection  sqli=DB errors\n\n"
 
   printf "${B}── TAKEOVERS ───────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-takeovers${R}                High-confidence CLAIM file\n"
@@ -1070,10 +1071,11 @@ case "${1:-}" in
   params)
     shift
     case "${1:-}" in
-      "")       bash "$SCRIPT_DIR/recon_params.sh" list ;;   # show usage/classes
+      "")       bash "$SCRIPT_DIR/recon_params.sh" list ;;
       list)     shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
       collect)  bash "$SCRIPT_DIR/recon_params.sh" collect ;;
-      *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;; # shorthand: class [N]
+      verify)   shift; bash "$SCRIPT_DIR/recon_params.sh" verify "$@" ;;
+      *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;
   ai)           cmd_ai ;;
