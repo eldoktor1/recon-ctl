@@ -87,8 +87,8 @@ ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
 ES_AUTH=(-u "$ES_USER:$ES_PASS")
 
-DISCORD_KEV_WEBHOOK="${DISCORD_KEV_WEBHOOK:-$(cat "$HOME/.recon_discord_kev" 2>/dev/null || true)}"
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-$(cat "$HOME/.recon_discord" 2>/dev/null || true)}"
+# Discord routing uses per-channel files via discord_hook() (recon_net.sh):
+# confirmed CVE findings -> 'cve' channel; killswitch alerts -> 'health' channel.
 
 # Tunable
 MAX_CONCURRENT="${MAX_CONCURRENT:-5}"
@@ -355,7 +355,7 @@ es_update_confirmed() {
 
 notify_discord_confirmed() {
   local finding="$1"
-  local hook="${DISCORD_KEV_WEBHOOK:-$DISCORD_WEBHOOK}"
+  local hook; hook="$(discord_hook cve)"
   [[ -z "$hook" ]] && return 0
 
   local payload
@@ -378,8 +378,7 @@ notify_discord_confirmed() {
       timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }]
   }')"
-  curl_direct -fsS -m 10 -H 'Content-Type: application/json' \
-    -X POST -d "$payload" "$hook" >/dev/null 2>&1 || true
+  discord_post "$(discord_hook cve)" "$payload" || true   # → #cve-kev (CVE/KEV template confirmations)
 }
 
 # =============================================================================
@@ -417,10 +416,7 @@ if [[ "$CONFIRMED_THIS_RUN" -gt 10 ]]; then
     > "$HOME/recon/state/kill/v2_nuclei"
 
   # Send alert
-  hook="${DISCORD_KEV_WEBHOOK:-$DISCORD_WEBHOOK}"
-  [[ -n "$hook" ]] && curl_direct -fsS -m 10 -H 'Content-Type: application/json' \
-    -X POST -d "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" \
-    "$hook" >/dev/null 2>&1 || true
+  discord_post "$(discord_hook health)" "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" || true
 fi
 
 log "Nuclei cycle complete"

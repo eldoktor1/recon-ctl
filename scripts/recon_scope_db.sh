@@ -268,7 +268,11 @@ jq -r '.[] |
     $p.handle, $p.platform, ($p.pays | tostring),
     ($p.payout_tier // (if $p.pays then "mid" else "none" end))
   ] | @tsv
-' "$PROGRAMS_JSON" | sort -u > "$INSCOPE_TSV"
+' "$PROGRAMS_JSON" | sort -u > "$INSCOPE_TSV.tmp" && mv -f "$INSCOPE_TSV.tmp" "$INSCOPE_TSV"
+# ^ atomic publish: 4 loops (discovery/scope_check/true_fresh/triage) read this
+#   file constantly. A plain `> file` truncates then refills, so a reader hitting
+#   it mid-write would see EMPTY/partial scope → every host wrongly out-of-scope.
+#   tmp+rename makes readers always see a complete old-or-new file.
 
 jq -r '.[] |
   . as $p |
@@ -278,7 +282,7 @@ jq -r '.[] |
     (. | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
     $p.handle, $p.platform
   ] | @tsv
-' "$PROGRAMS_JSON" | sort -u > "$OUTSCOPE_TSV"
+' "$PROGRAMS_JSON" | sort -u > "$OUTSCOPE_TSV.tmp" && mv -f "$OUTSCOPE_TSV.tmp" "$OUTSCOPE_TSV"
 
 log "Patterns: in_scope=$(wc -l < "$INSCOPE_TSV") out_scope=$(wc -l < "$OUTSCOPE_TSV")"
 

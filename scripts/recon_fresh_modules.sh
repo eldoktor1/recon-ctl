@@ -45,9 +45,7 @@ ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
 ES_AUTH=(-u "$ES_USER:$ES_PASS")
 
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
-[[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
-  DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
+# Discord: bounty-scan findings → #vulns via discord_hook() (recon_net.sh)
 
 mkdir -p "$STATE_DIR"
 
@@ -87,8 +85,8 @@ fresh_paid_urls() {
 
 discord_send() {
   local payload="$1"
-  [[ -z "$DISCORD_WEBHOOK" ]] && return 0
-  curl_direct -fsS -m 10 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+  [[ -z "$(discord_hook vulns)" ]] && return 0
+  discord_post "$(discord_hook vulns)" "$payload" || true   # → #vulns
 }
 
 # =============================================================================

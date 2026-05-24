@@ -70,7 +70,7 @@ check_mullvad() {
 kill_egress() {
   local su="${SCANNER_USER:-reconrun}"
   local TOOLS='httpx|nuclei|katana|caduceus|dalfox|subfinder|assetfinder|dnsx|\bgau\b'
-  sudo -n -u "$su" pkill -TERM -f "recon_(validate|discovery|nuclei|fresh_modules|cloudrecon|dast|scope_watch|takeover_hunter)\.sh|$TOOLS" 2>/dev/null || true
+  sudo -n -u "$su" pkill -TERM -f "recon_(validate|discovery|nuclei|fresh_modules|cloudrecon|dast|params|scope_watch|takeover_hunter)\.sh|$TOOLS" 2>/dev/null || true
   pkill -TERM -f 'recon_(true_fresh|cve_intel|vuln_feed)\.sh' 2>/dev/null || true
   pkill -TERM -f 'recon_discord_bot\.sh' 2>/dev/null || true   # stops the Discord egress too
   # gungnir CT listener (setsid process group)

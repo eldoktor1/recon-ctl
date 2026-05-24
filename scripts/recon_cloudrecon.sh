@@ -173,7 +173,7 @@ log "in-scope-paying: $nscoped"
 [[ "$nscoped" -eq 0 ]] && exit 0
 
 # ---- 6. Delta vs known hosts, then emit batches ----------------------------
-sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"
+flock "$KNOWN_HOSTS.lock" sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"   # shared lock w/ discovery+validate
 sort -u "$targets".scoped -o "$targets".scoped
 comm -23 "$targets".scoped "$KNOWN_HOSTS" > "$targets".fresh 2>/dev/null || cp "$targets".scoped "$targets".fresh
 
