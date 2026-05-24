@@ -42,6 +42,16 @@ HTTPX_THREADS="${HTTPX_THREADS:-15}"
 HTTPX_RATE="${HTTPX_RATE:-15}"
 HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
 HTTPX_MAX_RUNTIME="${HTTPX_MAX_RUNTIME:-900}"   # 15 min hard cap (browse)
+# Live rate override — recon_ctl rate / recon-rate alias writes this file.
+# Checked here (not only in daemon) so changes take effect without a restart.
+{ _ro="$STATE_DIR/rate_override"
+  if [[ -f "$_ro" ]]; then
+    _ot="$(grep '^THREADS=' "$_ro" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+    _or="$(grep '^RATE='   "$_ro" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+    [[ "$_ot" =~ ^[0-9]+$ ]] && HTTPX_THREADS="$_ot"
+    [[ "$_or" =~ ^[0-9]+$ ]] && HTTPX_RATE="$_or"
+  fi
+  unset _ro _ot _or; }
 BULK_LINES="${BULK_LINES:-5000}"
 
 BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-3}"
@@ -251,6 +261,7 @@ process_batch() {
     _kht="$(mktemp)"
     cat "$batch" "$KNOWN_HOSTS" 2>/dev/null | sort -u > "$_kht" && mv -f "$_kht" "$KNOWN_HOSTS"
     rm -f "$_kht"
+    chmod 644 "$KNOWN_HOSTS" 2>/dev/null || true   # mv resets owner/perms; world-readable so hot_seed (d0k) can dedup against it
   ) 200>"$KNOWN_HOSTS.lock"
 
   if [[ "$results" -gt 0 ]]; then
@@ -377,12 +388,17 @@ main() {
 
   log "=== validate cycle done (processed=$processed) ==="
 
-  # Chain to triage if anything was processed
+  # Chain to triage if anything was processed.
+  # Run in background so the lane lock (held by this process) is released
+  # immediately — previously the 20-30 min triage run held the lock the whole
+  # time, blocking new validate batches from starting.
   if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
-    log "Chaining to triage"
-    ( DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
+    log "Chaining to triage (background)"
+    ( 9>&-  # close inherited lane lock fd so triage doesn't hold the flock
+      DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
       INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
-      || warn "triage exited non-zero" )
+      || warn "triage exited non-zero" ) &
+    disown $! 2>/dev/null || true
   fi
 }
 

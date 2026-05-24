@@ -36,21 +36,23 @@ PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 
 GOBIN="$HOME/go/bin"
 KATANA="${KATANA:-$GOBIN/katana}"; GAU="${GAU:-$GOBIN/gau}"
-GF="${GF:-$GOBIN/gf}"; QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
+GF="${GF:-$(command -v gf 2>/dev/null || echo "$GOBIN/gf")}"; QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
 
 # Classify against EVERY gf pattern installed in ~/.gf — not a fixed list — so
 # adding a new pattern automatically extends the catalog. Override with PARAMS_CLASSES.
 if [[ -z "${PARAMS_CLASSES:-}" ]]; then
-  PARAMS_CLASSES="$(ls "$HOME/.gf"/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')"
-  [[ -z "${PARAMS_CLASSES// }" ]] && PARAMS_CLASSES="sqli xss ssrf lfi ssti cmdi rce redirect idor lfi img-traversal"
+  # Keep newline-separated so the for loop works under IFS=$'\n\t' (no space splitting)
+  PARAMS_CLASSES="$(ls "$HOME/.gf"/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.json$//')"
+  [[ -z "$PARAMS_CLASSES" ]] && PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\nrce\nredirect\nidor\nimg-traversal'
 fi
-PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-20}"
+PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-10}"
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
+PARAMS_ZERO_COOLDOWN_HOURS="${PARAMS_ZERO_COOLDOWN_HOURS:-6}"
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-400}"
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
 KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
 KATANA_RL="${KATANA_RL:-15}"
-GAU_TIMEOUT="${GAU_TIMEOUT:-60}"
+GAU_TIMEOUT="${GAU_TIMEOUT:-30}"    # otx+urlscan are fast; 30s is ample; 60 wasted when providers blocked
 MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
 SCANNED_FILE="$STATE_DIR/.params_scanned.tsv"
 
@@ -87,21 +89,41 @@ cmd_collect() {
   ensure_index
   touch "$SCANNED_FILE"
 
-  # Fresh-first in-scope-paying host candidates.
+  # Score-first in-scope-paying host candidates. Sorting by triage_score DESC
+  # (not fresh-first) because GAU/web-archive coverage is what drives param
+  # discovery — established high-signal hosts have years of crawl history;
+  # CT-log-fresh UUID subdomains have zero. first_seen ASC as tiebreaker so
+  # older hosts (more archive data) beat equally-scored newer ones.
   local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
     \"size\": $PARAMS_CANDIDATE_POOL,
-    \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_true_fresh\",\"first_seen\"],
-    \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}},{\"term\":{\"triage_out_of_scope\":false}}]}},
-    \"sort\":[{\"triage_true_fresh\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"triage_external_first_seen\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"desc\",\"missing\":\"_last\"}}]
+    \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
+    \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}}]}},
+    \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}}]
   }" 2>/dev/null)" || { warn "ES query failed"; exit 0; }
 
-  local WORK; WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
   printf '%s' "$resp" | jq -rc '.hits.hits[]?._source | [(.host//""),(.url//("https://"+(.host//""))),(.root_domain//""),(.triage_program//""),(.triage_payout_tier//"none"),((.triage_true_fresh//false)|tostring),(.first_seen//"")] | @tsv' 2>/dev/null > "$WORK/cand.tsv"
   [[ -s "$WORK/cand.tsv" ]] || { log "no in-scope-paying candidates"; exit 0; }
 
   local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
   awk -F'\t' -v c="$CUTOFF" '$1>=c' "$SCANNED_FILE" > "$SCANNED_FILE.tmp" 2>/dev/null && mv "$SCANNED_FILE.tmp" "$SCANNED_FILE"
   awk -F'\t' '{print $2}' "$SCANNED_FILE" | sort -u > "$WORK/done.set"
+
+  # Diversity: cap hosts per root_domain so one program (e.g. 15 airbnb locale
+  # subdomains) can't consume the entire 20-host cycle.
+  local MAX_PER_ROOT="${PARAMS_MAX_PER_ROOT:-3}"
+  awk -F'\t' -v m="$MAX_PER_ROOT" '{if(++seen[$3]<=m)print}' "$WORK/cand.tsv" > "$WORK/cand_div.tsv"
+
+  # Filter out hosts that are structurally useless for URL-archive lookups:
+  #   - UUID-named cloud infra (unifi-hosting, etc.) — no public URL history
+  #   - mta-sts.* — MTA-STS policy records, not web apps
+  #   - cdn-*.* / assets.* / static.* — CDN edge nodes
+  #   - *.api.* where the subdomain itself starts with an API path fragment
+  # These consume GAU quota and always return 0; skipping them saves rate limit.
+  grep -vE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.' \
+       "$WORK/cand_div.tsv" \
+  | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' > "$WORK/cand.tsv"
+  rm -f "$WORK/cand_div.tsv"
 
   local picked=0 bulk="$WORK/bulk.ndjson"; : > "$bulk"
   local total_urls=0
@@ -117,8 +139,23 @@ cmd_collect() {
     { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
       [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
     } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
+    local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
+    log "  [$picked/$PARAMS_HOSTS_PER_CYCLE] $host — ${raw_n} param URLs"
+    # Zero-result cooldown: write a short-term entry so the host isn't retried
+    # every 30-min cycle. Entry timestamp is back-dated so it expires after
+    # PARAMS_ZERO_COOLDOWN_HOURS (default 6h) instead of the full 7-day window.
+    # This breaks the GAU rate-limit death-loop where the same 20 hosts are
+    # hammered every cycle because nothing was ever written to the scanned file.
+    if [[ "$raw_n" -eq 0 ]]; then
+      local zero_secs=$(( ${PARAMS_ZERO_COOLDOWN_HOURS:-6} * 3600 ))
+      local short_ts=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 + zero_secs ))
+      printf '%s\t%s\n' "$short_ts" "$host" >> "$SCANNED_FILE"
+      continue
+    fi
     if [[ -x "$QSREPLACE" && -s "$hd/raw" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
     [[ -s "$hd/urls" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
+    # Brief pause between hosts — OTX/urlscan rate-limit quickly under back-to-back requests.
+    sleep "${PARAMS_INTER_HOST_SLEEP:-5}"
     : > "$hd/classified.tsv"
     local cls
     for cls in $PARAMS_CLASSES; do

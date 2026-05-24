@@ -199,6 +199,18 @@ load_runtime_env() {
   else
     POWER_STATE="ac"
   fi
+
+  # Live rate override — written by `recon_ctl rate` / `recon-rate` alias.
+  # Applied AFTER battery check so the value is exact (not further halved).
+  local _rf="$STATE_DIR/rate_override"
+  if [[ -f "$_rf" ]]; then
+    local _ot _or
+    _ot="$(grep '^THREADS=' "$_rf" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+    _or="$(grep '^RATE='   "$_rf" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+    [[ "$_ot" =~ ^[0-9]+$ ]] && export HTTPX_THREADS="$_ot"
+    [[ "$_or" =~ ^[0-9]+$ ]] && export HTTPX_RATE="$_or"
+    POWER_STATE="${POWER_STATE}+rate(${HTTPX_THREADS}t/${HTTPX_RATE}rps)"
+  fi
 }
 
 # ---- Periodic cleanup ----

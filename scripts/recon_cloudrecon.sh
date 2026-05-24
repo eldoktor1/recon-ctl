@@ -174,6 +174,7 @@ log "in-scope-paying: $nscoped"
 
 # ---- 6. Delta vs known hosts, then emit batches ----------------------------
 flock "$KNOWN_HOSTS.lock" sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"   # shared lock w/ discovery+validate
+chmod 644 "$KNOWN_HOSTS" 2>/dev/null || true   # sort -o resets perms via tmp+rename; keep world-readable
 sort -u "$targets".scoped -o "$targets".scoped
 comm -23 "$targets".scoped "$KNOWN_HOSTS" > "$targets".fresh 2>/dev/null || cp "$targets".scoped "$targets".fresh
 

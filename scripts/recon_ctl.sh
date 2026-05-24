@@ -239,13 +239,75 @@ cmd_status() {
   free -h | head -2 | tail -1 | awk '{printf "  total=%s used=%s free=%s available=%s\n",$2,$3,$4,$7}'
 }
 
-cmd_mode() {
-  cat <<EOF
-Mode toggling was removed in v2.5.2. The daemon now runs a single profile:
-multi-worker, 80 threads at 100 rps via Mullvad WireGuard. It auto-throttles
-to 50% concurrency when the laptop is on battery.
-See \`recon_ctl status\` for current power state.
-EOF
+# ---------------------------------------------------------------------------
+# Rate control — live calibration without daemon restart.
+# Writes ~/recon/state/rate_override; daemon reads it each iteration (~30s lag).
+# ---------------------------------------------------------------------------
+_rate_write() {
+  local t="$1" r="$2" label="$3"
+  printf 'THREADS=%s\nRATE=%s\n' "$t" "$r" > "$STATE_DIR/rate_override"
+  printf '  rate → %s: %st / %s rps\n' "$label" "$t" "$r"
+  # Kill running httpx processes immediately so validate.sh restarts them at
+  # the new rate on the next batch. Batches in-flight return to inbox for retry
+  # — nothing is lost. Without this, old httpx runs finish at the old rate
+  # (up to ~6 min per validate cycle).
+  local httpx_pids n=0
+  httpx_pids="$(pgrep -x httpx 2>/dev/null || true)"
+  if [[ -n "$httpx_pids" ]]; then
+    n="$(printf '%s\n' "$httpx_pids" | wc -l | tr -d ' ')"
+    printf '%s\n' "$httpx_pids" | xargs kill -TERM 2>/dev/null || true
+    printf '  killed %s httpx worker(s) — next validate batch uses new rate\n' "$n"
+  else
+    printf '  no httpx running — new rate applies on next validate cycle\n'
+  fi
+}
+
+cmd_rate() {
+  local arg1="${1:-}" arg2="${2:-}"
+  case "$arg1" in
+    ""|show|status)
+      hdr "Rate control"
+      if [[ -f "$STATE_DIR/rate_override" ]]; then
+        local t r
+        t="$(grep '^THREADS=' "$STATE_DIR/rate_override" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+        r="$(grep '^RATE='   "$STATE_DIR/rate_override" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+        printf '  override active : %st / %s rps\n' "$t" "$r"
+      else
+        printf '  no override     : daemon default 150t / 100 rps (halved on battery)\n'
+      fi
+      local last; last="$(grep 'power=' "$LOG_DIR/recon_daemon.log" 2>/dev/null | tail -1 | grep -oE 'threads=[0-9]+' | head -1)"
+      printf '  last daemon log : %s\n' "${last:-unknown}"
+      printf '\n'
+      printf '  presets : light=30t/20rps  easy=60t/40rps  medium=100t/65rps  full=150t/100rps\n'
+      printf '  custom  : recon-rate <threads> <rps>\n'
+      printf '  reset   : recon-rate reset\n'
+      ;;
+    reset|off|default)
+      rm -f "$STATE_DIR/rate_override"
+      printf '  rate override cleared — daemon default (150t/100rps) on next cycle\n'
+      local httpx_pids n=0
+      httpx_pids="$(pgrep -x httpx 2>/dev/null || true)"
+      if [[ -n "$httpx_pids" ]]; then
+        n="$(printf '%s\n' "$httpx_pids" | wc -l | tr -d ' ')"
+        printf '%s\n' "$httpx_pids" | xargs kill -TERM 2>/dev/null || true
+        printf '  killed %s httpx worker(s) — next batch runs at daemon default\n' "$n"
+      fi
+      ;;
+    light)  _rate_write 30  20  "light"  ;;
+    easy)   _rate_write 60  40  "easy"   ;;
+    medium) _rate_write 100 65  "medium" ;;
+    full)   _rate_write 150 100 "full"   ;;
+    [0-9]*)
+      [[ "$arg2" =~ ^[0-9]+$ ]]              || { printf 'usage: recon-rate <threads> <rps>\n' >&2; return 1; }
+      [[ "$arg1" -ge 1 && "$arg1" -le 500 ]] || { printf 'threads must be 1-500\n' >&2; return 1; }
+      [[ "$arg2" -ge 1 && "$arg2" -le 500 ]] || { printf 'rps must be 1-500\n' >&2; return 1; }
+      _rate_write "$arg1" "$arg2" "custom"
+      ;;
+    *)
+      printf 'usage: recon-rate [light|easy|medium|full|reset|<threads> <rps>]\n' >&2
+      return 1
+      ;;
+  esac
 }
 
 cmd_queue() {
@@ -481,6 +543,266 @@ cmd_programs() {
   echo "  TOTAL: $(jq 'length' "$f")"
 }
 
+cmd_fresh() {
+  # Usage: fresh [--new] [--save] [--out <path>] [--all | N]
+  #   --new        only show hosts not returned by a previous fresh query
+  #   --save       write to ~/recon/fresh/fresh_TIMESTAMP.txt
+  #   --out <path> write to a specific file (implies --save)
+  #   --all        fetch every result (no cap)
+  #   N            cap results (default 50)
+  local new_only=0 save=0 n=50 outfile=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --new)       new_only=1; shift ;;
+      --save)      save=1; shift ;;
+      --out|-o)    outfile="$2"; save=1; shift 2 ;;
+      --all)       n=9999; shift ;;
+      [0-9]*)      n="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  # --new: always fetch a large pool so we can filter unseen before capping at N
+  local fetch_n="$n"
+  [[ "$new_only" -eq 1 && "$n" -lt 500 ]] && fetch_n=500
+
+  local FRESH_DIR="$BASE_DIR/fresh"
+  local SEEN_FILE="$STATE_DIR/fresh_seen.txt"
+  mkdir -p "$FRESH_DIR"
+  touch "$SEEN_FILE"
+
+  local ES_PASS_VAL; ES_PASS_VAL="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  local resp
+  resp="$(curl -sS -m30 -u "$ES_USER:$ES_PASS_VAL" \
+    -H 'Content-Type: application/json' \
+    -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
+      \"size\": $fetch_n,
+      \"_source\": [\"host\",\"url\",\"triage_priority\",\"triage_score\",\"triage_signals\",
+                    \"triage_program\",\"triage_payout_tier\",\"triage_kev_match\",\"first_seen\"],
+      \"query\": {\"bool\": {\"filter\": [
+        {\"term\": {\"triage_true_fresh\": true}},
+        {\"term\": {\"triage_pays\": true}},
+        {\"term\": {\"triage_in_scope\": true}},
+        {\"terms\": {\"triage_priority\": [\"P0\",\"P1\"]}}
+      ], \"must_not\": [{\"term\": {\"triage_out_of_scope\": true}}]}},
+      \"sort\": [{\"triage_score\": {\"order\": \"desc\"}},{\"first_seen\": {\"order\": \"desc\"}}]
+    }" 2>/dev/null)"
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+
+  # Format rows: icon | priority | score | tier | host | program | signals | date
+  local rows; rows="$(printf '%s' "$resp" | jq -r '
+    .hits.hits[]?._source |
+    [
+      (if .triage_kev_match then "KEV" elif .triage_priority=="P0" then "P0" else "P1" end),
+      (.triage_priority // "?"),
+      ((.triage_score // 0) | tostring),
+      (.triage_payout_tier // "?"),
+      (.host // "?"),
+      (.triage_program // "?"),
+      ((.triage_signals // []) | join(",")),
+      (.first_seen // "" | split("T")[0])
+    ] | @tsv
+  ' 2>/dev/null)"
+
+  # --new: filter to hosts not in seen file, cap at N after filtering
+  local new_hosts="" shown_rows="" count=0
+  if [[ "$new_only" -eq 1 ]]; then
+    while IFS=$'\t' read -r icon pri score tier host prog sigs date; do
+      [[ -z "$host" ]] && continue
+      [[ "$count" -ge "$n" ]] && break
+      if ! grep -qxF "$host" "$SEEN_FILE"; then
+        shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}"$'\n'
+        new_hosts="${new_hosts}${host}"$'\n'
+        count=$(( count + 1 ))
+      fi
+    done <<< "$rows"
+  else
+    shown_rows="$rows"
+    while IFS=$'\t' read -r icon pri score tier host prog sigs date; do
+      [[ -n "$host" ]] && new_hosts="${new_hosts}${host}"$'\n'
+    done <<< "$rows"
+  fi
+
+  local label="True-Fresh P0/P1"
+  [[ "$new_only" -eq 1 ]] && label="True-Fresh P0/P1 — NEW ONLY (unseen)"
+  hdr "$label"
+
+  local out
+  out="$(printf '%s' "$shown_rows" | awk -F'\t' 'NF{
+    icon = ($1=="KEV") ? "🔴" : ($1=="P0") ? "⚡" : "▸"
+    printf "%-3s %-3s %-4s %-8s %-55s %-25s %s  %s\n", icon,$2,$3,$4,$5,$6,$7,$8
+  }')"
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$out"
+  else
+    echo "  (no results)"
+  fi
+
+  local shown_n=0
+  [[ "$new_only" -eq 1 ]] && shown_n="$count" || shown_n="$(printf '%s' "$shown_rows" | awk 'NF' | wc -l | tr -d ' ')"
+  printf '\n  showing: %s  |  total true-fresh P0/P1 in ES: %s\n' "$shown_n" "$total"
+
+  # Record newly seen hosts
+  if [[ -n "$new_hosts" ]]; then
+    printf '%s' "$new_hosts" >> "$SEEN_FILE"
+    sort -u "$SEEN_FILE" -o "$SEEN_FILE"
+  fi
+
+  # --save / --out: write txt
+  if [[ "$save" -eq 1 ]]; then
+    local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    [[ -z "$outfile" ]] && outfile="$FRESH_DIR/fresh_${ts}.txt"
+    mkdir -p "$(dirname "$outfile")"
+    {
+      printf '# recon-fresh %s  (total_in_es=%s shown=%s new_only=%s)\n' \
+        "$ts" "$total" "$shown_n" "$new_only"
+      printf '%s\n' "$shown_rows" | awk -F'\t' 'NF{
+        printf "%-3s %-4s %-8s %-55s %-25s %s  %s\n", $2,$3,$4,$5,$6,$7,$8
+      }'
+    } > "$outfile"
+    printf '  saved → %s\n' "$outfile"
+  fi
+}
+
+cmd_tech() {
+  # Usage: tech <tech[,tech2,...]> [--apex] [--pays] [--no-save] [--out <path>] [N]
+  #   <tech>       technology name(s) — comma or space separated
+  #                e.g.  wordpress   nginx,apache   "F5 BIG-IP"
+  #   --apex       exclude subdomains — only hosts where host == root_domain
+  #   --pays       limit to in-scope paying targets only
+  #   --no-save    do NOT write txt file (default: always saves)
+  #   --out <path> write to a specific file instead of ~/recon/tech/
+  #   N            result cap (default 200)
+  local apex=0 pays=0 nosave=0 n=200 outfile=""
+  local techs=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --apex)      apex=1; shift ;;
+      --pays)      pays=1; shift ;;
+      --no-save)   nosave=1; shift ;;
+      --out|-o)    outfile="$2"; shift 2 ;;
+      [0-9]*)      n="$1"; shift ;;
+      *)
+        # split comma-separated values and add each
+        IFS=',' read -ra _t <<< "$1"
+        techs+=("${_t[@]}")
+        shift ;;
+    esac
+  done
+  if [[ ${#techs[@]} -eq 0 ]]; then
+    echo "Usage: recon_ctl tech <tech[,tech2]> [--apex] [--pays] [--no-save] [N]"
+    echo "       recon-tech wordpress"
+    echo "       recon-tech nginx,apache --apex --pays 50"
+    return 1
+  fi
+
+  local TECH_DIR="$BASE_DIR/tech"
+  mkdir -p "$TECH_DIR"
+  local ES_PASS_VAL; ES_PASS_VAL="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+
+  # Build a should[OR] clause for each tech:
+  #   (a) wildcard on `tech` field — case-insensitive, matches versioned values e.g. "WordPress:5.7"
+  #   (b) term on `triage_signals` — e.g. "tech:wordpress" (triage may detect it even when httpx misses)
+  local should_clauses=""
+  local t
+  for t in "${techs[@]}"; do
+    local tl; tl="$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$should_clauses" ]] && should_clauses="$should_clauses,"
+    should_clauses="${should_clauses}
+      {\"wildcard\":{\"tech\":{\"value\":\"*${tl}*\",\"case_insensitive\":true}}},
+      {\"term\":{\"triage_signals\":\"tech:${tl}\"}}"
+  done
+
+  # Extra mandatory filters
+  local extra_filters=""
+  [[ "$pays" -eq 1 ]] && extra_filters=',{"term":{"triage_pays":true}},{"term":{"triage_in_scope":true}}'
+
+  local resp
+  resp="$(curl -sS -m30 -u "$ES_USER:$ES_PASS_VAL" \
+    -H 'Content-Type: application/json' \
+    -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
+      \"size\": $n,
+      \"_source\": [\"host\",\"root_domain\",\"url\",\"tech\",\"triage_priority\",\"triage_score\",
+                    \"triage_signals\",\"triage_program\",\"triage_payout_tier\",\"triage_pays\",
+                    \"triage_in_scope\",\"triage_true_fresh\",\"first_seen\"],
+      \"query\": {\"bool\": {
+        \"filter\": [
+          {\"bool\":{\"should\":[$should_clauses],\"minimum_should_match\":1}}
+          $extra_filters
+        ],
+        \"must_not\": [{\"term\":{\"triage_out_of_scope\":true}}]
+      }},
+      \"sort\": [{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},
+                 {\"first_seen\":{\"order\":\"desc\"}}]
+    }" 2>/dev/null)"
+
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+  local label="tech:$(IFS=','; printf '%s' "${techs[*]}")"
+  [[ "$apex" -eq 1 ]] && label="$label (apex only)"
+  [[ "$pays" -eq 1 ]] && label="$label (paying)"
+  hdr "Hosts matching $label"
+
+  # Format and optionally filter apex
+  local rows; rows="$(printf '%s' "$resp" | jq -r '
+    .hits.hits[]?._source |
+    [
+      (.host // ""),
+      (.root_domain // ""),
+      (.triage_priority // "-"),
+      ((.triage_score // 0) | tostring),
+      (.triage_payout_tier // "-"),
+      (.triage_program // "-"),
+      ((.tech // []) | map(select(length>0)) | join(",")),
+      (if .triage_true_fresh then "⚡fresh" else "" end),
+      (.first_seen // "" | split("T")[0])
+    ] | @tsv
+  ' 2>/dev/null)"
+
+  local out_lines=() host_list=()
+  while IFS=$'\t' read -r host root pri score tier prog tech_list tfresh fdate; do
+    [[ -z "$host" ]] && continue
+    # --apex: skip if host has more labels than root_domain (i.e. is a subdomain)
+    if [[ "$apex" -eq 1 ]]; then
+      # count dots: subdomain has more dots than root
+      local hdots rdots
+      hdots=$(tr -cd '.' <<< "$host" | wc -c)
+      rdots=$(tr -cd '.' <<< "$root" | wc -c)
+      [[ "$hdots" -gt "$rdots" ]] && continue
+    fi
+    local fresh_tag=""
+    [[ "$tfresh" == "fresh" ]] && fresh_tag="⚡"
+    out_lines+=("$(printf '%-3s %-3s %-4s %-8s %-50s %-22s %-30s %s' \
+      "$fresh_tag" "$pri" "$score" "$tier" "$host" "$prog" "$tech_list" "$fdate")")
+    host_list+=("$host")
+  done <<< "$rows"
+
+  local shown=${#out_lines[@]}
+  if [[ "$shown" -eq 0 ]]; then
+    echo "  (no results)"
+  else
+    printf '%s\n' "${out_lines[@]}"
+  fi
+  printf '\n  showing: %s  |  total matched in ES: %s\n' "$shown" "$total"
+
+  # Save txt (unless --no-save)
+  if [[ "$nosave" -eq 0 && "$shown" -gt 0 ]]; then
+    local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    if [[ -z "$outfile" ]]; then
+      local slug; slug="$(printf '%s' "${techs[*]}" | tr ' /' '__')"
+      outfile="$TECH_DIR/tech_${slug}_${ts}.txt"
+    fi
+    mkdir -p "$(dirname "$outfile")"
+    {
+      printf '# tech query: %s  apex=%s pays=%s  %s  (es_total=%s shown=%s)\n' \
+        "$(IFS=','; printf '%s' "${techs[*]}")" "$apex" "$pays" "$ts" "$total" "$shown"
+      printf '%s\n' "${out_lines[@]}"
+      printf '\n# hosts only:\n'
+      printf '%s\n' "${host_list[@]}"
+    } > "$outfile"
+    printf '  saved → %s\n' "$outfile"
+  fi
+}
+
 cmd_confirmed() {
   hdr "Latest confirmed nuclei findings"
   local f="$HOME/recon/nuclei/confirmed.jsonl"
@@ -628,52 +950,77 @@ cmd_inspect() {
 }
 
 usage() {
-cat <<EOF
-recon_ctl — pipeline control
+  # Alias-centric help — shown by recon-help
+  local B='\033[1m' C='\033[1;36m' Y='\033[1;33m' G='\033[0;32m' R='\033[0m'
+  printf "${C}recon-help — alias quick reference${R}\n\n"
 
-  start                  Launch daemon
-  stop                   Stop daemon + children
-  status                 Daemon, queue, ES, FB summary
-  mode                   (deprecated) single config in v2.5.2+
-  queue                  Show queue counts
-  logs [N]               Tail daemon log (default 50)
-  top [N]                Top N triage targets (default 15)
-  takeovers              Show CLAIM file (high-confidence takeovers)
-  watching               Show WATCH file (medium-confidence, periodic recheck)
-  dupes [pattern]        Show submission history (filter by host pattern)
-  submit <host> <class>  Log a submission (dampens future scoring)
-  health                 Tool versions + status
-  space                  Disk usage
-  clean                  Archive stale sent spool and old done/
-  clean-start [--yes]    Archive stale active views for a clean restart
-  reset-queue            Archive and clear queue (with confirmation)
+  printf "${B}── DAEMON ──────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-start${R}                    Launch the pipeline daemon\n"
+  printf "  ${G}recon-stop${R}                     Stop daemon + all child processes\n"
+  printf "  ${G}recon-status${R}                   Daemon, queue, ES and firstblood summary\n"
+  printf "  ${G}recon-logs${R}                     Live tail of daemon log\n"
+  printf "  ${G}recon-health${R}                   Tool versions and module status\n"
+  printf "  ${G}recon-queue${R}                    Queue depth per lane\n"
+  printf "  ${G}recon-space${R}                    Disk usage breakdown\n\n"
 
-  V2 commands:
-  kev                    Show KEV-matched targets in your data
-  scope <host>           Check if a host is in any program scope
-  programs               Summary of programs in scope DB
-  confirmed              Latest confirmed nuclei findings
-  vuln [status|top|refresh]
-                         Passive vuln intelligence and race queue
-  ai                     AI review status and pending packet counts
-  fp <host> <tmpl>       Mark a nuclei finding as false positive
-  ignore <host> [reason] Penalise host in triage for 7 days
-  v2 status              V2 module health
-  v2 enable <mod>        Re-enable killed module (scope|cve|vuln_feed|nuclei)
-  v2 disable <mod> [r]   Manually disable module
-  v2 refresh-scope       Run scope DB now
-  v2 refresh-cve         Run CVE intel now
-  v2 refresh-vuln        Run passive vuln feed now
-  v2 scan-now            Run nuclei pass now
-  inspect <host>         Full triage view (ES + scope + KEV + live probe)
-EOF
+  printf "${B}── RATE / MODE ─────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-rate${R} [preset|N M]        Live rate control (no restart needed)\n"
+  printf "             presets: light easy medium full reset\n"
+  printf "             raw:     recon-rate 80 60\n"
+  printf "  ${G}recon-boost${R}                    Switch to boost/power mode\n"
+  printf "  ${G}recon-browse${R}                   Switch to light browse mode\n\n"
+
+  printf "${B}── TARGETS ─────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-top${R} [N]                  Top N triage leads (default 15)\n"
+  printf "  ${G}recon-fresh${R} [--new] [--save] [--all|N] [--out <file>]\n"
+  printf "                             True-fresh P0/P1 in-scope targets from ES\n"
+  printf "    ${Y}recon-fresh-new${R}              Only hosts not seen in a previous query\n"
+  printf "    ${Y}recon-fresh-save${R}             Top 50, auto-saved to ~/recon/fresh/\n"
+  printf "    ${Y}recon-fresh-all${R}              All true-fresh P0/P1 (no cap)\n"
+  printf "  ${G}recon-tech${R} <name[,name2]> [--apex] [--pays] [--no-save] [--out <file>] [N]\n"
+  printf "                             All hosts matching technology (always saves)\n"
+  printf "             --apex         Root domains only (no subdomains)\n"
+  printf "             --pays         In-scope paying targets only\n"
+  printf "             --out <file>   Save to specific file\n"
+  printf "             e.g.  recon-tech wordpress --apex --pays\n"
+  printf "                   recon-tech \"F5 BigIP\" --out ~/Desktop/f5.txt\n"
+  printf "                   recon-tech nginx,apache 50\n"
+  printf "  ${G}recon-kev${R}                      KEV-matched targets in your data\n"
+  printf "  ${G}recon-confirmed${R}                Latest confirmed nuclei findings\n"
+  printf "  ${G}recon-vuln${R} [status|top|refresh] Passive vuln intelligence queue\n\n"
+
+  printf "${B}── SCOPE ───────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-scope${R} <host>             Check host against all program scopes\n"
+  printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
+  printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
+  printf "             classes: sqli xss ssrf lfi ssti cmdi redirect idor\n\n"
+
+  printf "${B}── TAKEOVERS ───────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-takeovers${R}                High-confidence CLAIM file\n"
+  printf "  ${G}recon-watching${R}                 Medium-confidence WATCH file (recheck queue)\n\n"
+
+  printf "${B}── ACTIONS ─────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-submit${R} <host> <class>    Log a submission (dampens future scoring)\n"
+  printf "  ${G}recon-ignore${R} <host> [reason]   Penalise host in triage for 7 days\n"
+  printf "  ${G}recon-fp${R} <host> <template>     Mark nuclei finding as false positive\n"
+  printf "  ${G}recon-inspect${R} <host>           Full triage view: ES + scope + KEV + probe\n"
+  printf "  ${G}recon-dupes${R} [pattern]          Submission history (filter by host pattern)\n"
+  printf "  ${G}recon-ai${R}                       AI review layer status + packet counts\n\n"
+
+  printf "${B}── MAINTENANCE ─────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-clean${R}                    Archive stale spool + old done/ files\n"
+  printf "  ${G}recon-v2${R} <subcmd>              V2 module control\n"
+  printf "             status                 Module health overview\n"
+  printf "             enable/disable <mod>   scope | cve | vuln_feed | nuclei\n"
+  printf "             refresh-scope/cve/vuln Run a module pass now\n"
+  printf "             scan-now               Run nuclei pass immediately\n"
 }
 
 case "${1:-}" in
   start)        cmd_start ;;
   stop)         cmd_stop ;;
   status|st)    cmd_status ;;
-  mode)         shift; cmd_mode "$@" ;;
+  rate)         shift; cmd_rate "$@" ;;
   queue|q)      cmd_queue ;;
   logs)         shift; cmd_logs "$@" ;;
   top)          shift; cmd_top "$@" ;;
@@ -692,6 +1039,8 @@ case "${1:-}" in
   programs)     cmd_programs ;;
   confirmed)    cmd_confirmed ;;
   vuln)         shift; cmd_vuln "$@" ;;
+  fresh)        shift; cmd_fresh "$@" ;;
+  tech)         shift; cmd_tech "$@" ;;
   params)       shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
   ai)           cmd_ai ;;
   fp)           shift; cmd_fp "$@" ;;
