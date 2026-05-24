@@ -260,7 +260,15 @@ supervise_loop() {
     load_runtime_env  # so children always see fresh env (re-checks AC/battery)
     local sleep_secs="${!sleep_var}"
 
-    log "[$name] starting iteration (power=$POWER_STATE threads=$HTTPX_THREADS)"
+    # vpnguard logs its own state changes; logging every 20s here is pure noise.
+    # Scanner loops get threads/rate context; lightweight loops get nothing extra.
+    case "$name" in
+      validate|validate-fast|discovery|scope-watch|nuclei-v21|bounty-scan|deep-scan|active-checks|js-scanner|cloudrecon|dast|params|vuln-feed)
+        log "[$name] starting (power=$POWER_STATE threads=$HTTPX_THREADS rate=$HTTPX_RATE)" ;;
+      vpnguard) ;;
+      *) log "[$name] starting" ;;
+    esac
+
     if "$@"; then
       backoff=10
     else
