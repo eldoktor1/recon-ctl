@@ -183,10 +183,20 @@ cmd_collect() {
   # dedup per-class files
   local cls
   for cls in $PARAMS_CLASSES; do [[ -f "$PARAMS_DIR/$cls.txt" ]] && sort -u "$PARAMS_DIR/$cls.txt" -o "$PARAMS_DIR/$cls.txt" 2>/dev/null || true; done
-  # bulk index to ES
+  # bulk index to ES — capture response to get real indexed count and surface errors
   local indexed=0
   if [[ -s "$bulk" ]]; then
-    es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" --data-binary @"$bulk" >/dev/null 2>&1 && indexed="$(grep -c '^{"index"' "$bulk")"
+    local bulk_resp
+    bulk_resp="$(es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" \
+      --data-binary @"$bulk" 2>/dev/null)"
+    if [[ -n "$bulk_resp" ]]; then
+      indexed="$(printf '%s' "$bulk_resp" | jq '[.items[]?.index | select(.result=="created" or .result=="updated")] | length' 2>/dev/null || echo 0)"
+      # Surface any per-doc errors so they show up in the daemon log
+      local errs; errs="$(printf '%s' "$bulk_resp" | jq -r '[.items[]?.index | select(.error) | .error.reason] | unique | .[:3] | join(" | ")' 2>/dev/null)"
+      [[ -n "$errs" ]] && warn "bulk index errors: $errs"
+    else
+      warn "bulk index: no response from ES (connection issue?)"
+    fi
   fi
   log "collected $picked host(s), $total_urls param-URLs, indexed $indexed catalog entries"
 }
@@ -194,7 +204,14 @@ cmd_collect() {
 # ---------------------------------------------------------------------------
 cmd_list() {
   local cls="${1:-}" n="${2:-200}"
-  [[ -z "$cls" ]] && { echo "usage: recon_params.sh list <class> [N]  (classes: $PARAMS_CLASSES)" >&2; exit 2; }
+  local cls_oneline; cls_oneline="$(printf '%s' "$PARAMS_CLASSES" | tr '\n' ' ' | sed 's/ $//')"
+  if [[ -z "$cls" ]]; then
+    printf 'usage: recon-params <class> [N]\n' >&2
+    printf 'classes: %s\n' "$cls_oneline" >&2
+    exit 2
+  fi
+  # If N looks non-numeric, treat it as not provided
+  [[ "$n" =~ ^[0-9]+$ ]] || n=200
   es_up || { warn "ES not reachable"; exit 1; }
   local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
     \"size\": $n,
@@ -204,7 +221,7 @@ cmd_list() {
   }" 2>/dev/null)" || { warn "query failed"; exit 1; }
   local hits; hits="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
   printf '%s\n' "$resp" | jq -r '.hits.hits[]?._source | ((if .true_fresh then "⚡" else "  " end)) + " [" + (.payout_tier//"?") + "] " + (.program//"?") + "  " + .url' 2>/dev/null
-  echo "--- $cls: showing up to $n of $hits in-scope-paying candidate URL(s) ---" >&2
+  printf -- '--- %s: %s of %s in-scope-paying URL(s) ---\n' "$cls" "$(( hits < n ? hits : n ))" "$hits" >&2
 }
 
 case "${1:-}" in
