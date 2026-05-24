@@ -44,7 +44,7 @@ find_live_outputs() {
 main() {
   log "=== hot_seed cycle ==="
   local outputs; outputs="$(find_live_outputs)"
-  [[ -z "$outputs" ]] && { log "No live subfinder/assetfinder processes"; exit 0; }
+  [[ -z "$outputs" ]] && exit 0
 
   local tmp; tmp="$(mktemp)"
   : > "$tmp"
