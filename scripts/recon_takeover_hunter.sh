@@ -55,9 +55,7 @@ RESOLVERS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 STABILITY_DELAY="${STABILITY_DELAY:-60}"
 
 # Discord
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
-[[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
-  DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
+# Discord: takeover candidates → #takeovers via discord_hook() (recon_net.sh)
 
 # Behaviour toggles
 NOTIFY_HIGH="${NOTIFY_HIGH:-1}"        # fire Discord on HIGH/CRITICAL
@@ -315,7 +313,7 @@ classify_confidence() {
 # =============================================================================
 notify_takeover() {
   local host="$1" idx="$2" confidence="$3" cname="$4" stages="$5" notes="$6"
-  [[ -z "$DISCORD_WEBHOOK" ]] && return 0
+  [[ -z "$(discord_hook takeovers)" ]] && return 0
 
   local svc="${FP_SVC[$idx]}"
   local diff="${FP_DIFF[$idx]}"
@@ -353,7 +351,7 @@ notify_takeover() {
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson color "$color" \
     '{
-      content: ("**FIRST-BLOOD CANDIDATE** — claim within minutes if " + $conf + " confidence"),
+      content: ("@here 🩸 **FIRST-BLOOD CANDIDATE** — claim within minutes if " + $conf + " confidence"),
       embeds: [{
         title: $title,
         color: $color,
@@ -374,9 +372,13 @@ notify_takeover() {
       }]
     }')"
 
-  curl_net -fsS -m 15 -H 'Content-Type: application/json' \
-    -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 \
-    || warn "Discord notify failed for $host"
+  # Return the real delivery status so the caller only marks the host SEEN
+  # once the alert is confirmed delivered (no silent loss on a failed POST).
+  if discord_post "$(discord_hook takeovers)" "$payload"; then
+    return 0
+  fi
+  warn "Discord notify failed for $host (left unseen for retry next cycle)"
+  return 1
 }
 
 # =============================================================================
@@ -493,17 +495,25 @@ probe_host() {
 
   case "$confidence" in
     CRITICAL|HIGH|MEDIUM-HIGH)
-      # Write to CLAIM file + notify
+      # Persist the finding immediately (CLAIM_FILE is the durable record, never
+      # lost), but DEFER marking the host SEEN until the alert is confirmed
+      # delivered — otherwise a failed Discord POST would permanently suppress
+      # the first-blood ping. If notifications are disabled, mark SEEN at once.
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
         >> "$CLAIM_FILE"
       printf '%s\t%s\t%s\tCLAIM\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
-      echo "$host" >> "$SEEN_FILE"
 
       log "🚨 $confidence takeover candidate: $host ($svc, $stages_str)"
 
       if [[ "$NOTIFY_HIGH" == "1" ]]; then
-        notify_takeover "$host" "$idx" "$confidence" "$cname" "$stages_str" "$notes"
+        if notify_takeover "$host" "$idx" "$confidence" "$cname" "$stages_str" "$notes"; then
+          echo "$host" >> "$SEEN_FILE"
+        else
+          log "  alert undelivered for $host — left unseen, will retry next cycle"
+        fi
+      else
+        echo "$host" >> "$SEEN_FILE"
       fi
       ;;
     MEDIUM)

@@ -267,11 +267,10 @@ supervise_loop() {
   log "[$name] exiting (shutdown)"
 }
 
-# ---- Wrappers (each isolates env + propagates Discord webhook) ----
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
-[[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
-  DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
-export DISCORD_WEBHOOK
+# ---- Wrappers (each isolates env) ----
+# Discord delivery is per-channel via discord_hook() in recon_net.sh, which
+# reads ~/.recon_discord_<channel> at call time. No global webhook env is
+# exported here anymore (the old ~/.recon_discord / _kev scheme is retired).
 export PATH="$PATH:$HOME/go/bin:/usr/local/bin:/usr/local/go/bin"
 
 
@@ -340,6 +339,13 @@ run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT"
 DAST_SCRIPT="${DAST_SCRIPT:-$(script_path recon_dast.sh)}"
 DAST_INTERVAL="${DAST_INTERVAL:-1800}"
 run_dast() { v21_killed dast && return 0; [[ -f "$DAST_SCRIPT" ]] && run_scanner bash "$DAST_SCRIPT" || true; }
+
+# sus_params targeting catalog (recon_params.sh collect): crawls in-scope-paying
+# hosts fresh-first, gf-classifies params, builds the recon_params ES index +
+# per-class files for `recon_ctl params <class>`. Target-facing → run_scanner.
+PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
+PARAMS_INTERVAL="${PARAMS_INTERVAL:-1800}"
+run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
 
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
@@ -426,6 +432,7 @@ run_discord_bot() {
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
   supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &
+  supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
 
     # Long-running — supervised with simple restart loops
   (

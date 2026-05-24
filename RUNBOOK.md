@@ -414,7 +414,11 @@ Inspect:
 | `/etc/sudoers.d/recon-safe-preflight` | Narrow NOPASSWD rule for preflight only |
 | `C:\recon\start_recon_hidden.vbs` | Hidden Windows WSL startup wrapper |
 | `~/.recon_es_pass` | ES password |
-| `~/.recon_discord` | Discord webhook URL |
+| `~/.recon_discord_takeovers` | Webhook → #takeovers channel (first-blood candidates, @here) |
+| `~/.recon_discord_fresh` | Webhook → #fresh channel (true-fresh findings, @here) |
+| `~/.recon_discord_vulns` | Webhook → #vulns channel (DAST / confirmed vulns) |
+| `~/.recon_discord_cve` | Webhook → #cve-kev channel (nuclei CVE/KEV confirmations) |
+| `~/.recon_discord_health` | Webhook → #health channel (pipeline status, killswitch alerts) |
 | `~/.recon_discord_bot` | Discord bot token |
 | `~/.recon_discord_allowed_uid` | Allowed Discord user ID |
 | `~/.recon_discord_channel_id` | Allowed Discord channel ID |

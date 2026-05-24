@@ -26,6 +26,7 @@ log()  { printf '[%s DAST] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s DAST WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true   # robust discord_post()
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
@@ -40,7 +41,7 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-$(cat "$HOME/.recon_discord" 2>/dev/null || true)}"
+# Discord: DAST findings → #vulns via discord_hook() (recon_net.sh, per-channel)
 
 # Tool paths (prefer go/bin)
 GOBIN="$HOME/go/bin"
@@ -152,12 +153,13 @@ log "selected $ntargets host(s) for DAST ($nfresh from fresh engine, cooldown ${
 
 # ---- Discord notify helper -------------------------------------------------
 notify_discord() {
-  [[ -n "$DISCORD_WEBHOOK" ]] || return 0
+  local wh; wh="$(discord_hook vulns)"
+  [[ -z "$wh" ]] && return 0
   local title="$1" desc="$2"
   local payload
   payload="$(jq -nc --arg t "$title" --arg d "$desc" \
     '{embeds:[{title:$t,description:$d,color:15158332,footer:{text:"recon_v2 · DAST"}}]}')"
-  curl -sS -m 10 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+  discord_post "$wh" "$payload" || true
 }
 
 # ---- nuclei -dast support detection (once) ---------------------------------

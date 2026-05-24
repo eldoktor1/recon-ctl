@@ -1,9 +1,13 @@
 # Secrets
 .recon_es_pass
-.recon_discord
+.recon_discord*
 .recon_mode
 *.env
 .env
+
+# Local tooling / editor cruft (not pipeline code)
+.claude/
+*.code-workspace
 
 # Runtime state
 recon/state/

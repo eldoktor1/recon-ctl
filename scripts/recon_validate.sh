@@ -242,10 +242,16 @@ process_batch() {
   local results; results="$(wc -l < "$httpx_out" | tr -d ' ')"
   log "  httpx: $results live hosts found"
 
-  # Mark all probed hosts as known (live OR not — they got tested)
-  cat "$batch" >> "$KNOWN_HOSTS.tmp" 2>/dev/null || true
-  sort -u "$KNOWN_HOSTS.tmp" "$KNOWN_HOSTS" -o "$KNOWN_HOSTS" 2>/dev/null
-  rm -f "$KNOWN_HOSTS.tmp"
+  # Mark all probed hosts as known (live OR not — they got tested). Serialise
+  # with discovery/cloudrecon (which also rewrite known_hosts under different
+  # locks) AND with the other validate lane via a shared known_hosts.lock; use a
+  # private mktemp + atomic mv so two lanes never clobber a shared .tmp.
+  (
+    flock 200
+    _kht="$(mktemp)"
+    cat "$batch" "$KNOWN_HOSTS" 2>/dev/null | sort -u > "$_kht" && mv -f "$_kht" "$KNOWN_HOSTS"
+    rm -f "$_kht"
+  ) 200>"$KNOWN_HOSTS.lock"
 
   if [[ "$results" -gt 0 ]]; then
     # ---- Normalize for ES ----
@@ -375,7 +381,7 @@ main() {
   if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
     log "Chaining to triage"
     ( DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
-      INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 1200 bash "$TRIAGE_SCRIPT" \
+      INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
       || warn "triage exited non-zero" )
   fi
 }

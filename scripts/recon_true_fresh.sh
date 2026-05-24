@@ -555,10 +555,21 @@ fi
 WORK="$(mktemp)"
 trap 'rm -f "$WORK" "$WORK.scoped" "$WORK.scoped_s" "$WORK.fresh" "$WORK.candidates" "$WORK.seen"' EXIT
 
-# Cap how many we process per flush
-head -n "$MAX_PER_FLUSH" "$HOLDING_FILE" > "$WORK"
-# Atomically rotate: anything appended after the cp is preserved
-{ flock 9; : > "$HOLDING_FILE"; } 2>/dev/null || : > "$HOLDING_FILE"
+# Atomic rotate of the holding file. The gungnir reader appends to holding under
+# its own fcntl lock (a DIFFERENT lock than this script's fd 9), so the old
+# `head + : > holding` truncate raced the reader and dropped any line appended
+# between the head and the truncate. `mv` is atomic, and because the reader
+# reopens holding BY PATH on its next append it transparently starts a fresh
+# file — nothing is lost. Keep any remainder beyond MAX_PER_FLUSH for next cycle.
+if mv -f "$HOLDING_FILE" "$WORK.all" 2>/dev/null; then
+  : > "$HOLDING_FILE"
+  head -n "$MAX_PER_FLUSH" "$WORK.all" > "$WORK"
+  tail -n +"$(( MAX_PER_FLUSH + 1 ))" "$WORK.all" >> "$HOLDING_FILE" 2>/dev/null || true
+  rm -f "$WORK.all"
+else
+  head -n "$MAX_PER_FLUSH" "$HOLDING_FILE" > "$WORK"
+  : > "$HOLDING_FILE"
+fi
 
 # Extract candidate hosts (dedupe in-memory)
 jq -r '.host // empty' "$WORK" 2>/dev/null | awk 'NF && !seen[$0]++' > "$WORK.candidates"

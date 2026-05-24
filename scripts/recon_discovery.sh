@@ -220,7 +220,10 @@ emit_batches() {
 
   cat "$CHAOS_CACHE" "${SUB_CACHE:-/dev/null}" "${ASSET_CACHE:-/dev/null}" 2>/dev/null \
     | sort -u > "$all"
-  sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"
+  # Shared lock: discovery, validate AND cloudrecon all rewrite known_hosts under
+  # their own (different) per-loop locks, so without this they race and lose
+  # entries. flock on a dedicated known_hosts.lock serialises the writers.
+  flock "$KNOWN_HOSTS.lock" sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"
   comm -23 "$all" "$KNOWN_HOSTS" > "$delta" || true
 
   filter_wildcards "$delta" "$filtered"

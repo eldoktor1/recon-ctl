@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# =============================================================================
+# recon_params.sh — sus_params targeting catalog (g0ldencybersec gf-patterns)
+#
+# A queryable inventory of IN-SCOPE-PAYING URLs-with-parameters, classified by
+# vuln class, so you can pull "all in-scope SQLi targets" / "all XSS targets" on
+# demand — for manual hunting or feeding sqlmap/dalfox/nuclei.
+#
+#   collect        crawl in-scope-paying hosts (FRESH-FIRST), gf-classify their
+#                  parameterised URLs, store per-class files + ES recon_params
+#                  index. Bounded per run; 7d per-host cooldown. (daemon loop /
+#                  manual). Target-facing → run as reconrun via Mullvad.
+#   list <class> [N]   print in-scope param-URLs for a class, fresh-first,
+#                  tagged with program / tier / (FRESH). Read-only.
+#
+# Classes (from ~/.gf): sqli xss ssrf lfi ssti cmdi redirect idor
+# =============================================================================
+set -uo pipefail
+IFS=$'\n\t'
+
+log()  { printf '[%s PARAMS] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
+warn() { printf '[%s PARAMS WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
+BASE_DIR="${BASE_DIR:-$HOME/recon}"
+STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
+PARAMS_DIR="$BASE_DIR/params"
+LOCK_FILE="$STATE_DIR/params.lock"
+
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"
+ES_USER="${ES_USER:-elastic}"
+ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+INDEX_NAME="${INDEX_NAME:-recon_alive}"
+PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
+
+GOBIN="$HOME/go/bin"
+KATANA="${KATANA:-$GOBIN/katana}"; GAU="${GAU:-$GOBIN/gau}"
+GF="${GF:-$GOBIN/gf}"; QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
+
+# Classify against EVERY gf pattern installed in ~/.gf — not a fixed list — so
+# adding a new pattern automatically extends the catalog. Override with PARAMS_CLASSES.
+if [[ -z "${PARAMS_CLASSES:-}" ]]; then
+  PARAMS_CLASSES="$(ls "$HOME/.gf"/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')"
+  [[ -z "${PARAMS_CLASSES// }" ]] && PARAMS_CLASSES="sqli xss ssrf lfi ssti cmdi rce redirect idor lfi img-traversal"
+fi
+PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-20}"
+PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-400}"
+KATANA_DEPTH="${KATANA_DEPTH:-2}"
+KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
+KATANA_RL="${KATANA_RL:-15}"
+GAU_TIMEOUT="${GAU_TIMEOUT:-60}"
+MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
+SCANNED_FILE="$STATE_DIR/.params_scanned.tsv"
+
+mkdir -p "$PARAMS_DIR" "$STATE_DIR"
+command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
+
+es()  { curl -sS -m30 -u "$ES_USER:$ES_PASS" "$@"; }
+es_up() { local c; c="$(curl -sS -o /dev/null -m5 -u "$ES_USER:$ES_PASS" -w '%{http_code}' "$ES_URL" 2>/dev/null || echo 000)"; [[ "$c" == "200" ]]; }
+
+ensure_index() {
+  es -fsS "$ES_URL/$PARAMS_INDEX" >/dev/null 2>&1 && return 0
+  es -fsS -X PUT "$ES_URL/$PARAMS_INDEX" -H 'Content-Type: application/json' -d '{
+    "mappings":{"properties":{
+      "url":{"type":"keyword","ignore_above":4096},
+      "host":{"type":"keyword"},
+      "root_domain":{"type":"keyword"},
+      "vuln_classes":{"type":"keyword"},
+      "program":{"type":"keyword","ignore_above":512},
+      "payout_tier":{"type":"keyword"},
+      "true_fresh":{"type":"boolean"},
+      "first_seen":{"type":"date"},
+      "cataloged_at":{"type":"date"}
+    }}}' >/dev/null 2>&1 || warn "could not create $PARAMS_INDEX index"
+}
+
+# ---------------------------------------------------------------------------
+cmd_collect() {
+  for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
+  # VPN gate — never crawl while the leak guard has tripped.
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping collect"; exit 0; }
+  exec 9>"$LOCK_FILE"; flock -n 9 || { warn "params collect already running"; exit 0; }
+  python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
+  es_up || { warn "ES not reachable"; exit 0; }
+  ensure_index
+  touch "$SCANNED_FILE"
+
+  # Fresh-first in-scope-paying host candidates.
+  local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
+    \"size\": $PARAMS_CANDIDATE_POOL,
+    \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_true_fresh\",\"first_seen\"],
+    \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}},{\"term\":{\"triage_out_of_scope\":false}}]}},
+    \"sort\":[{\"triage_true_fresh\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"triage_external_first_seen\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"desc\",\"missing\":\"_last\"}}]
+  }" 2>/dev/null)" || { warn "ES query failed"; exit 0; }
+
+  local WORK; WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+  printf '%s' "$resp" | jq -rc '.hits.hits[]?._source | [(.host//""),(.url//("https://"+(.host//""))),(.root_domain//""),(.triage_program//""),(.triage_payout_tier//"none"),((.triage_true_fresh//false)|tostring),(.first_seen//"")] | @tsv' 2>/dev/null > "$WORK/cand.tsv"
+  [[ -s "$WORK/cand.tsv" ]] || { log "no in-scope-paying candidates"; exit 0; }
+
+  local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
+  awk -F'\t' -v c="$CUTOFF" '$1>=c' "$SCANNED_FILE" > "$SCANNED_FILE.tmp" 2>/dev/null && mv "$SCANNED_FILE.tmp" "$SCANNED_FILE"
+  awk -F'\t' '{print $2}' "$SCANNED_FILE" | sort -u > "$WORK/done.set"
+
+  local picked=0 bulk="$WORK/bulk.ndjson"; : > "$bulk"
+  local total_urls=0
+  while IFS=$'\t' read -r host url root program tier fresh fseen; do
+    [[ "$picked" -ge "$PARAMS_HOSTS_PER_CYCLE" ]] && break
+    [[ -z "$host" ]] && continue
+    grep -qxF "$host" "$WORK/done.set" && continue
+    picked=$((picked+1))
+    local hd="$WORK/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
+    # crawl (katana live + gau historical), keep param URLs, dedup by structure
+    # -fs rdn keeps katana within the seed's root domain (= in-scope program),
+    # so the catalog never collects off-scope URLs from wandered links.
+    { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
+      [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
+    } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
+    if [[ -x "$QSREPLACE" && -s "$hd/raw" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
+    [[ -s "$hd/urls" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
+    : > "$hd/classified.tsv"
+    local cls
+    for cls in $PARAMS_CLASSES; do
+      [[ -f "$HOME/.gf/$cls.json" ]] || continue
+      "$GF" "$cls" < "$hd/urls" 2>/dev/null | sed "s|\$|\t$cls|" >> "$hd/classified.tsv"
+    done
+    [[ -s "$hd/classified.tsv" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
+    # per-class files (append; deduped at end)
+    for cls in $PARAMS_CLASSES; do
+      awk -F'\t' -v c="$cls" '$2==c{print $1}' "$hd/classified.tsv" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
+    done
+    # ES docs: one per url with vuln_classes[]
+    awk -F'\t' '{a[$1]=a[$1]","$2} END{for(u in a){sub(/^,/,"",a[u]); print u"\t"a[u]}}' "$hd/classified.tsv" \
+    | while IFS=$'\t' read -r u classes; do
+        local iso; iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        local id; id="$(printf '%s' "$u" | sha1sum | cut -c1-40)"
+        jq -nc --arg u "$u" --arg h "$host" --arg rd "$root" --arg pr "$program" --arg ti "$tier" \
+              --argjson tf "${fresh:-false}" --arg fs "$fseen" --arg ca "$iso" --arg cl "$classes" \
+          '{index:{_id:($u|@base64)}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$bulk"
+      done
+    total_urls=$(( total_urls + $(wc -l < "$hd/urls" | tr -d ' ') ))
+    printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"
+  done < "$WORK/cand.tsv"
+
+  # dedup per-class files
+  local cls
+  for cls in $PARAMS_CLASSES; do [[ -f "$PARAMS_DIR/$cls.txt" ]] && sort -u "$PARAMS_DIR/$cls.txt" -o "$PARAMS_DIR/$cls.txt" 2>/dev/null || true; done
+  # bulk index to ES
+  local indexed=0
+  if [[ -s "$bulk" ]]; then
+    es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" --data-binary @"$bulk" >/dev/null 2>&1 && indexed="$(grep -c '^{"index"' "$bulk")"
+  fi
+  log "collected $picked host(s), $total_urls param-URLs, indexed $indexed catalog entries"
+}
+
+# ---------------------------------------------------------------------------
+cmd_list() {
+  local cls="${1:-}" n="${2:-200}"
+  [[ -z "$cls" ]] && { echo "usage: recon_params.sh list <class> [N]  (classes: $PARAMS_CLASSES)" >&2; exit 2; }
+  es_up || { warn "ES not reachable"; exit 1; }
+  local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
+    \"size\": $n,
+    \"_source\":[\"url\",\"program\",\"payout_tier\",\"true_fresh\"],
+    \"query\":{\"term\":{\"vuln_classes\":\"$cls\"}},
+    \"sort\":[{\"true_fresh\":{\"order\":\"desc\"}},{\"cataloged_at\":{\"order\":\"desc\"}}]
+  }" 2>/dev/null)" || { warn "query failed"; exit 1; }
+  local hits; hits="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+  printf '%s\n' "$resp" | jq -r '.hits.hits[]?._source | ((if .true_fresh then "⚡" else "  " end)) + " [" + (.payout_tier//"?") + "] " + (.program//"?") + "  " + .url' 2>/dev/null
+  echo "--- $cls: showing up to $n of $hits in-scope-paying candidate URL(s) ---" >&2
+}
+
+case "${1:-}" in
+  collect) shift; cmd_collect "$@" ;;
+  list)    shift; cmd_list "$@" ;;
+  *) echo "usage: recon_params.sh {collect | list <class> [N]}" >&2; exit 2 ;;
+esac

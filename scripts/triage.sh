@@ -68,6 +68,16 @@ CLUSTER_PENALTY="${CLUSTER_PENALTY:--3}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-30}"
 ES_PAGE_SIZE="${ES_PAGE_SIZE:-10000}"
 
+# Incremental triage: score only docs validated/updated since the last run (plus
+# never-triaged docs) so FRESH hosts get scored + alerted within one cycle
+# instead of waiting for a ~full re-scan. A FULL re-score still runs periodically
+# (catches scope-DB changes / true_fresh window expiry).
+TRIAGE_MODE="${TRIAGE_MODE:-auto}"                     # auto | incremental | full
+TRIAGE_FULL_INTERVAL="${TRIAGE_FULL_INTERVAL:-21600}"  # force a full re-score every 6h
+TRIAGE_INCR_OVERLAP="${TRIAGE_INCR_OVERLAP:-600}"      # re-include last 10min for safety
+LAST_RUN_FILE="${LAST_RUN_FILE:-$STATE_DIR/.triage_last_run}"
+LAST_FULL_FILE="${LAST_FULL_FILE:-$STATE_DIR/.triage_last_full}"
+
 # Submissions file — JSONL: {host,root_domain,vuln_class,cve,status,submitted_date}
 SUBMISSIONS_FILE="${SUBMISSIONS_FILE:-$HOME/.recon_submissions.jsonl}"
 [[ -f "$SUBMISSIONS_FILE" ]] || touch "$SUBMISSIONS_FILE"
@@ -112,9 +122,8 @@ IGNORE_TTL_DAYS="${IGNORE_TTL_DAYS:-7}"
 IGNORE_PENALTY="${IGNORE_PENALTY:--50}"
 
 # Discord
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
-[[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord" ]] && \
-  DISCORD_WEBHOOK="$(tr -d '[:space:]' < "$HOME/.recon_discord" 2>/dev/null || true)"
+# Discord routing is per-channel via discord_hook() (recon_net.sh): fresh findings
+# go to the #fresh webhook (~/.recon_discord_fresh). No legacy DISCORD_WEBHOOK.
 MAX_DISCORD_FINDINGS="${MAX_DISCORD_FINDINGS:-8}"
 
 mkdir -p "$TRIAGE_DIR" "$STATE_DIR"
@@ -145,29 +154,47 @@ exec 8>"$LOCK_FILE"; flock -n 8 || { warn "triage already running"; exit 0; }
 fetch_es_data() {
   local out="$1"
   : > "$out"
-  log "Fetching from ES (lookback=${LOOKBACK_DAYS}d, page=$ES_PAGE_SIZE)"
-
+  local now_epoch; now_epoch="$(date -u +%s)"
   local since; since="$(date -u -d "-${LOOKBACK_DAYS} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
                        || date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  # v2.5 (Phase 6B): drop the should/minimum_should_match clause. Simpler filter,
-  # ES_PAGE_SIZE 10000. Trust scoring to drop noise instead of pre-filtering.
-  local query
-  query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" '{
-    size: $size,
-    _source: ["host","url","scheme","port","status_code","title","tech",
-              "webserver","ip","cname","cdn_name","content_type","content_length",
-              "root_domain","first_seen","last_seen","triage_score"],
-    query: {bool: {
-      filter: [
-        {range: {last_seen: {gte: $since}}},
-        {range: {status_code: {gte: 200, lte: 599}}}
-      ]
-    }},
-    sort: [{"_doc": {order: "asc"}}]
-  }')"
+  # Decide FULL vs INCREMENTAL.
+  local mode="$TRIAGE_MODE" last_full
+  last_full="$(cat "$LAST_FULL_FILE" 2>/dev/null || echo 0)"; [[ "$last_full" =~ ^[0-9]+$ ]] || last_full=0
+  if [[ "$mode" == "auto" ]]; then
+    if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
+  fi
 
-  local after_id=""
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score"]'
+  local query
+  if [[ "$mode" == "incremental" ]]; then
+    local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
+    (( last_run > 0 )) || last_run=$(( now_epoch - 3600 ))
+    local changed; changed="$(date -u -d "@$(( last_run - TRIAGE_INCR_OVERLAP ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$since")"
+    # docs (re)validated since last run OR never triaged — small set, fast, so
+    # fresh hosts are scored + alerted within one cycle.
+    query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" --arg changed "$changed" --argjson src "$_src" '{
+      size:$size, _source:$src,
+      query:{bool:{
+        filter:[{range:{status_code:{gte:200,lte:599}}},{range:{last_seen:{gte:$since}}}],
+        should:[{range:{last_seen:{gte:$changed}}},{bool:{must_not:{exists:{field:"triage_at"}}}}],
+        minimum_should_match:1
+      }},
+      sort:[{"_doc":{order:"asc"}}]
+    }')"
+    log "Fetching from ES (INCREMENTAL: changed≥$changed OR untriaged, page=$ES_PAGE_SIZE)"
+  else
+    query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" --argjson src "$_src" '{
+      size:$size, _source:$src,
+      query:{bool:{filter:[{range:{last_seen:{gte:$since}}},{range:{status_code:{gte:200,lte:599}}}]}},
+      sort:[{"_doc":{order:"asc"}}]
+    }')"
+    echo "$now_epoch" > "$LAST_FULL_FILE"
+    log "Fetching from ES (FULL: lookback=${LOOKBACK_DAYS}d, page=$ES_PAGE_SIZE)"
+  fi
+  echo "$now_epoch" > "$LAST_RUN_FILE"
+
+  local after_id="" prev_after=""
   while :; do
     local q
     if [[ -z "$after_id" ]]; then q="$query"
@@ -180,7 +207,14 @@ fetch_es_data() {
     [[ "$count" == "0" ]] && break
     echo "$resp" | jq -c '.hits.hits[]._source' >> "$out"
     after_id="$(echo "$resp" | jq -r '.hits.hits[-1].sort[0]')"
-    [[ "$count" -lt "$ES_PAGE_SIZE" ]] && break
+    # DO NOT break on a short page. With _doc sort + search_after across shards
+    # on a live index, a page legitimately returns < ES_PAGE_SIZE mid-stream
+    # while more docs remain — the old `count < ES_PAGE_SIZE && break` truncated
+    # the fetch at the first short page (~30k of ~100k), so ~70% of alive hosts
+    # were NEVER scored (no triage_at / scope / true_fresh). Only stop on an
+    # empty page (count==0 above). Guard against a non-advancing cursor.
+    [[ -z "$after_id" || "$after_id" == "$prev_after" ]] && break
+    prev_after="$after_id"
   done
   log "Fetched $(wc -l < "$out") records"
 }
@@ -527,7 +561,6 @@ score_raw() {
       signals: $matched_sigs, strengths: $strengths,
       vuln_classes: $vuln_classes, actions: $actions
     }
-    | select(.score >= '"$MIN_SCORE"')
   ' "$_chunk" > "${_chunk}.out" 2>/dev/null &
     pids+=($!)
   done
@@ -766,7 +799,7 @@ apply_extra_enrichment() {
                      . == "iis" or . == "apache" or . == "nginx" or . == "php"))) as $is_noisy_only |
     (($r.signals // []) | any(startswith("tech:") and
                               (test("(jenkins|confluence|gitlab|k8s|grafana|kibana|elasticsearch|moveit|citrix|fortinet|pulse|vmware|f5|paloalto|exchange|nifi|superset|metabase|jupyter|activemq|telerik|veeam|connectwise|coldfusion|thinkphp|struts|weblogic|manageengine|laravel-debug|argocd|rancher|portainer|harbor|docker-registry|es-exposed|nexus|airflow|magento)"; "i")
-                             )) as $has_strong_tech |
+                             ))) as $has_strong_tech |
 
     # vuln-feed bonus — gated to true_fresh only, dampened for noisy-only hosts
     (if $is_true_fresh and $vfh != null then
@@ -935,17 +968,42 @@ update_es_scores() {
     }}
   ' "$in" > "$tmp"
 
-  # Bulk in 5k chunks
+  # Bulk writeback to ES — the SOURCE OF TRUTH for all scoring/scope state.
+  # VERIFY every chunk actually applied (HTTP ok + valid bulk response + no
+  # per-item errors) and RETRY transient failures. The old code did
+  # `>/dev/null 2>&1 || true`, silently swallowing failures and then logging
+  # "Wrote back" unconditionally — so a failed write meant ES never received the
+  # corrections, with no warning. Now failures are retried and surfaced.
   local chunkdir; chunkdir="$(mktemp -d)"
   split -l 10000 "$tmp" "$chunkdir/c_"
   shopt -s nullglob
+  local total_ok=0 total_fail=0 chunk_n=0
   for c in "$chunkdir"/c_*; do
-    curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/x-ndjson' \
-      -X POST "$ES_URL/_bulk" --data-binary @"$c" >/dev/null 2>&1 || true
+    chunk_n=$((chunk_n+1))
+    local docs; docs=$(( $(wc -l < "$c") / 2 ))   # 2 ndjson lines per doc
+    local attempt resp ok=0
+    for attempt in 1 2 3; do
+      resp="$(curl -sS -m 60 "${ES_AUTH[@]}" -H 'Content-Type: application/x-ndjson' \
+              -X POST "$ES_URL/_bulk" --data-binary @"$c" 2>/dev/null)"
+      # success = a valid bulk response (.took present) with no item errors
+      if printf '%s' "$resp" | jq -e '(.took != null) and (.errors != true)' >/dev/null 2>&1; then
+        ok=1; break
+      fi
+      sleep $(( attempt * 3 ))
+    done
+    if [[ "$ok" -eq 1 ]]; then total_ok=$(( total_ok + docs ))
+    else
+      total_fail=$(( total_fail + docs ))
+      warn "ES writeback chunk $chunk_n FAILED after 3 retries ($docs docs); item errors: $(printf '%s' "$resp" | jq -c '[.items[]?|select(.update.error)|.update.error.type]|unique' 2>/dev/null | head -c 160)"
+    fi
   done
   shopt -u nullglob
   rm -rf "$chunkdir" "$tmp"
-  log "Wrote back triage scores to ES"
+  if [[ "$total_fail" -gt 0 ]]; then
+    warn "ES writeback INCOMPLETE: $total_ok ok, $total_fail FAILED — ES source-of-truth not fully updated this cycle"
+  else
+    log "Wrote back triage scores to ES ($total_ok docs)"
+  fi
 }
 
 run_ai_review_layer() {
@@ -1014,9 +1072,9 @@ generate_report() {
 # =============================================================================
 notify_discord_findings() {
   local in="$1"
-  [[ -z "$DISCORD_WEBHOOK" ]] && return 0
+  [[ -z "$(discord_hook fresh)" ]] && return 0
   local fresh; fresh="$(mktemp)"
-  : > "$fresh"
+  : > "$fresh"; : > "$fresh.keys"
   local count=0
   while IFS= read -r line; do
     [[ "$count" -ge "$MAX_DISCORD_FINDINGS" ]] && break
@@ -1030,9 +1088,12 @@ notify_discord_findings() {
     ')"
     local already_sub; already_sub="$(echo "$line" | jq -r '.already_submitted // false')"
     [[ "$already_sub" == "true" ]] && continue
-    if ! grep -qxF "$key" "$SEEN_FILE"; then
+    # DEFER marking seen: collect keys to "$fresh.keys" and only commit them to
+    # SEEN_FILE AFTER Discord confirms delivery. The old code wrote SEEN here,
+    # so any failed POST (429/5xx/network) permanently suppressed the alert.
+    if ! grep -qxF "$key" "$SEEN_FILE" && ! grep -qxF "$key" "$fresh.keys" 2>/dev/null; then
       echo "$line" >> "$fresh"
-      echo "$key" >> "$SEEN_FILE"
+      echo "$key" >> "$fresh.keys"
       count=$((count + 1))
     fi
   done < <(jq -c 'select(
@@ -1052,7 +1113,7 @@ notify_discord_findings() {
   payload="$(jq -s '
     sort_by([(.tier_rank // 4), -(.score // 0)]) |
     {
-      content: ("**" + (length|tostring) + " new high-priority finding(s)** — feed to agent"),
+      content: ("@here **" + (length|tostring) + " new TRUE-FRESH finding(s)** — claim fast"),
       embeds: [.[] | {
         title: ("[" + .priority + "·" + (.score|tostring) + "·" + (.payout_tier // "none") + "] " + (.host | .[0:230])),
         url: (if (.url // "") != "" then .url else null end),
@@ -1090,22 +1151,32 @@ notify_discord_findings() {
     }' "$fresh")"
 
   local n_emb; n_emb="$(echo "$payload" | jq '.embeds|length')"
+  local delivered=1 wh; wh="$(discord_hook fresh)"   # route to #fresh (falls back to main)
   if [[ "$n_emb" -le 10 ]]; then
-    curl_direct -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$payload" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+    discord_post "$wh" "$payload" || delivered=0
   else
     local i=0
     while [[ $i -lt $n_emb ]]; do
       local chunk; chunk="$(echo "$payload" | jq --argjson s "$i" '{content:.content,embeds:(.embeds[$s:$s+10])}')"
-      curl_direct -fsS -m 15 -H 'Content-Type: application/json' -X POST -d "$chunk" "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
-      i=$((i + 10)); sleep 1
+      discord_post "$wh" "$chunk" || delivered=0
+      i=$((i + 10))
     done
+  fi
+  # Commit keys to SEEN only on confirmed delivery; on failure leave them unseen
+  # so the next cycle re-sends (no lost alerts). Dup risk on partial batch
+  # failure is acceptable — a duplicate alert beats a missed first-blood.
+  if [[ "$delivered" -eq 1 ]]; then
+    cat "$fresh.keys" >> "$SEEN_FILE" 2>/dev/null || true
+    log "Discord: delivered $fc finding(s)"
+  else
+    warn "Discord: delivery FAILED — NOT marking seen; will retry next cycle"
   fi
   if [[ -w "$SEEN_FILE" ]]; then
     tail -n 5000 "$SEEN_FILE" > "$SEEN_FILE.tmp" 2>/dev/null \
       && mv "$SEEN_FILE.tmp" "$SEEN_FILE" 2>/dev/null \
       || rm -f "$SEEN_FILE.tmp" 2>/dev/null
   fi
-  rm -f "$fresh"
+  rm -f "$fresh" "$fresh.keys"
 }
 
 main() {
@@ -1135,6 +1206,23 @@ main() {
   log "Phase 1.6: true_fresh + vuln + js + ignore enrichment"
   apply_extra_enrichment "$enriched" "$enriched2"
   [[ -s "$enriched2" ]] || cp "$enriched" "$enriched2"
+
+  # Score floor — applied HERE (after scope + true_fresh + KEV enrichment), not
+  # in Phase 1. Applying it pre-enrichment dropped low-base-score hosts before
+  # their scope/true_fresh/KEV bonus existed, which left triage_true_fresh empty
+  # and ~70% of in-scope assets unscored. Always keep in-scope, true-fresh, and
+  # KEV hosts regardless of score (the operator wants ALL in-scope + fresh
+  # targets tracked); drop only genuinely-low-value out-of-scope noise.
+  local floored; floored="$(mktemp)"
+  if jq -c --argjson min "${MIN_SCORE:-3}" \
+       'select((.score >= $min) or (.in_scope==true) or ((.true_fresh//false)==true) or ((.kev_match//false)==true))' \
+       "$enriched2" > "$floored" 2>/dev/null && [[ -s "$floored" ]]; then
+    local pre post; pre="$(wc -l < "$enriched2" | tr -d ' ')"; post="$(wc -l < "$floored" | tr -d ' ')"
+    mv "$floored" "$enriched2"
+    log "  score floor (>=${MIN_SCORE:-3} OR in_scope/fresh/kev): $pre → $post kept"
+  else
+    rm -f "$floored"
+  fi
 
   log "Phase 2: cluster + submission dampening + tier-aware sort"
   apply_cluster_and_submission "$enriched2" "$scored"
