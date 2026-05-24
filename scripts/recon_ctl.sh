@@ -1067,7 +1067,15 @@ case "${1:-}" in
   vuln)         shift; cmd_vuln "$@" ;;
   fresh)        shift; cmd_fresh "$@" ;;
   tech)         shift; cmd_tech "$@" ;;
-  params)       shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
+  params)
+    shift
+    case "${1:-}" in
+      "")       bash "$SCRIPT_DIR/recon_params.sh" list ;;   # show usage/classes
+      list)     shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
+      collect)  bash "$SCRIPT_DIR/recon_params.sh" collect ;;
+      *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;; # shorthand: class [N]
+    esac
+    ;;
   ai)           cmd_ai ;;
   fp)           shift; cmd_fp "$@" ;;
   ignore)       shift; cmd_ignore "$@" ;;
