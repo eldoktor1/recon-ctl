@@ -1073,8 +1073,8 @@ case "${1:-}" in
     case "${1:-}" in
       "")       bash "$SCRIPT_DIR/recon_params.sh" list ;;
       list)     shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
-      collect)  bash "$SCRIPT_DIR/recon_params.sh" collect ;;
-      verify)   shift; bash "$SCRIPT_DIR/recon_params.sh" verify "$@" ;;
+      collect)  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" collect ;;
+      verify)   shift; sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" verify "$@" ;;
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;

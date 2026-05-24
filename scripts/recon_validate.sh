@@ -306,8 +306,7 @@ process_batch() {
 
     # ---- IMMEDIATE takeover hunter call (first-blood path) ----
     if [[ "$RUN_TAKEOVER" == "1" && -f "$TAKEOVER_SCRIPT" ]]; then
-      ( DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" \
-        timeout --kill-after=10 600 bash "$TAKEOVER_SCRIPT" stream "$DONE/${stem}.jsonl" \
+      ( timeout --kill-after=10 600 bash "$TAKEOVER_SCRIPT" stream "$DONE/${stem}.jsonl" \
         || warn "takeover hunter exited non-zero on $stem" ) &
     fi
   fi
@@ -395,7 +394,7 @@ main() {
   if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
     log "Chaining to triage (background)"
     ( 9>&-  # close inherited lane lock fd so triage doesn't hold the flock
-      DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
+      ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
       INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
       || warn "triage exited non-zero" ) &
     disown $! 2>/dev/null || true
