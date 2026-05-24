@@ -378,7 +378,8 @@ score_raw() {
         action:"CVE-2021-26855 ProxyLogon | CVE-2021-34473 ProxyShell | /owa/auth/logon.aspx version"} else empty end),
       (if has_tech("metabase") or title_match("metabase") then {pts:8, sig:"tech:metabase", class:"rce", strength:"confirmed",
         action:"CVE-2023-38646 unauth pre-auth RCE | /api/setup/properties | /api/health"} else empty end),
-      (if has_tech("nifi") or title_match("apache nifi|nifi") then {pts:8, sig:"tech:nifi", class:"rce", strength:"confirmed",
+      # "nifi" matches "UniFi" as substring — exclude Ubiquiti UniFi OS pages explicitly
+      (if (has_tech("nifi") or title_match("apache nifi|nifi")) and (title_match("unifi") | not) and (.host | test("unifi"; "i") | not) then {pts:8, sig:"tech:nifi", class:"rce", strength:"confirmed",
         action:"CVE-2023-34468 H2 driver RCE | unauth /nifi-api/flow/about often | DB connection RCE primitive"} else empty end),
       (if has_tech("superset") or title_match("apache superset") then {pts:8, sig:"tech:superset", class:"rce", strength:"confirmed",
         action:"CVE-2023-27524 default SECRET_KEY = session forge to admin | /api/v1/security/login"} else empty end),
@@ -523,6 +524,12 @@ score_raw() {
         action:"Behind CDN/WAF — origin discovery first (Censys, historical DNS)"} else empty end),
       (if title_match("^(welcome to nginx|apache2 ubuntu default|apache2 debian default|iis windows server|test page|400 bad request|403 forbidden)$") then
         {pts:-2, sig:"penalty:default-page", class:"low-priority", strength:"pattern", action:""} else empty end),
+
+      # UUID-named cloud infra (e.g. unifi-hosting, managed-cloud) — no direct bug surface,
+      # archive lookups return nothing, and tech-detection false positives are common.
+      # Suppress unless they hit a confirmed high-value signal (port, KEV, etc).
+      (if (.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i")) then
+        {pts:-6, sig:"penalty:uuid-cloud-infra", class:"low-priority", strength:"pattern", action:""} else empty end),
 
       empty
     ] as $signals |
@@ -1006,6 +1013,44 @@ update_es_scores() {
   fi
 }
 
+# =============================================================================
+# Lightweight "seen" pass — write triage_at to ALL fetched records up-front,
+# including those that will be dropped by the score floor. Without this, hosts
+# below MIN_SCORE with no scope/fresh/kev bonus never get triage_at written, so
+# they re-enter the "OR untriaged" bucket on every incremental run — the root
+# cause of 100k+ incremental fetches. The full score/signal writeback in
+# update_es_scores still runs separately on the filtered survivors.
+# =============================================================================
+mark_triage_seen() {
+  local in="$1"
+  [[ ! -s "$in" ]] && return 0
+  local total_in; total_in="$(wc -l < "$in" | tr -d ' ')"
+  local now_iso; now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  local tmp; tmp="$(mktemp)"
+  jq -c --arg idx "$INDEX_NAME" --arg ts "$now_iso" '
+    {"update":{"_index":$idx,"_id":.host}},
+    {"doc":{"triage_at":$ts}}
+  ' "$in" > "$tmp"
+  local chunkdir; chunkdir="$(mktemp -d)"
+  split -l 20000 "$tmp" "$chunkdir/c_"
+  shopt -s nullglob
+  local ok=0 fail=0
+  for c in "$chunkdir"/c_*; do
+    local resp
+    resp="$(curl -sS -m 60 "${ES_AUTH[@]}" -H 'Content-Type: application/x-ndjson' \
+            -X POST "$ES_URL/_bulk" --data-binary @"$c" 2>/dev/null)" || true
+    if printf '%s' "$resp" | jq -e '(.took != null) and (.errors != true)' >/dev/null 2>&1; then
+      ok=$(( ok + $(wc -l < "$c") / 2 ))
+    else
+      fail=$(( fail + $(wc -l < "$c") / 2 ))
+      warn "mark_triage_seen: chunk failed: $(printf '%s' "$resp" | jq -r '.error.reason // "unknown"' 2>/dev/null || true)"
+    fi
+  done
+  shopt -u nullglob
+  rm -rf "$chunkdir" "$tmp"
+  log "mark_triage_seen: $total_in input → stamped $ok (fail=$fail)"
+}
+
 run_ai_review_layer() {
   local in="$1"
   [[ "${ENABLE_OLLAMA_AI:-1}" == "1" ]] || return 0
@@ -1187,6 +1232,12 @@ main() {
 
   fetch_es_data "$raw"
   [[ -s "$raw" ]] || { log "No data"; exit 0; }
+
+  # Stamp triage_at on ALL fetched records immediately — before the score floor
+  # drops low-value docs. This is what clears the "OR untriaged" ES bucket so
+  # subsequent incremental runs only fetch recently-changed docs (~hundreds)
+  # rather than pulling the full 100k+ untriaged backlog every 30 minutes.
+  mark_triage_seen "$raw"
 
   log "Phase 1: scoring (tech + ports + status + titles)"
   score_raw "$raw" "$scored_raw"

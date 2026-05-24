@@ -224,6 +224,7 @@ emit_batches() {
   # their own (different) per-loop locks, so without this they race and lose
   # entries. flock on a dedicated known_hosts.lock serialises the writers.
   flock "$KNOWN_HOSTS.lock" sort -u "$KNOWN_HOSTS" -o "$KNOWN_HOSTS"
+  chmod 644 "$KNOWN_HOSTS" 2>/dev/null || true   # sort -o resets perms via tmp+rename; keep world-readable
   comm -23 "$all" "$KNOWN_HOSTS" > "$delta" || true
 
   filter_wildcards "$delta" "$filtered"

@@ -17,25 +17,27 @@ KNOWN_HOSTS="$STATE_DIR/known_hosts.txt"
 
 mkdir -p "$INBOX" "$STATE_DIR"
 exec 9>"$LOCK_FILE"; flock -n 9 || { warn "hot_seed already running"; exit 0; }
-touch "$SEEN_FILE" "$KNOWN_HOSTS"
+touch "$SEEN_FILE" 2>/dev/null || true
+touch "$KNOWN_HOSTS" 2>/dev/null || true   # may be reconrun-owned; non-fatal if it fails
 
-# Find all live subfinder/assetfinder output files in /tmp/ (their default cache locations)
+# Find all live subfinder/assetfinder output files.
+# Reads the -o argument directly from /proc/$pid/cmdline (null-delimited args).
+# The old /proc/$pid/fd/ symlink approach silently returned nothing because:
+#   (a) fd enumeration fails cross-UID even when pgrep succeeds, and
+#   (b) the readlink races with process teardown.
+# Reading cmdline is stable, cross-user readable, and doesn't race.
 find_live_outputs() {
-  # subfinder caches in ~/.config/subfinder/, but partials sometimes in /tmp
-  # Also check process descriptors of running subfinder processes
   local pids
   pids="$(pgrep -f 'subfinder|assetfinder' 2>/dev/null || true)"
   [[ -z "$pids" ]] && return 0
   local pid
   for pid in $pids; do
-    # /proc/PID/fd shows open file descriptors — find ones writing to text files
-    find "/proc/$pid/fd/" -maxdepth 1 -type l 2>/dev/null | while read -r fd; do
-      local target; target="$(readlink "$fd" 2>/dev/null)"
-      [[ -z "$target" || ! -f "$target" ]] && continue
-      # Heuristic: must be a writable text file in /tmp or ~/.config/subfinder
-      [[ "$target" =~ ^/tmp/.+ || "$target" =~ subfinder ]] || continue
-      printf '%s\n' "$target"
-    done
+    # /proc/$pid/cmdline is null-delimited — convert to newlines then grep for -o arg
+    local args; args="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null)"
+    [[ -z "$args" ]] && continue
+    # The line after '-o' is the output file path
+    local outfile; outfile="$(printf '%s\n' "$args" | grep -A1 '^-o$' | tail -1)"
+    [[ -n "$outfile" && "$outfile" != "-o" && -f "$outfile" ]] && printf '%s\n' "$outfile"
   done | sort -u
 }
 
