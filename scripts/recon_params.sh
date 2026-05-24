@@ -45,7 +45,9 @@ GF="${GF:-$(command -v gf 2>/dev/null || echo "$GOBIN/gf")}"; QSREPLACE="${QSREP
 # classes regardless of which user runs it and what extra patterns d0k may have.
 # These are the only patterns installed in reconrun's home (/home/reconrun/.gf).
 if [[ -z "${PARAMS_CLASSES:-}" ]]; then
-  PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\nrce\nredirect\nidor\nimg-traversal'
+  # sus_params core 9 (g0ldencybersec): sqli xss ssrf lfi ssti cmdi debug redirect idor
+  # + rce and img-traversal from community Gf-Patterns (installed in reconrun home)
+  PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\ndebug\nrce\nredirect\nidor\nimg-traversal'
 fi
 PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-10}"
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
