@@ -167,7 +167,6 @@ cmd_collect() {
     : > "$hd/classified.tsv"
     local cls
     for cls in $PARAMS_CLASSES; do
-      [[ -f "$HOME/.gf/$cls.json" ]] || continue
       "$GF" "$cls" < "$hd/urls" 2>/dev/null | sed "s|\$|\t$cls|" >> "$hd/classified.tsv"
     done
     [[ -s "$hd/classified.tsv" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
