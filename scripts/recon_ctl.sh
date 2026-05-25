@@ -229,6 +229,8 @@ cmd_status() {
       | jq -r '"  status=\(.status) nodes=\(.number_of_nodes) docs?\(.active_primary_shards) shards"' || echo "  ES unreachable"
     local count; count="$(curl -fsS -m 5 -u "$ES_USER:$ES_PASS" "$ES_URL/$INDEX_NAME/_count" 2>/dev/null | jq -r '.count // "?"')"
     echo "  $INDEX_NAME doc count: $count"
+    local params_count; params_count="$(curl -fsS -m 5 -u "$ES_USER:$ES_PASS" "$ES_URL/recon_params/_count" 2>/dev/null | jq -r '.count // "?"')"
+    echo "  recon_params doc count: $params_count"
   else
     echo "  ES_PASS not set"
   fi

@@ -1308,8 +1308,9 @@ main() {
 
   notify_discord_findings "$scored"
 
-  echo "===== Top 10 ====="
-  head -10 "$scored" | jq -r '[.priority, .score, (.payout_tier // "none"), (.kev_match // false), .host, (.vuln_classes|join(","))] | @tsv'
+  log "===== Top 10 ====="
+  while IFS= read -r line; do log "$line"; done \
+    < <(head -10 "$scored" | jq -r '[.priority, .score, (.payout_tier // "none"), (.kev_match // false), .host, (.vuln_classes|join(","))] | @tsv' 2>/dev/null)
   log "=== triage complete ==="
 }
 main "$@"
