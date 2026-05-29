@@ -34,6 +34,10 @@ die()  { printf '[%s FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; e
 
 # ---- Config ---------------------------------------------------------------
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"
+ES_USER="${ES_USER:-elastic}"
+ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+INDEX_NAME="${INDEX_NAME:-recon_alive}"
 FB_DIR="${FB_DIR:-$BASE_DIR/firstblood}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 LOG_DIR="${LOG_DIR:-$BASE_DIR/logs}"
@@ -48,11 +52,19 @@ HUNTER_LOG="$LOG_DIR/takeover_hunter.log"
 PID_FILE="$STATE_DIR/takeover_hunter.pid"
 LOCK_FILE="$STATE_DIR/takeover_hunter.lock"
 
+# CNAME whitelist (Fix 6) — safe CDN CNAMEs that are never takeovers
+CNAME_WHITELIST_FILE="${CNAME_WHITELIST_FILE:-$SCRIPT_DIR/data/cname_whitelist.txt}"
+
+# HackerOne / Bugcrowd disclosed-report lookup (Fix 7)
+HACKERONE_API_TOKEN="${HACKERONE_API_TOKEN:-}"
+BUGCROWD_API_TOKEN="${BUGCROWD_API_TOKEN:-}"
+
 # Resolvers used in parallel — 2-of-3 must agree
 RESOLVERS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 
-# Stability re-check delay (seconds) — kills DNS-flake FPs
-STABILITY_DELAY="${STABILITY_DELAY:-60}"
+# Stability re-check delay (seconds) — kills DNS-flake FPs.
+# 30s is enough on a local setup; set to 60+ on cloud/unreliable resolvers.
+STABILITY_DELAY="${STABILITY_DELAY:-30}"
 
 # Discord
 # Discord: takeover candidates → #takeovers via discord_hook() (recon_net.sh)
@@ -63,7 +75,7 @@ NOTIFY_MEDIUM="${NOTIFY_MEDIUM:-0}"    # fire Discord on MEDIUM (default off —
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-10}"
 DIG_TIMEOUT="${DIG_TIMEOUT:-3}"
 
-mkdir -p "$FB_DIR" "$STATE_DIR" "$LOG_DIR"
+mkdir -p "$FB_DIR" "$STATE_DIR" "$LOG_DIR" "$(dirname "$CNAME_WHITELIST_FILE")"
 touch "$CLAIM_FILE" "$WATCH_FILE" "$SEEN_FILE" "$EVENT_LOG"
 
 for c in dig curl jq awk grep sort head tail flock timeout; do
@@ -158,6 +170,18 @@ unbounce_2^.*\.unbouncepages\.com\.?$^no^The requested URL was not found on this
 uservoice^.*\.uservoice\.com\.?$^no^This UserVoice subdomain is currently available!^404^medium^$300-$1000^UserVoice account; claim subdomain.
 wufoo^.*\.wufoo\.com\.?$^no^Hmmm\.\.\.\.the page you'?re looking for can'?t be found^404^medium^$200-$800^Wufoo account; map form subdomain.
 zerigo^.*\.zerigo\.com\.?$^no^^^impossible^N/A^Zerigo defunct.
+render^\.onrender\.com\.?$^yes^Not Found^404^easy^$200-$2000^Create Render account (render.com). Deploy any web service — set the service name to exactly match the dangling hostname prefix. Custom domain is auto-configured once service is live. Free tier available.
+vercel^\.vercel\.app\.?$|\.now\.sh\.?$^no^The deployment you are looking for does not exist\.|404: NOT_FOUND^404^easy^$200-$2000^Create Vercel account. Deploy any project: npx vercel --name <prefix>. The project slug must match the dangling CNAME prefix exactly. Free tier available.
+fly_io^\.fly\.dev\.?$^no^404 page not found|502 Bad Gateway^404,502^medium^$200-$1500^Fly.io account (fly.io); create app matching the subdomain: fly launch --name <name>. App names are globally unique. Free allowance available.
+railway^\.up\.railway\.app\.?$^yes^404 Not Found^404^easy^$200-$1000^Railway account (railway.app); create project and deploy service. Set the service domain to match the dangling subdomain slug. Free tier available.
+aws_elasticbeanstalk^\.elasticbeanstalk\.com\.?$^yes^Error 404 - Not Found|AWS Elastic Beanstalk^404^medium^$500-$3000^AWS account; create Elastic Beanstalk environment with matching subdomain in the correct region. Environment CNAME is <name>.<region>.elasticbeanstalk.com — region must match.
+gcp_appengine^\.appspot\.com\.?$^no^404 Not Found|This application does not exist|The requested URL was not found on this server^404^medium^$500-$3000^GCP account; create App Engine application with matching project ID. Project IDs are globally unique. 'gcloud app deploy' any minimal app.yaml.
+firebase^\.firebaseapp\.com\.?$|\.web\.app\.?$^no^Firebase Hosting Setup Complete|404.*firebase|No site associated^404^medium^$500-$3000^GCP/Firebase account; create project with matching ID. 'firebase init hosting' then 'firebase deploy'. Project IDs globally unique — first-come first-served.
+digitalocean_apps^\.ondigitalocean\.app\.?$^yes^404 Not Found^404^medium^$300-$1500^DigitalOcean Apps account; create App Platform app and set the matching app slug. Free starter tier available.
+cloudflare_pages^\.pages\.dev\.?$^no^NOT_FOUND|There is no Pages project with that name^404^easy^$200-$1500^Cloudflare free account; create Pages project matching the subdomain. 'wrangler pages project create <name>' then deploy any static site.
+koyeb^\.koyeb\.app\.?$^no^404 - App Not Found|This Koyeb app does not exist^404^medium^$200-$1000^Koyeb account (koyeb.com); create service with matching app name. App names are globally unique.
+supabase^\.supabase\.co\.?$^yes^404: Supabase project not found|Project not found^404^medium^$300-$2000^Supabase account; create project — project ref (subdomain prefix) must match dangling hostname prefix. Project refs are permanent.
+deno_deploy^\.deno\.dev\.?$^no^404: Deployment not found|Deploy project not found^404^easy^$200-$1000^Deno Deploy account (deno.com/deploy); create project with matching name. Deploy any script via deployctl or GitHub Actions.
 FPDB
 
 # =============================================================================
@@ -178,6 +202,89 @@ load_fingerprints() {
     FP_CLAIM+=("$claim")
   done <<< "$FINGERPRINT_DB"
   log "Loaded ${#FP_SVC[@]} provider fingerprints"
+
+  # Fix 6: load CNAME whitelist
+  CNAME_WHITELIST_PATTERNS=()
+  if [[ -s "$CNAME_WHITELIST_FILE" ]]; then
+    while IFS= read -r line; do
+      [[ -z "$line" || "$line" =~ ^# ]] && continue
+      # strip leading/trailing spaces, convert glob * to regex .*
+      line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      local pat; pat="$(printf '%s' "$line" | sed 's/\./\\./g; s/\*/\.\*/g')"
+      CNAME_WHITELIST_PATTERNS+=("$pat")
+    done < "$CNAME_WHITELIST_FILE"
+    log "Loaded ${#CNAME_WHITELIST_PATTERNS[@]} CNAME whitelist patterns"
+  fi
+}
+
+# Fix 6: check CNAME against whitelist
+cname_whitelisted() {
+  local cname="$1"
+  local pat
+  for pat in "${CNAME_WHITELIST_PATTERNS[@]:-}"; do
+    [[ -z "$pat" ]] && continue
+    if [[ "$cname" =~ $pat ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Fix 5: extract apex/root domain (last two labels, or three for ccTLDs — simplified)
+extract_apex() {
+  local host="$1"
+  # Strip trailing dot
+  host="${host%.}"
+  # Count labels
+  local labels; IFS='.' read -ra labels <<< "$host"
+  local n="${#labels[@]}"
+  if [[ "$n" -le 2 ]]; then
+    printf '%s\n' "$host"
+  elif [[ "$n" -eq 3 && "${#labels[-1]}" -le 2 && "${#labels[-2]}" -le 3 ]]; then
+    # Likely ccTLD e.g. co.uk — take last 3 labels
+    printf '%s\n' "${labels[-3]}.${labels[-2]}.${labels[-1]}"
+  else
+    printf '%s\n' "${labels[-2]}.${labels[-1]}"
+  fi
+}
+
+# Fix 3: check if CNAME target is AWS managed load balancer infrastructure
+cname_is_aws_elb() {
+  local cname="$1"
+  [[ "$cname" =~ \.elb\.amazonaws\.com\.?$ ]] && return 0
+  [[ "$cname" =~ \.nlb\.amazonaws\.com\.?$ ]] && return 0
+  [[ "$cname" =~ \.alb\.amazonaws\.com\.?$ ]] && return 0
+  return 1
+}
+
+# Fix 7: check HackerOne disclosed reports for this host
+check_already_disclosed() {
+  local host="$1"
+  [[ -z "$HACKERONE_API_TOKEN" ]] && return 1
+  # Search H1 disclosed reports — simplified query (root domain matching)
+  local root; root="$(extract_apex "$host")"
+  local resp
+  resp="$(curl -sS -m10 \
+    -u "d0k:${HACKERONE_API_TOKEN}" \
+    -H "Accept: application/json" \
+    "https://api.hackerone.com/v1/hackers/reports?filter[state][]=resolved&filter[keyword][]=${root}&page[size]=1" \
+    2>/dev/null)"
+  local count; count="$(printf '%s' "$resp" | jq -r '.data | length // 0' 2>/dev/null || echo 0)"
+  [[ "${count:-0}" -gt 0 ]] && return 0
+  return 1
+}
+
+# Fix 7: check last_verified timestamp from TSV and return true if >6h old
+needs_reverify() {
+  local host="$1"
+  # Last_verified is the 9th column (epoch) in claim TSV
+  local last_epoch
+  last_epoch="$(grep -F "$host" "$CLAIM_FILE" 2>/dev/null | tail -1 | awk -F'\t' '{print $9}')"
+  [[ -z "$last_epoch" || ! "$last_epoch" =~ ^[0-9]+$ ]] && return 0  # no ts → reverify
+  local now_epoch; now_epoch="$(date +%s)"
+  local age_h=$(( (now_epoch - last_epoch) / 3600 ))
+  [[ "$age_h" -ge 6 ]] && return 0
+  return 1
 }
 
 # =============================================================================
@@ -261,12 +368,12 @@ match_provider() {
 
 # =============================================================================
 # HTTP fingerprint check — fetch host, match body against provider regex
-# Returns: "match" | "nomatch" | "fetcherr"
+# Returns: "match" | "nomatch" | "fetcherr" | "livecontent:<size>"
+# Fix 4: also detects live content (large body with real HTML = not a takeover)
 # =============================================================================
 http_fingerprint_check() {
   local host="$1" idx="$2"
   local pattern="${FP_HTTP[$idx]}"
-  [[ -z "$pattern" ]] && { echo "skipped"; return; }
 
   local body schemes=("https" "http")
   for scheme in "${schemes[@]}"; do
@@ -275,9 +382,30 @@ http_fingerprint_check() {
   done
 
   if [[ -z "$body" ]]; then
+    [[ -z "$pattern" ]] && { echo "skipped"; return; }
     echo "fetcherr"
     return
   fi
+
+  # Fix 4: live content disqualifier — large body with real HTML tags but no takeover fingerprint
+  local body_len; body_len="${#body}"
+  if [[ "$body_len" -gt 1000 ]]; then
+    # Check for non-error HTML structure (real page content)
+    if printf '%s' "$body" | grep -qiE '<(html|body|head|title|main|div|nav|header)[^>]*>' 2>/dev/null; then
+      # Only disqualify if pattern is set and not matching
+      if [[ -n "$pattern" ]]; then
+        if ! grep -qE "$pattern" <<< "$body" 2>/dev/null; then
+          echo "livecontent:${body_len}"
+          return
+        fi
+      else
+        echo "livecontent:${body_len}"
+        return
+      fi
+    fi
+  fi
+
+  [[ -z "$pattern" ]] && { echo "skipped"; return; }
 
   if grep -qE "$pattern" <<< "$body" 2>/dev/null; then
     echo "match"
@@ -310,9 +438,11 @@ classify_confidence() {
 
 # =============================================================================
 # Discord URGENT notification — embed with full claim instructions
+# Fix 1: claim_status field; @here ONLY on full verified claims (Fix 13)
 # =============================================================================
 notify_takeover() {
   local host="$1" idx="$2" confidence="$3" cname="$4" stages="$5" notes="$6"
+  local claim_status="${7:-unknown}"   # Fix 1: "full" | "partial" | "unknown"
   [[ -z "$(discord_hook takeovers)" ]] && return 0
 
   local svc="${FP_SVC[$idx]}"
@@ -327,14 +457,29 @@ notify_takeover() {
     *)        color=15844367 ;;   # yellow
   esac
 
+  # Fix 1: downgrade confidence for partial claims
+  local effective_confidence="$confidence"
+  if [[ "$claim_status" == "partial" ]]; then
+    [[ "$confidence" == "HIGH" || "$confidence" == "CRITICAL" ]] && effective_confidence="MEDIUM"
+    color=15844367  # yellow for partial
+  fi
+
   local emoji
-  case "$confidence" in
+  case "$effective_confidence" in
     CRITICAL) emoji="🚨🚨🚨" ;;
     HIGH)     emoji="🚨" ;;
     *)        emoji="⚠️" ;;
   esac
 
-  local title="$emoji TAKEOVER [$confidence] $svc → $host"
+  local title="$emoji TAKEOVER [$effective_confidence] $svc → $host"
+
+  # Fix 13: @here ONLY on full verified claims, not partial/unknown
+  local content
+  if [[ "$claim_status" == "full" ]]; then
+    content="@here 🩸 **FIRST-BLOOD CANDIDATE** — FULL CLAIM VERIFIED (${effective_confidence})"
+  else
+    content="🩸 **TAKEOVER CANDIDATE** (${effective_confidence}) — claim_status=${claim_status}"
+  fi
 
   local payload
   payload="$(jq -n \
@@ -342,16 +487,18 @@ notify_takeover() {
     --arg host "$host" \
     --arg cname "$cname" \
     --arg svc "$svc" \
-    --arg conf "$confidence" \
+    --arg conf "$effective_confidence" \
     --arg diff "$diff" \
     --arg payout "$payout" \
     --arg claim "$claim" \
     --arg stages "$stages" \
     --arg notes "$notes" \
+    --arg claim_status "$claim_status" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson color "$color" \
+    --arg content "$content" \
     '{
-      content: ("@here 🩸 **FIRST-BLOOD CANDIDATE** — claim within minutes if " + $conf + " confidence"),
+      content: $content,
       embeds: [{
         title: $title,
         color: $color,
@@ -360,6 +507,7 @@ notify_takeover() {
           {name:"Dangling CNAME",  value:("`" + $cname + "`"), inline:false},
           {name:"Provider",        value:$svc,    inline:true},
           {name:"Confidence",      value:$conf,   inline:true},
+          {name:"Claim Status",    value:$claim_status, inline:true},
           {name:"Difficulty",      value:$diff,   inline:true},
           {name:"Typical payout",  value:$payout, inline:true},
           {name:"Verification",    value:$stages, inline:true},
@@ -379,6 +527,46 @@ notify_takeover() {
   fi
   warn "Discord notify failed for $host (left unseen for retry next cycle)"
   return 1
+}
+
+# Fix 1: Fastly post-claim verification
+# After a Fastly claim, re-check HTTP to see if fingerprint is gone
+fastly_post_claim_check() {
+  local host="$1" idx="$2"
+  local http_result; http_result="$(http_fingerprint_check "$host" "$idx")"
+  if [[ "$http_result" == "match" ]]; then
+    echo "partial"
+  else
+    echo "full"
+  fi
+}
+
+# =============================================================================
+# ES write-back — tag the ES document with confirmed takeover metadata
+# Called on CRITICAL/HIGH/MEDIUM-HIGH findings. Fire-and-forget (non-fatal).
+# =============================================================================
+es_tag_takeover() {
+  local host="$1" svc="$2" cname="$3" confidence="$4" payout="$5" detected_at="$6"
+  [[ -z "$ES_PASS" ]] && return 0
+
+  local payload
+  payload="$(jq -n \
+    --arg host "$host" --arg svc "$svc" --arg cname "$cname" \
+    --arg conf "$confidence" --arg payout "$payout" --arg ts "$detected_at" \
+    '{
+      script: { source: "ctx._source.takeover_confirmed = true; ctx._source.takeover_service = params.svc; ctx._source.takeover_cname = params.cname; ctx._source.takeover_confidence = params.conf; ctx._source.takeover_payout = params.payout; ctx._source.takeover_detected_at = params.ts; if (ctx._source.triage_classes == null) { ctx._source.triage_classes = []; } if (!ctx._source.triage_classes.contains(\"takeover\")) { ctx._source.triage_classes.add(\"takeover\"); }", lang: "painless",
+        params: {svc:$svc, cname:$cname, conf:$conf, payout:$payout, ts:$ts}},
+      query: {term: {"host.keyword": $host}}
+    }')" 2>/dev/null
+
+  [[ -z "$payload" ]] && return 0
+
+  curl -sS -m15 -u "$ES_USER:$ES_PASS" \
+    -H 'Content-Type: application/json' \
+    -X POST "$ES_URL/$INDEX_NAME/_update_by_query?conflicts=proceed&wait_for_completion=false" \
+    -d "$payload" >/dev/null 2>&1 || true
+
+  log "  ES tagged: $host ($svc) → takeover_confirmed=true"
 }
 
 # =============================================================================
@@ -414,6 +602,26 @@ probe_host() {
 
   [[ "$stage1" -eq 0 || -z "$cname" ]] && return 0
 
+  # Fix 3: AWS ELB/NLB/ALB exclusion — owned infrastructure, never a takeover
+  if cname_is_aws_elb "$cname"; then
+    log "SKIP $host → $cname (AWS managed LB — hard exclusion)"
+    return 0
+  fi
+
+  # Fix 6: CNAME whitelist check
+  if cname_whitelisted "$cname"; then
+    log "SKIP $host → $cname (CNAME whitelist match)"
+    return 0
+  fi
+
+  # Fix 5: Same-apex CNAME filter — CNAME pointing back to same org is not a takeover
+  local host_apex; host_apex="$(extract_apex "$host")"
+  local cname_apex; cname_apex="$(extract_apex "$cname")"
+  if [[ -n "$host_apex" && -n "$cname_apex" && "$host_apex" == "$cname_apex" ]]; then
+    log "SKIP $host → $cname (same-apex CNAME: $host_apex == $cname_apex)"
+    return 0
+  fi
+
   # ---- STAGE 2: Provider match ----
   local idx; idx="$(match_provider "$cname")"
   [[ "$idx" -lt 0 ]] && return 0
@@ -448,7 +656,22 @@ probe_host() {
     nomatch)  stage4=0 ;;
     skipped)  stage4=0 ;;
     fetcherr) stage4=0 ;;
+    livecontent:*)
+      # Fix 4: host is serving real content — disqualify silently
+      log "SKIP $host → $svc: live content detected ($http_state), not a takeover candidate"
+      return 0
+      ;;
   esac
+
+  # Fix 2: Azure "stopped app" disqualifier — resource EXISTS and is owned
+  # Check if body contains the stopped-app indicator
+  local body_check
+  body_check="$(curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "https://$host/" 2>/dev/null \
+                || curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "http://$host/" 2>/dev/null)"
+  if printf '%s' "$body_check" | grep -qiE 'this web app is stopped' 2>/dev/null; then
+    log "SKIP $host → $svc: Azure 'web app stopped' — resource owned (disqualifier)"
+    return 0
+  fi
 
   # ---- STAGE 5: Stability re-check ----
   # Run only if 3+ stages passed otherwise — saves time on obvious clean
@@ -492,22 +715,61 @@ probe_host() {
 
   # ---- Routing decision ----
   local now_iso; now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local now_epoch; now_epoch="$(date +%s)"
 
   case "$confidence" in
     CRITICAL|HIGH|MEDIUM-HIGH)
+      # Fix 7: re-verify if last_verified is >6h old
+      local claim_status="unknown"
+      if [[ "$confidence" == "HIGH" || "$confidence" == "CRITICAL" ]]; then
+        if needs_reverify "$host"; then
+          log "  → Re-verifying $host (last_verified >6h or first time)"
+          # For Fastly specifically, do a post-claim check
+          if [[ "$svc" == "fastly" ]]; then
+            claim_status="$(fastly_post_claim_check "$host" "$idx")"
+            log "  → Fastly post-claim check: $claim_status"
+          else
+            claim_status="full"
+          fi
+        else
+          claim_status="full"
+        fi
+
+        # Fix 7: check if already disclosed on HackerOne
+        if check_already_disclosed "$host" 2>/dev/null; then
+          log "  → $host already disclosed on HackerOne — downgrading to INFO"
+          notes+="already-disclosed "
+          printf '%s\t%s\t%s\tINFO\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+          return 0
+        fi
+      fi
+
       # Persist the finding immediately (CLAIM_FILE is the durable record, never
       # lost), but DEFER marking the host SEEN until the alert is confirmed
       # delivered — otherwise a failed Discord POST would permanently suppress
       # the first-blood ping. If notifications are disabled, mark SEEN at once.
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      # Fix 1: TSV now has 9 columns: ts host svc cname confidence stages diff notes last_verified claim_status
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
+        "$now_epoch" "$claim_status" \
         >> "$CLAIM_FILE"
       printf '%s\t%s\t%s\tCLAIM\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
 
-      log "🚨 $confidence takeover candidate: $host ($svc, $stages_str)"
+      log "🚨 $confidence takeover candidate: $host ($svc, $stages_str, claim_status=$claim_status)"
+
+      # Adjust confidence for partial claims (Fix 1)
+      local effective_confidence="$confidence"
+      if [[ "$claim_status" == "partial" ]]; then
+        effective_confidence="MEDIUM"
+        log "  → Fastly partial claim — downgrading to MEDIUM for notification"
+      fi
+
+      # Tag the ES document so viewers can pull confirmed takeovers from ES
+      es_tag_takeover "$host" "$svc" "$cname" "$effective_confidence" \
+        "${FP_PAYOUT[$idx]}" "$now_iso" &
 
       if [[ "$NOTIFY_HIGH" == "1" ]]; then
-        if notify_takeover "$host" "$idx" "$confidence" "$cname" "$stages_str" "$notes"; then
+        if notify_takeover "$host" "$idx" "$effective_confidence" "$cname" "$stages_str" "$notes" "$claim_status"; then
           echo "$host" >> "$SEEN_FILE"
         else
           log "  alert undelivered for $host — left unseen, will retry next cycle"
@@ -518,14 +780,17 @@ probe_host() {
       ;;
     MEDIUM)
       # Write to WATCH file — periodic recheck
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      # Fix 7: add last_verified epoch column
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
+        "$now_epoch" \
         >> "$WATCH_FILE"
       printf '%s\t%s\t%s\tWATCH\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
       log "  ⚠ MEDIUM watching: $host ($svc, $stages_str)"
 
+      # Fix 13: no @here on MEDIUM — notify_takeover with unknown claim_status (no ping)
       if [[ "$NOTIFY_MEDIUM" == "1" ]]; then
-        notify_takeover "$host" "$idx" "$confidence" "$cname" "$stages_str" "$notes"
+        notify_takeover "$host" "$idx" "$confidence" "$cname" "$stages_str" "$notes" "unknown"
       fi
       # Don't add to SEEN — we want to recheck later
       ;;
@@ -545,6 +810,10 @@ mode_stream() {
   load_fingerprints
 
   local processed=0 candidates=0
+  # Parallel probing: STABILITY_DELAY dominates time — run up to N hosts in parallel.
+  # Keep low (default 6) to avoid DNS resolver hammering during busy validate cycles.
+  local max_parallel="${TAKEOVER_PARALLEL:-6}"
+
   while IFS= read -r line; do
     local host cname
     host="$(jq -r '.host // .input // empty' <<< "$line" 2>/dev/null)"
@@ -553,21 +822,32 @@ mode_stream() {
     processed=$((processed + 1))
 
     # Fast path: only probe hosts whose CNAME (if known) hits one of our patterns
+    local should_probe=0 hint_cname=""
     if [[ -n "$cname" ]]; then
       local idx; idx="$(match_provider "$cname")"
       [[ "$idx" -lt 0 ]] && continue
-      candidates=$((candidates + 1))
-      probe_host "$host" "$cname"
+      should_probe=1
+      hint_cname="$cname"
     else
-      # No CNAME hint — only probe if status was 404 or 4xx/5xx (otherwise wasteful)
+      # No CNAME hint — only probe if status was 404/0/5xx (otherwise wasteful)
       local sc; sc="$(jq -r '.status_code // 0' <<< "$line" 2>/dev/null)"
       if [[ "$sc" == "404" || "$sc" == "0" || "$sc" == "503" || "$sc" == "502" ]]; then
-        candidates=$((candidates + 1))
-        probe_host "$host" ""
+        should_probe=1
       fi
     fi
+    [[ "$should_probe" -eq 0 ]] && continue
+
+    candidates=$((candidates + 1))
+
+    # Semaphore: wait for a slot before spawning
+    while (( $(jobs -rp 2>/dev/null | wc -l) >= max_parallel )); do
+      wait -n 2>/dev/null || sleep 0.5
+    done
+
+    probe_host "$host" "$hint_cname" &
   done < "$file"
 
+  wait  # drain remaining background jobs
   log "Stream done: processed=$processed candidates_probed=$candidates"
 }
 
@@ -716,6 +996,25 @@ mode_recheck() {
   mv "$pruned" "$WATCH_FILE"
   [[ "$before" -gt "$after" ]] && log "  Pruned $(( before - after )) stale WATCH entries (>${max_age}d old)"
 
+  # Prune CLAIM entries older than CLAIM_MAX_AGE_DAYS (default 90).
+  # A claimed takeover that's 3 months old and still in the file was either
+  # reported, rejected, or the target recovered — prune it to keep the file bounded.
+  local claim_max_age="${CLAIM_MAX_AGE_DAYS:-90}"
+  local claim_cutoff_epoch; claim_cutoff_epoch=$(( $(date +%s) - claim_max_age * 86400 ))
+  local claim_pruned; claim_pruned="$(mktemp)"
+  local claim_before claim_after
+  claim_before="$(wc -l < "$CLAIM_FILE" | tr -d ' ')"
+  while IFS=$'\t' read -r ts host rest; do
+    [[ -z "$host" ]] && continue
+    local entry_epoch
+    entry_epoch="$(date -d "$ts" +%s 2>/dev/null || echo 0)"
+    [[ "$entry_epoch" -ge "$claim_cutoff_epoch" ]] && printf '%s\t%s\t%s\n' "$ts" "$host" "$rest"
+  done < "$CLAIM_FILE" > "$claim_pruned"
+  claim_after="$(wc -l < "$claim_pruned" | tr -d ' ')"
+  mv "$claim_pruned" "$CLAIM_FILE"
+  [[ "$claim_before" -gt "$claim_after" ]] && \
+    log "  Pruned $(( claim_before - claim_after )) stale CLAIM entries (>${claim_max_age}d old)"
+
   log "Recheck done. Remaining in WATCH: $(wc -l < "$WATCH_FILE" | tr -d ' ')"
 }
 
@@ -733,6 +1032,38 @@ mode_check() {
 }
 
 # =============================================================================
+# Dedup mode: print unique CNAME targets from CLAIM file (grouped)
+# Eliminates the noise of multiple hosts pointing to the same dangling CNAME —
+# they're all one opportunity, not N separate bounties (usually).
+# =============================================================================
+mode_dedup() {
+  [[ ! -s "$CLAIM_FILE" ]] && { echo "Claim file empty."; return; }
+
+  local total_hosts; total_hosts="$(wc -l < "$CLAIM_FILE" | tr -d ' ')"
+  local unique_cnames; unique_cnames="$(awk -F'\t' '{print $4}' "$CLAIM_FILE" | sort -u | wc -l | tr -d ' ')"
+  printf '\n  Claim file: %s entries → %s unique CNAME targets\n\n' \
+    "$total_hosts" "$unique_cnames"
+
+  printf '  %-48s %-16s %-10s %-8s  %s\n' \
+    "CNAME TARGET" "SERVICE" "CONF" "HOSTS" "EXAMPLE HOST"
+  printf '  %s\n' "$(printf '─%.0s' {1..110})"
+
+  awk -F'\t' '{print $4}' "$CLAIM_FILE" | sort -u | while IFS= read -r cname_target; do
+    [[ -z "$cname_target" ]] && continue
+    local host_count svc conf example
+    host_count="$(grep -cF "$cname_target" "$CLAIM_FILE" 2>/dev/null || echo 0)"
+    svc="$(grep -F "$cname_target" "$CLAIM_FILE" 2>/dev/null | head -1 | awk -F'\t' '{print $3}')"
+    conf="$(grep -F "$cname_target" "$CLAIM_FILE" 2>/dev/null | head -1 | awk -F'\t' '{print $5}')"
+    example="$(grep -F "$cname_target" "$CLAIM_FILE" 2>/dev/null | head -1 | awk -F'\t' '{print $2}')"
+    printf '  %-48s %-16s %-10s %-8s  %s\n' \
+      "$cname_target" "$svc" "$conf" "$host_count" "$example"
+  done
+
+  printf '\n  To probe a specific host:  %s check <host>\n' "$(basename "$0")"
+  printf '  To recheck watching list:  %s recheck\n\n' "$(basename "$0")"
+}
+
+# =============================================================================
 # Dispatch
 # =============================================================================
 {
@@ -741,6 +1072,7 @@ case "${1:-}" in
   watch)   mode_watch ;;
   recheck) mode_recheck ;;
   check)   shift; mode_check "$@" ;;
+  dedup)   mode_dedup ;;
   *) cat <<EOF
 Usage: $(basename "$0") <mode> [args]
 
@@ -749,6 +1081,7 @@ Modes:
   watch            Long-running daemon, polls queue/done/, re-verifies WATCHING
   recheck          Re-verify all WATCHING entries once
   check <host>     Manual single-host probe (bypasses SEEN dedup)
+  dedup            Show unique CNAME targets grouped (deduplicated opportunity view)
 
 Files:
   $CLAIM_FILE

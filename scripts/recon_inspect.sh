@@ -30,18 +30,30 @@ fi
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
+ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 INDEX="${INDEX_NAME:-recon_alive}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
 SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
 [[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"
 KEV_FILE="$HOME/recon/cve/kev_targets.jsonl"
+IGNORE_FILE="${IGNORE_FILE:-$HOME/recon/state/ignored.jsonl}"
+IGNORE_TTL_DAYS="${IGNORE_TTL_DAYS:-7}"
 
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'; C='\033[0;36m'; N='\033[0m'
 
 # Normalize host
 host="$(echo "$HOST_ARG" | tr '[:upper:]' '[:lower:]' | sed -E 's#^https?://##; s#/.*$##')"
+
+# Fix 12: check ignored.jsonl at query time — if host is ignored and TTL not expired, warn
+ignore_cutoff="$(date -u -d "-${IGNORE_TTL_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+ignore_entry="null"
+if [[ -s "$IGNORE_FILE" ]]; then
+  ignore_entry="$(jq -c --arg h "$host" --arg cutoff "$ignore_cutoff" \
+    'select(.host == $h and (.added_at // "") >= $cutoff)' \
+    "$IGNORE_FILE" 2>/dev/null | tail -1 || echo "null")"
+  [[ -z "$ignore_entry" ]] && ignore_entry="null"
+fi
 
 # 1. ES record
 es_doc="$(curl -sS -u "$ES_USER:$ES_PASS" "$ES_URL/$INDEX/_doc/$host" 2>/dev/null \
@@ -91,6 +103,14 @@ ok_kv()   { printf "  ${G}%-15s${N} %s\n" "$1" "$2"; }
 printf "${B}┌────────────────────────────────────────${N}\n"
 printf "${B}│${N} Host: ${C}%s${N}\n" "$host"
 printf "${B}└────────────────────────────────────────${N}\n"
+
+# Fix 12: show ignored status prominently
+if [[ "$ignore_entry" != "null" && -n "$ignore_entry" ]]; then
+  ig_reason="$(printf '%s' "$ignore_entry" | jq -r '.reason // "manual"' 2>/dev/null)"
+  ig_expires="$(printf '%s' "$ignore_entry" | jq -r '.expires_at // "?"' 2>/dev/null)"
+  printf "\n  ${Y}⚠️  HOST IS IGNORED (TTL active until %s) — reason: %s${N}\n" "$ig_expires" "$ig_reason"
+  printf "  ${Y}Results suppressed from fresh/fetch queries. Use 'recon-ignore' to re-add.${N}\n"
+fi
 
 hdr "Scope"
 if [[ -z "$scope" || "$scope" == "null" ]]; then
