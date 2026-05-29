@@ -12,7 +12,13 @@ INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 [[ -n "$ES_PASS" ]] || die "ES password not set"
-ES_AUTH=(-u "$ES_USER:$ES_PASS")
+# write netrc so ES password stays off curl command line
+if [[ -f "$HOME/.recon_es_pass" ]]; then
+  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -n "$_netrc_ep" ]] && { printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc"; chmod 600 "$HOME/.recon_es_netrc"; }
+  unset _netrc_ep
+fi
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATE="${VALIDATE:-$SCRIPT_DIR/recon_validate.sh}"
@@ -53,7 +59,7 @@ clear_derived_host_state() {
 
 bootstrap_mapping() {
   HOME="${HOME:-/home/d0k}" BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" \
-    ES_USER="$ES_USER" ES_PASS="$ES_PASS" BATCHES_PER_CYCLE=0 RUN_TRIAGE=0 \
+    ES_USER="$ES_USER" BATCHES_PER_CYCLE=0 RUN_TRIAGE=0 \
     bash "$VALIDATE" >/dev/null
   log "bootstrapped mapping: $INDEX_NAME"
 }

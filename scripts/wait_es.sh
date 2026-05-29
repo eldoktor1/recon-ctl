@@ -2,9 +2,11 @@
 # wait_es.sh — poll ES until it's up, then start the recon daemon
 ep="$(tr -d '[:space:]' < ~/.recon_es_pass 2>/dev/null)"
 echo "ES pass length: ${#ep}"
+printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc"
+chmod 600 "$HOME/.recon_es_netrc"
 echo "Polling ES (max 120s)..."
 for i in $(seq 1 30); do
-  result="$(curl -fsS -m5 -u "elastic:${ep}" http://127.0.0.1:9200/_cluster/health 2>/dev/null)"
+  result="$(curl -fsS -m5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200/_cluster/health 2>/dev/null)"
   if echo "$result" | grep -q '"status"'; then
     echo ""
     echo "✅ ES UP after $((i*4))s"

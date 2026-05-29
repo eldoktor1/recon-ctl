@@ -85,7 +85,8 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
-ES_AUTH=(-u "$ES_USER:$ES_PASS")
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 # Discord routing uses per-channel files via discord_hook() (recon_net.sh):
 # confirmed CVE findings -> 'cve' channel; killswitch alerts -> 'health' channel.
@@ -380,7 +381,7 @@ es_update_confirmed() {
   template="$(echo "$finding" | jq -r '."template-id"')"
   severity="$(echo "$finding" | jq -r '.info.severity // "unknown"')"
 
-  curl -fsS -u "$ES_USER:$ES_PASS" -H 'Content-Type: application/json' \
+  curl -fsS --netrc-file "$HOME/.recon_es_netrc" -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
     -d "$(jq -n --arg t "$template" --arg s "$severity" \
          --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '

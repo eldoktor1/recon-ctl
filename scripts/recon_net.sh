@@ -125,3 +125,13 @@ browser_curl() {
 
   curl "${base_headers[@]}" --compressed "$@"
 }
+
+# Write ~/.recon_es_netrc so ES password never appears on curl command line.
+# Call once at script init; all subsequent curl calls use --netrc-file instead
+# of -u "user:pass".  File is mode 600 (owner-read-only).
+setup_es_netrc() {
+  local ep; ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -z "$ep" ]] && return 0
+  printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc"
+  chmod 600 "$HOME/.recon_es_netrc"
+}

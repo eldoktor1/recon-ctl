@@ -31,6 +31,12 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+# write netrc so ES password stays off curl command line
+if [[ -f "$HOME/.recon_es_pass" ]]; then
+  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -n "$_netrc_ep" ]] && { printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc"; chmod 600 "$HOME/.recon_es_netrc"; }
+  unset _netrc_ep
+fi
 
 mkdir -p "$STATE_DIR"
 
@@ -42,7 +48,7 @@ hdr() { printf '\n\033[1;36m== %s ==\033[0m\n' "$1"; }
 # ---------------------------------------------------------------------------
 _es_search() {
   # _es_search <json_body> — returns raw ES response JSON
-  curl -sS -m30 -u "$ES_USER:$ES_PASS" \
+  curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" \
     -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_search" \
     -d "$1" 2>/dev/null
@@ -50,7 +56,7 @@ _es_search() {
 
 _es_count_q() {
   # _es_count_q <query_json> — returns integer count
-  curl -sS -m10 -u "$ES_USER:$ES_PASS" \
+  curl -sS -m10 --netrc-file "$HOME/.recon_es_netrc" \
     -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_count" \
     -d "{\"query\":$1}" 2>/dev/null | jq -r '.count // 0' 2>/dev/null
@@ -244,11 +250,11 @@ cmd_status() {
   cmd_queue
   hdr "ES health"
   if [[ -n "$ES_PASS" ]]; then
-    curl -fsS -m 5 -u "$ES_USER:$ES_PASS" "$ES_URL/_cluster/health" 2>/dev/null \
+    curl -fsS -m 5 --netrc-file "$HOME/.recon_es_netrc" "$ES_URL/_cluster/health" 2>/dev/null \
       | jq -r '"  status=\(.status) nodes=\(.number_of_nodes) docs?\(.active_primary_shards) shards"' || echo "  ES unreachable"
-    local count; count="$(curl -fsS -m 5 -u "$ES_USER:$ES_PASS" "$ES_URL/$INDEX_NAME/_count" 2>/dev/null | jq -r '.count // "?"')"
+    local count; count="$(curl -fsS -m 5 --netrc-file "$HOME/.recon_es_netrc" "$ES_URL/$INDEX_NAME/_count" 2>/dev/null | jq -r '.count // "?"')"
     echo "  $INDEX_NAME doc count: $count"
-    local params_count; params_count="$(curl -fsS -m 5 -u "$ES_USER:$ES_PASS" "$ES_URL/recon_params/_count" 2>/dev/null | jq -r '.count // "?"')"
+    local params_count; params_count="$(curl -fsS -m 5 --netrc-file "$HOME/.recon_es_netrc" "$ES_URL/recon_params/_count" 2>/dev/null | jq -r '.count // "?"')"
     echo "  recon_params doc count: $params_count"
   else
     echo "  ES_PASS not set"
@@ -809,7 +815,7 @@ cmd_fresh() {
 
   local ES_PASS_VAL; ES_PASS_VAL="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
   local resp
-  resp="$(curl -sS -m30 -u "$ES_USER:$ES_PASS_VAL" \
+  resp="$(curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" \
     -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $fetch_n,
@@ -971,7 +977,7 @@ cmd_tech() {
   [[ "$pays" -eq 1 ]] && extra_filters=',{"term":{"triage_pays":true}},{"term":{"triage_in_scope":true}}'
 
   local resp
-  resp="$(curl -sS -m30 -u "$ES_USER:$ES_PASS_VAL" \
+  resp="$(curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" \
     -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $n,

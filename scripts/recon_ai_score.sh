@@ -23,6 +23,12 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+# write netrc so ES password stays off curl command line
+if [[ -f "$HOME/.recon_es_pass" ]]; then
+  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -n "$_netrc_ep" ]] && { printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc"; chmod 600 "$HOME/.recon_es_netrc"; }
+  unset _netrc_ep
+fi
 
 mkdir -p "$TMP_DIR" "$REJECTED_DIR"
 : > "$OUT"
@@ -287,7 +293,7 @@ while IFS= read -r lead; do
 done < "$candidates_tmp"
 
 if [[ -s "$updates_tmp" && -n "$ES_PASS" ]]; then
-  curl -fsS -m 30 -u "$ES_USER:$ES_PASS" -H 'Content-Type: application/x-ndjson' \
+  curl -fsS -m 30 --netrc-file "$HOME/.recon_es_netrc" -H 'Content-Type: application/x-ndjson' \
     -X POST "$ES_URL/_bulk" --data-binary @"$updates_tmp" >/dev/null 2>&1 \
     || warn "AI ES writeback failed"
 fi

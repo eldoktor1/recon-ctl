@@ -31,6 +31,7 @@ fi
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+setup_es_netrc
 INDEX="${INDEX_NAME:-recon_alive}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
@@ -56,7 +57,7 @@ if [[ -s "$IGNORE_FILE" ]]; then
 fi
 
 # 1. ES record
-es_doc="$(curl -sS -u "$ES_USER:$ES_PASS" "$ES_URL/$INDEX/_doc/$host" 2>/dev/null \
+es_doc="$(curl -sS --netrc-file "$HOME/.recon_es_netrc" "$ES_URL/$INDEX/_doc/$host" 2>/dev/null \
           | jq '._source // null' 2>/dev/null)"
 
 # 2. Scope verdict
