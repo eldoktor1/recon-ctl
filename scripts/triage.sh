@@ -966,7 +966,7 @@ apply_cluster_and_submission() {
         $h + {score: ($h.score - 2), signals: ($h.signals + ["penalty:org-already-submitted"])}
       else $h end
     ) |
-    map(select(.score >= 3)) |
+    map(select(.score >= '"$P2_THRESHOLD"')) |
     # v2.5.3: HARD pattern_only cap — no P0 without confirmed-strength signal
     # or critical port. score_raw clamps base_score to P1-1 for pattern_only
     # but scope/KEV/true_fresh/vuln bonuses get added after, blowing past
@@ -995,6 +995,10 @@ apply_cluster_and_submission() {
              signals: (.signals + ["bonus:ai-test-now"]),
              confidence: "high",
              ai_rec: $ai_rec, ai_score: $ai_score}
+      elif ($ai_rec == "manual_review") then
+        . + {score: (.score + 1),
+             signals: (.signals + ["bonus:ai-manual-review"]),
+             ai_rec: $ai_rec, ai_score: $ai_score}
       elif ($ai_score != null and $ai_score < 40 and (.pattern_only // false)) then
         . + {score: (.score - 2),
              signals: (.signals + ["penalty:ai-low-pattern"]),
@@ -1003,6 +1007,8 @@ apply_cluster_and_submission() {
         . + {ai_rec: ($ai_rec // null), ai_score: ($ai_score // null)}
       end
     ) |
+    # Drop anything AI penalised into non-viable territory
+    map(select(.score > 0)) |
 
     map(. + {
       priority: (
@@ -1019,8 +1025,12 @@ apply_cluster_and_submission() {
         else 4 end
       )
     }) |
-    # Sort: best tier first, then score desc.
-    sort_by([.tier_rank, -.score]) |
+    # Sort: best tier first, then AI priority, then score desc.
+    sort_by([
+      .tier_rank,
+      (.ai_rec // "zz" | if . == "test_now" then 0 elif . == "manual_review" then 1 elif . == "watch" then 2 else 3 end),
+      -.score
+    ]) |
     .[]
   ' "$in" > "$out" 2>/dev/null || true
 
@@ -1039,7 +1049,7 @@ update_es_scores() {
     {"doc":{
       "triage_score":    .score,
       "triage_priority": .priority,
-      "triage_signals":  (.signals | map(select((startswith("penalty:") or startswith("cap:")) | not))),
+      "triage_signals":  (.signals | unique),
       "triage_classes":  .vuln_classes,
       "triage_at":       (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       "triage_program":     (.program // null),
@@ -1063,10 +1073,6 @@ update_es_scores() {
       "triage_ignored_reason":      (.triage_ignored_reason // null),
       "triage_confidence":          (.confidence // "low"),
       "triage_pattern_only":        (.pattern_only // false),
-      "confidence":                 (.confidence // "low"),
-      "pattern_only":               (.pattern_only // false),
-      "final_score":                .score,
-      "last_triaged":               (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       "ai_rec":                     (.ai_rec // null),
       "ai_score":                   (.ai_score // null)
     }}
