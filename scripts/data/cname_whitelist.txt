@@ -1,0 +1,22 @@
+# CNAME whitelist — known-safe CDN/infrastructure CNAMEs that are NEVER takeover targets
+# Format: literal string or glob (* = any chars). One entry per line. Lines starting with # are comments.
+# These are owned by known major companies — resolving to them means the CDN customer is still active.
+#
+# Fastly known-safe customer mappings
+prod.magentocloud.map.fastly.net
+s.magentocommerce.com
+steambroadcast.akamaized.net
+mozilla.map.fastly.net
+hackerone.map.fastly.net
+shopify.map.fastly.net
+#
+# Akamai known-safe
+booking.com.edgekey.net
+#
+# AWS CloudFront — only when cname is to a major known company CDN,
+# generic *.cloudfront.net without known mapping is NOT safe (leave unwhitelisted)
+# Add specific company cloudfront distributions here if needed:
+# <specific-distribution-id>.cloudfront.net
+#
+# Note: *.cloudfront.net generic wildcard is intentionally NOT here
+# because generic CloudFront CNAMEs from unknown customers can be takeovers.

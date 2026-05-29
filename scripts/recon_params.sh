@@ -180,9 +180,9 @@ cmd_collect() {
     | while IFS=$'\t' read -r u classes; do
         local iso; iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         local id; id="$(printf '%s' "$u" | sha1sum | cut -c1-40)"
-        jq -nc --arg u "$u" --arg h "$host" --arg rd "$root" --arg pr "$program" --arg ti "$tier" \
+        jq -nc --arg u "$u" --arg id "$id" --arg h "$host" --arg rd "$root" --arg pr "$program" --arg ti "$tier" \
               --argjson tf "${fresh:-false}" --arg fs "$fseen" --arg ca "$iso" --arg cl "$classes" \
-          '{index:{_id:($u|@base64)}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$bulk"
+          '{index:{_id:$id}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$bulk"
       done
     total_urls=$(( total_urls + $(wc -l < "$hd/urls" | tr -d ' ') ))
     printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"

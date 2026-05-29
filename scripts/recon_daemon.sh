@@ -230,6 +230,56 @@ auto_cleanup() {
   while IFS= read -r -d '' sent; do
     archive_file "$archive_root" "$sent"
   done < <(find "$BASE_DIR/spool/sent" -type f -mtime +7 -print0 2>/dev/null)
+  # Prune failed spool entries > 14d (poisoned bulk batches that will never succeed)
+  local failed_dir="$BASE_DIR/spool/failed"
+  if [[ -d "$failed_dir" ]]; then
+    local pruned_failed=0 _ff
+    while IFS= read -r -d '' _ff; do
+      rm -f "$_ff" && pruned_failed=$(( pruned_failed + 1 )) || true
+    done < <(find "$failed_dir" -maxdepth 1 -type f -mtime +14 -print0 2>/dev/null)
+    [[ "$pruned_failed" -gt 0 ]] && log "auto_cleanup: pruned $pruned_failed stale failed spool entries (>14d)"
+  fi
+  # Rebuild alive_hosts.txt daily — removes offline hosts never seen in ES for 30+ days.
+  # Runs async inside cleanup so it never blocks validate. Uses ES scroll to handle >10k results.
+  local _prune_marker="$STATE_DIR/.alive_hosts_pruned"
+  local _prune_age=$(( $(date -u +%s) - $(cat "$_prune_marker" 2>/dev/null || echo 0) ))
+  if [[ "$_prune_age" -gt 86400 ]]; then
+    local _alive_tmp; _alive_tmp="$(mktemp)"
+    local _scroll_id="" _batch _count=0
+    _batch="$(curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+      -X POST "$ES_URL/$INDEX_NAME/_search?scroll=1m" \
+      -d '{"size":5000,"_source":["host"],"query":{"range":{"last_seen":{"gte":"now-30d/d"}}}}' \
+      2>/dev/null)" || _batch=""
+    if [[ -n "$_batch" ]]; then
+      printf '%s' "$_batch" | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null >> "$_alive_tmp"
+      _scroll_id="$(printf '%s' "$_batch" | jq -r '._scroll_id // empty' 2>/dev/null)"
+      _count=$(( _count + $(printf '%s' "$_batch" | jq '.hits.hits | length' 2>/dev/null || echo 0) ))
+      while [[ -n "$_scroll_id" ]]; do
+        _batch="$(curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+          -X POST "$ES_URL/_search/scroll" \
+          -d "{\"scroll\":\"1m\",\"scroll_id\":\"$_scroll_id\"}" 2>/dev/null)" || break
+        local _hits; _hits="$(printf '%s' "$_batch" | jq '.hits.hits | length' 2>/dev/null || echo 0)"
+        [[ "$_hits" -eq 0 ]] && break
+        printf '%s' "$_batch" | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null >> "$_alive_tmp"
+        _scroll_id="$(printf '%s' "$_batch" | jq -r '._scroll_id // empty' 2>/dev/null)"
+        _count=$(( _count + _hits ))
+      done
+      [[ -n "$_scroll_id" ]] && curl -fsS -m 10 "${ES_AUTH[@]}" -X DELETE \
+        "$ES_URL/_search/scroll" -H 'Content-Type: application/json' \
+        -d "{\"scroll_id\":\"$_scroll_id\"}" >/dev/null 2>&1 || true
+    fi
+    if [[ -s "$_alive_tmp" ]]; then
+      local _before; _before="$(wc -l < "$ALIVE_HOSTS" 2>/dev/null | tr -d ' ')"
+      sort -u "$_alive_tmp" -o "$_alive_tmp"
+      mv "$_alive_tmp" "$ALIVE_HOSTS"
+      local _after; _after="$(wc -l < "$ALIVE_HOSTS" | tr -d ' ')"
+      date -u +%s > "$_prune_marker"
+      log "auto_cleanup: alive_hosts rebuilt $_before → $_after lines (30d window, $INDEX_NAME)"
+    else
+      rm -f "$_alive_tmp"
+      log "auto_cleanup: alive_hosts rebuild failed (ES unreachable?) — keeping existing"
+    fi
+  fi
   # Prune old triage reports — keep 10
   local cnt; cnt="$(ls -t "$BASE_DIR/triage/report_"*.md 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "${cnt:-0}" -gt 10 ]]; then

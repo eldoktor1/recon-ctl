@@ -25,8 +25,9 @@ LOCK_FILE="$STATE_DIR/discovery.lock"
 INBOX_FILE_CAP="${INBOX_FILE_CAP:-200}"
 BATCH_SIZE="${BATCH_SIZE:-2500}"
 
-CHAOS_REFRESH_HOURS="${CHAOS_REFRESH_HOURS:-12}"
-SUBFINDER_REFRESH_HOURS="${SUBFINDER_REFRESH_HOURS:-48}"
+CHAOS_REFRESH_HOURS="${CHAOS_REFRESH_HOURS:-4}"
+SUBFINDER_REFRESH_HOURS="${SUBFINDER_REFRESH_HOURS:-12}"
+ARKADIYT_REFRESH_HOURS="${ARKADIYT_REFRESH_HOURS:-6}"
 
 mkdir -p "$STATE_DIR" "$CACHE_DIR" "$INBOX" "$QUEUE_DIR/processing" "$QUEUE_DIR/done" "$LOG_DIR" "$CACHE_DIR/programs"
 exec 9>"$LOCK_FILE"; flock -n 9 || { warn "discovery already running"; exit 0; }
@@ -35,11 +36,13 @@ CHAOS_CACHE="$CACHE_DIR/chaos_merged.txt"
 CHAOS_INDEX="$CACHE_DIR/chaos_index.json"
 SUB_CACHE="$CACHE_DIR/subfinder_merged.txt"
 ASSET_CACHE="$CACHE_DIR/assetfinder_merged.txt"
+ARKADIYT_CACHE="$CACHE_DIR/arkadiyt_merged.txt"
 ROOT_DOMAINS="$STATE_DIR/root_domains.txt"
 INSCOPE_TSV="${INSCOPE_TSV:-$BASE_DIR/scope/inscope_patterns.tsv}"
 KNOWN_HOSTS="$STATE_DIR/known_hosts.txt"
 LAST_CHAOS="$STATE_DIR/last_chaos.epoch"
 LAST_SUB="$STATE_DIR/last_subfinder.epoch"
+LAST_ARKADIYT="$STATE_DIR/last_arkadiyt.epoch"
 
 touch "$KNOWN_HOSTS" "$ROOT_DOMAINS"
 NOW=$(date +%s)
@@ -52,6 +55,74 @@ if [[ "$(inbox_count)" -ge "$INBOX_FILE_CAP" ]]; then
 fi
 
 age_h() { local f="$1"; [[ -f "$f" ]] || { echo 999999; return; }; echo $(( (NOW - $(cat "$f" 2>/dev/null || echo 0)) / 3600 )); }
+
+# ---- arkadiyt/bounty-targets-data refresh ------------------------------------
+# github.com/arkadiyt/bounty-targets-data — daily-updated aggregator of ALL
+# bug bounty program scopes across HackerOne, Bugcrowd, Intigriti, YesWeHack.
+# We extract every in-scope domain/wildcard and merge into the discovery pool.
+# This ensures we enumerate targets from programs not yet in our local scope DB.
+refresh_arkadiyt() {
+  local age; age="$(age_h "$LAST_ARKADIYT")"
+  if [[ -s "$ARKADIYT_CACHE" && "$age" -lt "$ARKADIYT_REFRESH_HOURS" ]]; then
+    log "arkadiyt cache fresh (${age}h old)"; return
+  fi
+  log "Refreshing arkadiyt/bounty-targets-data scope"
+  local tmp; tmp="$(mktemp -d)"; trap "rm -rf $tmp" RETURN
+  local all="$tmp/all_domains.txt"; : > "$all"
+  local base="https://raw.githubusercontent.com/arkadiyt/bounty-targets-data/main/data"
+
+  # HackerOne — asset_identifier field, filter DOMAIN / URL asset types
+  local hf="$tmp/hackerone.json"
+  if run_net timeout 45 wget -q "${base}/hackerone_data.json" -O "$hf" 2>/dev/null; then
+    jq -r '.[].targets.in_scope[]? |
+      select(.asset_type == "DOMAIN" or .asset_type == "URL") |
+      .asset_identifier // empty' "$hf" 2>/dev/null >> "$all" || true
+  fi
+
+  # Bugcrowd — target field on "website" scope entries
+  local bf="$tmp/bugcrowd.json"
+  if run_net timeout 45 wget -q "${base}/bugcrowd_data.json" -O "$bf" 2>/dev/null; then
+    jq -r '.[].targets.in_scope[]? |
+      select(.type == "website") |
+      .target // empty' "$bf" 2>/dev/null >> "$all" || true
+  fi
+
+  # Intigriti — endpoint field
+  local inf="$tmp/intigriti.json"
+  if run_net timeout 45 wget -q "${base}/intigriti_data.json" -O "$inf" 2>/dev/null; then
+    jq -r '.[].targets.in_scope[]? |
+      .endpoint // empty' "$inf" 2>/dev/null >> "$all" || true
+  fi
+
+  # YesWeHack — scope items
+  local yf="$tmp/yeswehack.json"
+  if run_net timeout 45 wget -q "${base}/yeswehack_data.json" -O "$yf" 2>/dev/null; then
+    jq -r '.[].scopes[]?.scope // empty' "$yf" 2>/dev/null >> "$all" || true
+  fi
+
+  # Normalise: strip http(s)://, paths, quotes, leading *., lowercase, dedup
+  tr '[:upper:]' '[:lower:]' < "$all" \
+    | sed -E 's#https?://##; s#/.*##; s#[[:space:]]##g; s#^"##; s#"$##; s#^\*\.##' \
+    | grep -E '^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$' \
+    | grep -v '\*' \
+    | sort -u > "$ARKADIYT_CACHE.new"
+
+  local n; n="$(wc -l < "$ARKADIYT_CACHE.new" | tr -d ' ')"
+  local old_n=0
+  [[ -s "$ARKADIYT_CACHE" ]] && old_n="$(wc -l < "$ARKADIYT_CACHE" | tr -d ' ')"
+  local threshold=$(( old_n / 2 ))
+  if [[ "$n" -eq 0 ]]; then
+    warn "arkadiyt fetch returned 0 domains — keeping old cache"
+    rm -f "$ARKADIYT_CACHE.new"
+  elif [[ "$old_n" -gt 0 && "$n" -lt "$threshold" ]]; then
+    warn "arkadiyt fetch returned only $n domains (was $old_n, threshold $threshold) — possible truncation, keeping old cache"
+    rm -f "$ARKADIYT_CACHE.new"
+  else
+    mv "$ARKADIYT_CACHE.new" "$ARKADIYT_CACHE"
+    echo "$NOW" > "$LAST_ARKADIYT"
+    log "arkadiyt cache: $n domains (HackerOne+Bugcrowd+Intigriti+YesWeHack)"
+  fi
+}
 
 # ---- Chaos refresh (incremental) ----
 refresh_chaos() {
@@ -106,12 +177,18 @@ refresh_chaos() {
 # Pre-v2.6 this used Chaos ONLY, so fresh paying programs absent from Chaos were
 # never enumerated — the opposite of the "fresh-first" goal.
 extract_roots() {
-  local chaos_roots paying_roots
-  chaos_roots="$(mktemp)"; paying_roots="$(mktemp)"
+  local chaos_roots paying_roots arkadiyt_roots
+  chaos_roots="$(mktemp)"; paying_roots="$(mktemp)"; arkadiyt_roots="$(mktemp)"
 
   if [[ -s "$CHAOS_CACHE" ]]; then
     awk -F. '{ if (NF >= 2) print $(NF-1)"."$NF }' "$CHAOS_CACHE" \
       | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$chaos_roots"
+  fi
+
+  # arkadiyt has exact domains/wildcards — extract apex root from each
+  if [[ -s "$ARKADIYT_CACHE" ]]; then
+    awk -F. '{ if (NF >= 2) print $(NF-1)"."$NF }' "$ARKADIYT_CACHE" \
+      | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$arkadiyt_roots"
   fi
 
   if [[ -s "$INSCOPE_TSV" ]]; then
@@ -121,13 +198,16 @@ extract_roots() {
     }' "$INSCOPE_TSV" | grep -E '^[a-z0-9-]+\.[a-z]{2,}$' | sort -u > "$paying_roots"
   fi
 
-  # Paying roots first, then chaos; dedup preserving first occurrence (priority).
-  cat "$paying_roots" "$chaos_roots" | awk 'NF && !seen[$0]++' > "$ROOT_DOMAINS.new"
+  # Priority order: paying > arkadiyt (all BB programs) > chaos; dedup preserving order.
+  cat "$paying_roots" "$arkadiyt_roots" "$chaos_roots" | awk 'NF && !seen[$0]++' > "$ROOT_DOMAINS.new"
   mv "$ROOT_DOMAINS.new" "$ROOT_DOMAINS"
-  local pn cn; pn="$(wc -l < "$paying_roots" | tr -d ' ')"; cn="$(wc -l < "$chaos_roots" | tr -d ' ')"
-  rm -f "$chaos_roots" "$paying_roots"
-  [[ -s "$ROOT_DOMAINS" ]] || { log "No roots (no chaos cache, no scope DB)"; return; }
-  log "Roots: $(wc -l < "$ROOT_DOMAINS") (paying-scope: $pn first, chaos: $cn)"
+  local pn an cn
+  pn="$(wc -l < "$paying_roots"  | tr -d ' ')"
+  an="$(wc -l < "$arkadiyt_roots" | tr -d ' ')"
+  cn="$(wc -l < "$chaos_roots"   | tr -d ' ')"
+  rm -f "$chaos_roots" "$paying_roots" "$arkadiyt_roots"
+  [[ -s "$ROOT_DOMAINS" ]] || { log "No roots (no chaos/arkadiyt cache, no scope DB)"; return; }
+  log "Roots: $(wc -l < "$ROOT_DOMAINS") (paying-scope: $pn first, arkadiyt: $an, chaos: $cn)"
 }
 
 # ---- Subfinder (refresh sparingly) ----
@@ -218,7 +298,7 @@ emit_batches() {
   all="$(mktemp)"; delta="$(mktemp)"; filtered="$(mktemp)"
   trap "rm -f $all $delta $filtered" RETURN
 
-  cat "$CHAOS_CACHE" "${SUB_CACHE:-/dev/null}" "${ASSET_CACHE:-/dev/null}" 2>/dev/null \
+  cat "$CHAOS_CACHE" "${ARKADIYT_CACHE:-/dev/null}" "${SUB_CACHE:-/dev/null}" "${ASSET_CACHE:-/dev/null}" 2>/dev/null \
     | sort -u > "$all"
   # Shared lock: discovery, validate AND cloudrecon all rewrite known_hosts under
   # their own (different) per-loop locks, so without this they race and lose
@@ -257,6 +337,7 @@ emit_batches() {
 main() {
   log "=== discovery cycle start ==="
   refresh_chaos
+  refresh_arkadiyt
   extract_roots
   refresh_subfinder
   refresh_assetfinder
