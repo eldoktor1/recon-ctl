@@ -128,10 +128,13 @@ browser_curl() {
 
 # Write ~/.recon_es_netrc so ES password never appears on curl command line.
 # Call once at script init; all subsequent curl calls use --netrc-file instead
-# of -u "user:pass".  File is mode 600 (owner-read-only).
+# of -u "user:pass".  Silent no-op when running as reconrun (no write access to
+# d0k home) — the daemon writes the file as d0k and grants reconrun read via setfacl.
 setup_es_netrc() {
   local ep; ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
   [[ -z "$ep" ]] && return 0
-  printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc"
-  chmod 600 "$HOME/.recon_es_netrc"
+  if printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc" 2>/dev/null; then
+    chmod 600 "$HOME/.recon_es_netrc"
+    command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true
+  fi
 }
