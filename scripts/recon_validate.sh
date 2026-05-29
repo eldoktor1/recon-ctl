@@ -35,7 +35,11 @@ ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-}"
 [[ -z "$ES_PASS" && -f "$HOME/.recon_es_pass" ]] && ES_PASS="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
 [[ -z "$ES_PASS" ]] && die "ES password not set"
-setup_es_netrc
+if [[ -f "$HOME/.recon_es_pass" ]]; then
+  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -n "$_netrc_ep" ]] && { printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc"; chmod 600 "$HOME/.recon_es_netrc"; }
+  unset _netrc_ep
+fi
 ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 # httpx tuning (set by daemon based on mode)
