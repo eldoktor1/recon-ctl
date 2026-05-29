@@ -286,7 +286,29 @@ process_batch() {
         root_domain:$root, last_seen:$ts, first_seen:$ts
       } | with_entries(select(.value!=null and .value!="" and .value!=[]))
       | . + {host:$canon, last_seen:$ts, first_seen:$ts}
-    ' "$httpx_out" > "$norm_out" 2>/dev/null || true
+    ' "$httpx_out" 2>/dev/null \
+    | python3 -c '
+import sys, json
+try:
+    from publicsuffixlist import PublicSuffixList
+    _psl = PublicSuffixList()
+    def _apex(h):
+        r = _psl.privatesuffix(h)
+        return r if r else ".".join(h.split(".")[-2:]) if h.count(".") >= 1 else h
+except Exception:
+    def _apex(h):
+        return ".".join(h.split(".")[-2:]) if h.count(".") >= 1 else h
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line: continue
+    try:
+        obj = json.loads(line)
+        host = obj.get("host", "")
+        if host: obj["root_domain"] = _apex(host)
+        sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    except Exception:
+        sys.stdout.write(line + "\n")
+' > "$norm_out" || true
 
     # ---- Bulk ingest ES ----
     local spool="$SPOOL/pending/${stem}.jsonl"

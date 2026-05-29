@@ -42,7 +42,7 @@ AGENT_FILE="$TRIAGE_DIR/agent_targets.jsonl"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
+ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 ES_AUTH=(-u "$ES_USER:$ES_PASS")
 
 # Discord: bounty-scan findings → #vulns via discord_hook() (recon_net.sh)
@@ -172,6 +172,8 @@ mode_deep_scan() {
       _source:["host","url","tech"],
       query:{bool:{filter:[
         {term:{triage_true_fresh:true}},
+        {term:{triage_in_scope:true}},
+        {term:{triage_pays:true}},
         {exists:{field:"tech"}}
       ]}},
       sort:[{"triage_score":{order:"desc"}}]

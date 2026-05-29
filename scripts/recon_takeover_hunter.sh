@@ -55,6 +55,9 @@ LOCK_FILE="$STATE_DIR/takeover_hunter.lock"
 # CNAME whitelist (Fix 6) — safe CDN CNAMEs that are never takeovers
 CNAME_WHITELIST_FILE="${CNAME_WHITELIST_FILE:-$SCRIPT_DIR/data/cname_whitelist.txt}"
 
+# Fingerprint DB — provider signatures for subdomain takeover detection
+FINGERPRINT_DB_FILE="${FINGERPRINT_DB_FILE:-$SCRIPT_DIR/data/takeover_fingerprints.tsv}"
+
 # HackerOne / Bugcrowd disclosed-report lookup (Fix 7)
 HACKERONE_API_TOKEN="${HACKERONE_API_TOKEN:-}"
 BUGCROWD_API_TOKEN="${BUGCROWD_API_TOKEN:-}"
@@ -83,106 +86,10 @@ for c in dig curl jq awk grep sort head tail flock timeout; do
 done
 
 # =============================================================================
-# FINGERPRINT DATABASE
-# Format (^-separated, allows regex chars in fields):
-#   service^cname_regex^nx_trigger^http_regex^status_csv^difficulty^payout^claim
-#
-# nx_trigger: "yes" if NXDOMAIN on CNAME target alone is sufficient
-# difficulty: easy|medium|hard|impossible
-# payout: typical bounty range USD
-# Sources: github.com/EdOverflow/can-i-take-over-xyz, my own tracking,
-#          PortSwigger research, HackerOne disclosed reports.
+# FINGERPRINT DATABASE -- stored in scripts/data/takeover_fingerprints.tsv
+# Format (^-separated): service^cname_regex^nx_trigger^http_regex^status_csv^difficulty^payout^claim
+# Edit that file to add or update providers without touching this script.
 # =============================================================================
-read -r -d '' FINGERPRINT_DB <<'FPDB' || true
-github_pages^\.github\.io\.?$^no^There isn'?t a GitHub Pages site here\.|For root URLs \(like http://example\.com/\) you must provide an index\.html file^404^easy^$500-$3000^Create GitHub repo named exactly equal to the dangling host. In repo Settings → Pages, set source to main branch. Add CNAME file containing the dangling host. Wait for cert provisioning.
-heroku^\.herokuapp\.com\.?$^no^No such app|herokucupcake^404^easy^$500-$2500^Register the herokuapp.com app name shown in the CNAME via Heroku CLI: heroku create <app-name>. Then add custom domain: heroku domains:add <dangling-host>.
-aws_s3^\.s3[.-].*\.amazonaws\.com\.?$|\.s3\.amazonaws\.com\.?$|\.s3-website[.-].*\.amazonaws\.com\.?$^no^The specified bucket does not exist|NoSuchBucket^404^easy^$1000-$5000^Identify exact bucket name from CNAME. Create S3 bucket with that name in correct region. Enable static website hosting if subdomain pointed to website endpoint. Note: bucket name is region-locked globally.
-aws_cloudfront^\.cloudfront\.net\.?$^no^Bad request\.\s*<\/Code>|The request could not be satisfied^403^impossible^N/A^CloudFront takeovers require the original AWS account that allocated the distribution ID. Not exploitable in modern AWS. Report only if you can prove account ownership claim path.
-azure_websites^\.azurewebsites\.net\.?$^yes^404 Web Site not found|Error 404 - Web app not found^404^medium^$500-$2000^In Azure Portal create a new App Service with the exact name from the CNAME. Add custom domain mapping after deployment. Requires Azure subscription.
-azure_cloudapp^\.cloudapp\.net\.?$|\.cloudapp\.azure\.com\.?$^yes^^^medium^$500-$2000^Recreate cloud service / VM with the exact deployment ID name in matching region. Requires Azure subscription.
-azure_trafficmanager^\.trafficmanager\.net\.?$^yes^^^medium^$500-$2000^Create Traffic Manager profile with same DNS prefix. Requires Azure subscription.
-azure_blob^\.blob\.core\.windows\.net\.?$^yes^^^medium^$500-$2000^Create storage account with the same prefix. Region matters.
-azure_cdn^\.azureedge\.net\.?$^yes^^^medium^$500-$2000^Create Azure CDN profile/endpoint with same name.
-shopify^\.myshopify\.com\.?$^no^Sorry, this shop is currently unavailable^404^medium^$500-$1500^Shopify changed their flow. Open a support ticket as a customer claiming the domain — sometimes succeeds. Lower confidence than it used to be.
-fastly^\.fastly\.net\.?$|\.fastlylb\.net\.?$^no^Fastly error: unknown domain|Domain has not been added to a Fastly service^200,404^medium^$500-$2000^Create Fastly account, add a service with the dangling host as a domain. Free tier sufficient.
-tumblr^domains\.tumblr\.com\.?$|\.tumblr\.com\.?$^no^Whatever you were looking for doesn'?t actually exist|There'?s nothing here\.^404^easy^$200-$1000^Register a free Tumblr blog with the username matching the CNAME prefix. Add custom domain in settings.
-ghost_io^\.ghost\.io\.?$^no^The thing you were looking for is no longer here, or never was^404^medium^$300-$1500^Sign up for Ghost(Pro), claim subdomain matching the CNAME.
-helpjuice^\.helpjuice\.com\.?$^no^We could not find what you'?re looking for\.^404^medium^$200-$1500^Sign up for Helpjuice, claim the subdomain in their admin panel.
-helpscout^\.helpscout\.net\.?$^no^No settings were found for this company^404^medium^$200-$1500^Create Help Scout account, add the matching company subdomain.
-cargo^.*\.cargocollective\.com\.?$|.*\.cargo\.site\.?$^no^404 Not Found|If you'?re moving your domain away from Cargo^404^medium^$200-$1000^Sign up for Cargo, claim the subdomain.
-statuspage^\.statuspage\.io\.?$^no^You are being <a href=\"https://www\.statuspage\.io^301,302^impossible^N/A^StatusPage hardened. Only worth investigating if cname target literally NXDOMAINs.
-tictail^domains\.tictail\.com\.?$^yes^^^medium^$200-$1000^Defunct service — site no longer exists. Manual investigation required.
-unbounce^\.unbouncepages\.com\.?$^no^The requested URL was not found on this server^404^medium^$300-$1500^Create Unbounce account, add domain mapping with the dangling CNAME prefix.
-wishpond^.*\.wishpond\.com\.?$^no^https://www\.wishpond\.com/404\?campaign=true^404^medium^$300-$1000^Create Wishpond account and claim campaign URL.
-aftership^\.aftership\.com\.?$^no^Oops\.</h2><p class=\"text-muted text-tight\">The page^404^medium^$300-$1000^Sign up for AfterShip, claim the matching tracking subdomain.
-aha^\.ideas\.aha\.io\.?$^no^There is no portal here\.\.\. sending you back to Aha!^404^medium^$300-$1000^Create Aha! account, claim ideas portal with matching prefix.
-bigcartel^.*\.bigcartel\.com\.?$^no^<h1>Oops! We couldn'?t find that page\.^404^medium^$200-$1000^Sign up for Big Cartel, choose username matching CNAME prefix.
-acquia^\.acquia-sites\.com\.?$^no^If you are an Acquia Cloud customer^404^hard^$500-$2000^Acquia is paid enterprise — generally not exploitable without account. Report only if pattern strong.
-agile_crm^\.agilecrm\.com\.?$^no^Sorry, this page is no longer available\.^404^medium^$200-$800^Sign up for Agile CRM, claim subdomain.
-anima^\.animaapp\.io\.?$^no^If this is your website and you'?ve just created it^404^medium^$200-$800^Anima account; claim the subdomain in their hosting flow.
-campaignmonitor^createsend\.com\.?$|.*\.createsend\.com\.?$^no^Trying to access your account\?|Double check the URL or^404^medium^$300-$1500^Campaign Monitor account; add custom domain matching CNAME.
-canny^\.canny\.io\.?$^no^Company Not Found^404^medium^$300-$1000^Sign up for Canny, create company with subdomain matching CNAME.
-flywheel^.*\.flywheelsites\.com\.?$|.*\.getflywheel\.com\.?$^no^We'?re sorry, you'?ve landed on a page^404^hard^$300-$1500^Flywheel hosting — paid signup required to claim.
-frontify^.*\.frontify\.com\.?$^no^^404^hard^$300-$1500^Frontify Brand Hub — paid plan needed.
-getresponse^\.gr8\.com\.?$|.*\.getresponse\.com\.?$^no^With GetResponse Landing Pages, lead generation^404^medium^$300-$1500^GetResponse account; claim landing page subdomain.
-gitbook^.*\.gitbook\.io\.?$^no^If you need specifics, contact us^404^medium^$300-$1000^GitBook account; claim org/space subdomain.
-hatenablog^.*\.hatenablog\.com\.?$|hatenablog\.com\.?$^no^404 Blog is not found^404^medium^$200-$800^Hatena account; create blog with matching subdomain.
-hubspot^.*\.hs-sites\.com\.?$|.*\.hubspotpagebuilder\.com\.?$^no^domain not found|This page isn'?t available^404^hard^$500-$2000^HubSpot — paid enterprise, manually investigate.
-intercom^.*\.custom\.intercom\.help\.?$|.*\.intercom\.help\.?$^no^This page is reserved for artistic dogs|Uh oh\. That page doesn'?t exist^404^medium^$300-$1500^Intercom Articles custom domain; account needed.
-kajabi^.*\.kajabi\.com\.?$^no^The page you were looking for doesn'?t exist\.^404^medium^$300-$1000^Kajabi account; claim site with matching subdomain.
-launchrock^.*\.launchrock\.com\.?$^no^It looks like you may have taken a wrong turn somewhere\^404^medium^$200-$800^LaunchRock account; claim subdomain.
-mashery^.*\.mashery\.com\.?$^no^Unrecognized domain <strong>^404^impossible^N/A^Mashery (TIBCO) — manual investigation only.
-nationbuilder^.*\.nationbuilder\.com\.?$^no^no website here|nationbuilder\.com$^404^medium^$300-$1500^NationBuilder account; map matching subdomain.
-netlify^\.netlify\.com\.?$|\.netlify\.app\.?$^no^Not Found - Request ID:|Page Not Found.*Looks like you'?ve followed a broken link^404^easy^$300-$1500^Netlify free account; create site, set custom domain to dangling host.
-ngrok^\.ngrok\.io\.?$|\.ngrok-free\.app\.?$|\.ngrok\.app\.?$^no^Tunnel.*not found|ERR_NGROK_3200|ERR_NGROK_6022^404,502^medium^$200-$800^Run ngrok with the matching reserved domain. Paid plan required for reserved domains.
-pantheon^\.pantheonsite\.io\.?$^no^The gods are wise, but do not know of the site|404 error unknown site!^404^medium^$300-$1500^Pantheon account; create site with matching slug.
-readme^\.readme\.io\.?$^no^Project doesnt exist\.\.\. yet!^404^medium^$300-$1000^ReadMe account; create project with matching subdomain.
-smartling^.*\.smartling\.com\.?$^no^Domain is not configured$^404^hard^$300-$1500^Smartling — paid enterprise, manual investigation.
-smugmug^domains\.smugmug\.com\.?$^yes^^^medium^$300-$1000^SmugMug account; configure custom domain.
-strikingly^.*\.strikingly\.com\.?$|.*\.strikinglydns\.com\.?$^no^PAGE NOT FOUND\.|page is currently offline\.^404^easy^$300-$1500^Strikingly free account; claim subdomain.
-surge_sh^.*\.surge\.sh\.?$^no^project not found^404^easy^$200-$1000^surge install via npm; surge --domain <host> deploy any directory.
-teamwork^.*\.teamwork\.com\.?$^no^Oops - We didn'?t find your site\.^404^medium^$300-$1000^Teamwork account; map custom subdomain.
-thinkific^.*\.thinkific\.com\.?$^no^You may have mistyped the address|page may have moved\.^404^medium^$300-$1500^Thinkific account; claim subdomain.
-tilda^.*\.tilda\.ws\.?$^no^Please renew your subscription^404^medium^$300-$1000^Tilda account; map matching project.
-uberflip^.*\.uberflip\.com\.?$^no^The URL you'?ve accessed does not provide a hub^404^medium^$300-$1500^Uberflip account; claim hub subdomain.
-useresponse^.*\.useresponse\.com\.?$^no^The page you were looking for doesn'?t exist^404^medium^$300-$1000^UseResponse account; configure subdomain.
-vend^.*\.vendecommerce\.com\.?$^no^Looks like you'?ve traveled too far into cyberspace^404^medium^$300-$1000^Vend account; map subdomain.
-webflow^\.webflow\.io\.?$|\.webflow\.com\.?$^no^The page you are looking for doesn'?t exist|<p class=\"description\">The page you are looking for doesn'?t exist^404^easy^$300-$1500^Webflow account; create project, set custom domain.
-wordpress_com^.*\.wordpress\.com\.?$^no^Do you want to register .*\.wordpress\.com\?^404^medium^$200-$800^WordPress.com account; claim site with matching slug.
-worksites^.*\.worksites\.net\.?$^no^Hello! Sorry, but the website you'?re looking for^404^medium^$200-$800^Worksites account; claim site.
-wpengine^.*\.wpengine\.com\.?$^no^The site you were looking for couldn'?t be found\.^404^hard^$500-$2000^WP Engine paid hosting — claim via account.
-zendesk^.*\.zendesk\.com\.?$^no^Help Center Closed^404^medium^$500-$2000^Zendesk Help Center setup; subdomain matches CNAME prefix.
-freshdesk^.*\.freshdesk\.com\.?$^no^^404^hard^$300-$1500^Freshdesk — paid; manual investigation.
-desk_com^.*\.desk\.com\.?$^yes^^^impossible^N/A^Desk.com defunct (Salesforce killed). Mostly historical.
-brightcove^bcvp0rtal\.com\.?$|brightcovegallery\.com\.?$|gallery\.video\.?$^no^^^hard^$500-$2000^Brightcove Gallery — manual investigation, account-bound.
-feedpress^redirect\.feedpress\.me\.?$^no^The feed has not been found\.^404^medium^$300-$1000^FeedPress account; map redirect.
-hatena^.*\.hatena\.ne\.jp\.?$^no^^404^medium^$200-$800^Hatena Japan; account flow.
-helprace^.*\.helprace\.com\.?$^no^^404^medium^$200-$800^Helprace account.
-ngrok_v2^.*\.ngrok\.app\.?$|.*\.ngrok-free\.app\.?$^no^ERR_NGROK_3200|Tunnel.*not found^404,502^medium^$200-$800^ngrok reserved domain (paid).
-short_io^.*\.short\.io\.?$^no^This domain is not configured on Short\.io^404^medium^$200-$1000^short.io account; configure custom domain.
-simplebooklet^^no^[Bb]ooklet not found^404^medium^$200-$800^Simplebooklet account; claim slug.
-smarterqueue^.*\.smarterqueue\.com\.?$^no^^^hard^$300-$1500^SmarterQueue paid; manual.
-strikingly_2^.*\.s\.strikinglydns\.com\.?$^no^PAGE NOT FOUND^404^easy^$300-$1500^Same as strikingly — claim site.
-surveygizmo^.*\.surveygizmo\.com\.?$|.*\.alchemer\.com\.?$^no^^^hard^$300-$1500^Alchemer (formerly SurveyGizmo) — paid account.
-tave^.*\.tave\.com\.?$^no^<h1>Error 404: Page Not Found^404^medium^$200-$800^Tave Studio Manager; subdomain claim.
-tilda_2^.*\.tilda\.cc\.?$^no^Please renew your subscription^404^medium^$300-$1000^Tilda — same as tilda.ws.
-unbounce_2^.*\.unbouncepages\.com\.?$^no^The requested URL was not found on this server^404^medium^$300-$1500^Unbounce account.
-uservoice^.*\.uservoice\.com\.?$^no^This UserVoice subdomain is currently available!^404^medium^$300-$1000^UserVoice account; claim subdomain.
-wufoo^.*\.wufoo\.com\.?$^no^Hmmm\.\.\.\.the page you'?re looking for can'?t be found^404^medium^$200-$800^Wufoo account; map form subdomain.
-zerigo^.*\.zerigo\.com\.?$^no^^^impossible^N/A^Zerigo defunct.
-render^\.onrender\.com\.?$^yes^Not Found^404^easy^$200-$2000^Create Render account (render.com). Deploy any web service — set the service name to exactly match the dangling hostname prefix. Custom domain is auto-configured once service is live. Free tier available.
-vercel^\.vercel\.app\.?$|\.now\.sh\.?$^no^The deployment you are looking for does not exist\.|404: NOT_FOUND^404^easy^$200-$2000^Create Vercel account. Deploy any project: npx vercel --name <prefix>. The project slug must match the dangling CNAME prefix exactly. Free tier available.
-fly_io^\.fly\.dev\.?$^no^404 page not found|502 Bad Gateway^404,502^medium^$200-$1500^Fly.io account (fly.io); create app matching the subdomain: fly launch --name <name>. App names are globally unique. Free allowance available.
-railway^\.up\.railway\.app\.?$^yes^404 Not Found^404^easy^$200-$1000^Railway account (railway.app); create project and deploy service. Set the service domain to match the dangling subdomain slug. Free tier available.
-aws_elasticbeanstalk^\.elasticbeanstalk\.com\.?$^yes^Error 404 - Not Found|AWS Elastic Beanstalk^404^medium^$500-$3000^AWS account; create Elastic Beanstalk environment with matching subdomain in the correct region. Environment CNAME is <name>.<region>.elasticbeanstalk.com — region must match.
-gcp_appengine^\.appspot\.com\.?$^no^404 Not Found|This application does not exist|The requested URL was not found on this server^404^medium^$500-$3000^GCP account; create App Engine application with matching project ID. Project IDs are globally unique. 'gcloud app deploy' any minimal app.yaml.
-firebase^\.firebaseapp\.com\.?$|\.web\.app\.?$^no^Firebase Hosting Setup Complete|404.*firebase|No site associated^404^medium^$500-$3000^GCP/Firebase account; create project with matching ID. 'firebase init hosting' then 'firebase deploy'. Project IDs globally unique — first-come first-served.
-digitalocean_apps^\.ondigitalocean\.app\.?$^yes^404 Not Found^404^medium^$300-$1500^DigitalOcean Apps account; create App Platform app and set the matching app slug. Free starter tier available.
-cloudflare_pages^\.pages\.dev\.?$^no^NOT_FOUND|There is no Pages project with that name^404^easy^$200-$1500^Cloudflare free account; create Pages project matching the subdomain. 'wrangler pages project create <name>' then deploy any static site.
-koyeb^\.koyeb\.app\.?$^no^404 - App Not Found|This Koyeb app does not exist^404^medium^$200-$1000^Koyeb account (koyeb.com); create service with matching app name. App names are globally unique.
-supabase^\.supabase\.co\.?$^yes^404: Supabase project not found|Project not found^404^medium^$300-$2000^Supabase account; create project — project ref (subdomain prefix) must match dangling hostname prefix. Project refs are permanent.
-deno_deploy^\.deno\.dev\.?$^no^404: Deployment not found|Deploy project not found^404^easy^$200-$1000^Deno Deploy account (deno.com/deploy); create project with matching name. Deploy any script via deployctl or GitHub Actions.
-FPDB
 
 # =============================================================================
 # Helper: load fingerprint DB into associative arrays
@@ -200,7 +107,7 @@ load_fingerprints() {
     FP_DIFF+=("$diff")
     FP_PAYOUT+=("$payout")
     FP_CLAIM+=("$claim")
-  done <<< "$FINGERPRINT_DB"
+  done < "$FINGERPRINT_DB_FILE"
   log "Loaded ${#FP_SVC[@]} provider fingerprints"
 
   # Fix 6: load CNAME whitelist
