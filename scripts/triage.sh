@@ -165,7 +165,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","ai_recommendation","ai_relevance_score"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -245,7 +245,6 @@ score_raw() {
     def cname_match($p):  (.cname // "") | ascii_downcase | test($p; "i");
     def port_in($ports):  (.port // 0) as $p | $ports | index($p) != null;
     def is_redirect:      (.status_code == 301 or .status_code == 302 or .status_code == 307 or .status_code == 308);
-    def has_confirmed_tech: ((.tech // []) | length) > 0;
     def no_tech:          ((.tech // []) | length) == 0;
     def hours_since_first:
       if (.first_seen // "") == "" then 99999
@@ -547,6 +546,20 @@ score_raw() {
     ((.port // 0) | (. as $p | $critical_ports | index($p) != null)) as $has_critical_port |
     ((($strengths | any(. == "confirmed")) or $has_critical_port) | not) as $pattern_only |
 
+    # Fix 11: confidence band
+    # high: confirmed tech match + 2+ independent signals
+    # medium: status code match + pattern match OR single confirmed tech
+    # low: pattern-only, no tech confirmation
+    (($signals | map(select(.strength == "confirmed")) | length) >= 2) as $multi_confirmed |
+    (($signals | map(select(.strength == "confirmed")) | length) == 1) as $single_confirmed |
+    (($signals | map(select(.strength == "status")) | length) >= 1) as $has_status_signal |
+    ($pattern_only | not) as $has_confirmed |
+    (if ($multi_confirmed) then "high"
+     elif ($single_confirmed) then (if $has_status_signal then "high" else "medium" end)
+     elif ($has_status_signal and ($pattern_only | not)) then "medium"
+     elif ($has_confirmed) then "medium"
+     else "low" end) as $confidence_band |
+
     # age_hours is retained as a reporting field only — it no longer affects
     # scoring (the local first_seen-based freshness engine was removed in v2.5).
     hours_since_first as $age_h |
@@ -554,6 +567,12 @@ score_raw() {
     # === Effective score ===
     (if $pattern_only and $base_score >= '"$P1_THRESHOLD"' then '"$P1_THRESHOLD"' - 1
      else $base_score end) as $score |
+
+    # Fix 11: prefix actions with [CONFIRMED] or [HYPOTHESIS] based on signal strength
+    ($signals | map(select(.strength == "confirmed") | .action) | map(select(. != ""))) as $confirmed_actions |
+    ($signals | map(select(.strength != "confirmed") | .action) | map(select(. != ""))) as $hypothesis_actions |
+    (($confirmed_actions | map("[CONFIRMED] " + .)) +
+     ($hypothesis_actions | map("[HYPOTHESIS] " + .))) as $annotated_actions |
 
     {
       host: .host, url:(.url // ""), scheme:(.scheme // ""),
@@ -565,14 +584,19 @@ score_raw() {
       last_seen:(.last_seen // ""),
       score: $score, base_score: $base_score,
       pattern_only: $pattern_only, age_hours: $age_h,
+      confidence: $confidence_band,
       signals: $matched_sigs, strengths: $strengths,
-      vuln_classes: $vuln_classes, actions: $actions
+      vuln_classes: $vuln_classes, actions: $annotated_actions
     }
   ' "$_chunk" > "${_chunk}.out" 2>/dev/null &
     pids+=($!)
   done
 
-  wait "${pids[@]}" 2>/dev/null || true
+  local _jq_fail=0
+  for _pid in "${pids[@]}"; do
+    wait "$_pid" 2>/dev/null || (( _jq_fail++ )) || true
+  done
+  [[ "$_jq_fail" -gt 0 ]] && warn "score_raw: $_jq_fail jq worker(s) exited non-zero — partial output accepted"
   cat "$tmpdir"/chunk_*.out > "$out" 2>/dev/null || true
   rm -rf "$tmpdir"
 }
@@ -659,7 +683,18 @@ apply_scope_kev_enrichment() {
       (if ($s.pays // false) then $pays_bonus else 0 end) as $pays_b |
 
       # KEV bonus if host appears in kev_targets
-      (if ($k.signal // null) != null then $kev_bonus else 0 end) as $kev_b |
+      # Fix 10: WordPress KEV specificity — KEV bonus for WordPress only when a specific
+      # plugin+version is confirmed (plugin_name + plugin_version fields set in ES doc).
+      # Generic "tech:wordpress" alone does NOT trigger KEV bonus.
+      (($k.signal // "") | test("wordpress|wp-"; "i")) as $is_wp_kev |
+      (($r.tech // []) | map(ascii_downcase) | any(. == "wordpress")) as $has_wp_tech |
+      # A "wordpress KEV" without confirmed plugin+version is not actionable
+      (($r.plugin_name // null) != null and ($r.plugin_version // null) != null) as $has_plugin_confirm |
+      (if ($k.signal // null) != null then
+         (if ($is_wp_kev and $has_wp_tech and ($has_plugin_confirm | not))
+          then 0   # WordPress KEV without confirmed plugin version — no bonus
+          else $kev_bonus end)
+       else 0 end) as $kev_b |
 
       # Out-of-scope penalty
       (if ($s.out_of_scope // false) then $oos_penalty else 0 end) as $oos_b |
@@ -801,12 +836,16 @@ apply_extra_enrichment() {
     # breaking-vuln bonus at the T2 level. Confirmed strong tech (jenkins,
     # k8s, confluence, etc.) gets the full bonus.
     (($r.tech // []) | map(ascii_downcase)) as $tech_lc |
-    (($tech_lc | any(. == "wordpress" or . == "drupal" or . == "joomla")) and
-     ($tech_lc | all(. == "wordpress" or . == "drupal" or . == "joomla" or
-                     . == "iis" or . == "apache" or . == "nginx" or . == "php"))) as $is_noisy_only |
     (($r.signals // []) | any(startswith("tech:") and
                               (test("(jenkins|confluence|gitlab|k8s|grafana|kibana|elasticsearch|moveit|citrix|fortinet|pulse|vmware|f5|paloalto|exchange|nifi|superset|metabase|jupyter|activemq|telerik|veeam|connectwise|coldfusion|thinkphp|struts|weblogic|manageengine|laravel-debug|argocd|rancher|portainer|harbor|docker-registry|es-exposed|nexus|airflow|magento)"; "i")
                              ))) as $has_strong_tech |
+    # A host is "noisy-only" if the tech list contains a generic CMS (WordPress/
+    # Drupal/Joomla) AND no confirmed high-value signal fired. The old all()-based
+    # check against a fixed CMS+webserver whitelist was bypassed by any extra tech
+    # httpx detects (jQuery, Bootstrap, GA, etc.), inflating vuln bonuses on CMS
+    # sites. Defining $has_strong_tech first (above) then using it here is correct.
+    (($tech_lc | any(. == "wordpress" or . == "drupal" or . == "joomla")) and
+     ($has_strong_tech | not)) as $is_noisy_only |
 
     # vuln-feed bonus — gated to true_fresh only, dampened for noisy-only hosts
     (if $is_true_fresh and $vfh != null then
@@ -815,7 +854,7 @@ apply_extra_enrichment() {
         elif $vfh.tier == "T2" then $t2_bonus
         elif $vfh.tier == "T3" then $t3_bonus
         else 0 end) as $raw |
-       if ($is_noisy_only and ($has_strong_tech | not)) then
+       if $is_noisy_only then
          ([$raw, $t2_bonus] | min)
        else $raw end)
      else 0 end) as $vf_b |
@@ -864,43 +903,66 @@ apply_cluster_and_submission() {
   local in="$1" out="$2"
 
   # Load submitted hosts/root_domains for dedup
-  local subs_filter; subs_filter="$(mktemp)"
+  local subs_filter subs_rd_filter
+  subs_filter="$(mktemp)"; subs_rd_filter="$(mktemp)"
   if [[ -s "$SUBMISSIONS_FILE" ]]; then
     jq -r 'select(.status != "rejected" and .status != "duplicate") | .host' "$SUBMISSIONS_FILE" 2>/dev/null \
       | sort -u > "$subs_filter"
+    jq -r 'select(.status != "rejected" and .status != "duplicate") | .root_domain // ""' "$SUBMISSIONS_FILE" 2>/dev/null \
+      | grep -v '^$' | sort -u > "$subs_rd_filter"
   else
-    : > "$subs_filter"
+    : > "$subs_filter"; : > "$subs_rd_filter"
   fi
 
   # -c (compact) is critical: without it, output is multi-line pretty-printed
   # JSON. Downstream `wc -l` then inflates counts ~19x and `head -N | jq` cuts
   # mid-record. The agent_targets.jsonl must be true JSONL.
-  jq -sc --slurpfile subs <(jq -R '.' "$subs_filter") \
+  jq -sc --slurpfile subs    <(jq -R '.' "$subs_filter") \
+          --slurpfile subs_rd <(jq -R '.' "$subs_rd_filter") \
         --argjson max "$CLUSTER_MAX" --argjson penalty "$CLUSTER_PENALTY" '
-    ($subs[0] // []) as $submitted |
+    ($subs[0]    // []) as $submitted |
+    ($subs_rd[0] // []) as $submitted_rds |
+
+    # Fix 8: UUID subdomain cluster — normalize UUID-prefixed hostnames so all
+    # hosts matching /^<uuid>.<suffix>/ cluster on the suffix rather than each
+    # being its own cluster. This prevents 80+ P0 entries for one UUID infra.
+    def uuid_normalized_host:
+      .host as $h |
+      if ($h | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i"))
+      then ($h | gsub("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "uuid-cluster."))
+      else $h end;
+
     def cluster_key:
-      .root_domain + "|" + (.signals | map(select(startswith("penalty:") | not)) | sort | join(","));
+      .root_domain + "|" + (uuid_normalized_host) + "|" + (.signals | map(select(startswith("penalty:") | not)) | sort | join(","));
 
     group_by(cluster_key) |
     map(
       . as $group |
       ($group | length) as $n |
-      $group | to_entries | map(
+      # Fix 8: detect UUID clusters — if all hosts have UUID prefix, mark cluster members
+      (($group | map(select(.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i"))) | length) == $n) as $is_uuid_cluster |
+      $group | sort_by(-.score) | to_entries | map(
         .value as $h |
-        if .key < $max then $h
+        if .key < $max then
+          ($h + (if $is_uuid_cluster and .key > 0 then {cluster_member: true, uuid_cluster: true} else {} end))
         else $h + {
           score: ($h.score + $penalty),
-          signals: ($h.signals + ["penalty:cluster-dedup"]),
-          cluster_penalised: true
+          signals: ($h.signals + ["penalty:cluster-dedup"] + (if $is_uuid_cluster then ["penalty:uuid-cluster-member"] else [] end)),
+          cluster_penalised: true,
+          cluster_member: (if $is_uuid_cluster then true else false end),
+          uuid_cluster: $is_uuid_cluster
         }
         end
       )
     ) | flatten |
-    # Submission dampening: -5 if same host already submitted, -2 if root_domain has submission
+    # Submission dampening: -5 if same host already submitted,
+    # -2 if a different host on the same root_domain was submitted (org-level damp)
     map(
       . as $h |
       if ($submitted | index($h.host)) then
         $h + {score: ($h.score - 5), signals: ($h.signals + ["penalty:already-submitted"]), already_submitted: true}
+      elif (($h.root_domain // "") != "" and ($submitted_rds | index($h.root_domain))) then
+        $h + {score: ($h.score - 2), signals: ($h.signals + ["penalty:org-already-submitted"])}
       else $h end
     ) |
     map(select(.score >= 3)) |
@@ -915,6 +977,32 @@ apply_cluster_and_submission() {
         pattern_only_capped: true
       }
     else . end) |
+
+    # AI score integration - uses ai_recommendation / ai_relevance_score fetched from ES,
+    # written by recon_ai_score.sh in the prior triage pass.
+    # ai_rec=skip: -10, ai_rec=test_now + score>=80: +3 bonus+confidence=high
+    # ai_score<40 on pattern_only: -2 additional penalty
+    map(
+      (.ai_recommendation // null) as $ai_rec |
+      ((.ai_relevance_score // null) | if . != null then . else null end) as $ai_score |
+      if $ai_rec == "skip" then
+        . + {score: (.score - 10),
+             signals: (.signals + ["penalty:ai-skip"]),
+             ai_rec: $ai_rec, ai_score: $ai_score}
+      elif ($ai_rec == "test_now" and ($ai_score // 0) >= 80) then
+        . + {score: (.score + 3),
+             signals: (.signals + ["bonus:ai-test-now"]),
+             confidence: "high",
+             ai_rec: $ai_rec, ai_score: $ai_score}
+      elif ($ai_score != null and $ai_score < 40 and (.pattern_only // false)) then
+        . + {score: (.score - 2),
+             signals: (.signals + ["penalty:ai-low-pattern"]),
+             ai_rec: ($ai_rec // null), ai_score: $ai_score}
+      else
+        . + {ai_rec: ($ai_rec // null), ai_score: ($ai_score // null)}
+      end
+    ) |
+
     map(. + {
       priority: (
         if   .score >= '"$P0_THRESHOLD"' then "P0"
@@ -935,7 +1023,7 @@ apply_cluster_and_submission() {
     .[]
   ' "$in" > "$out" 2>/dev/null || true
 
-  rm -f "$subs_filter"
+  rm -f "$subs_filter" "$subs_rd_filter"
 }
 
 # =============================================================================
@@ -971,7 +1059,15 @@ update_es_scores() {
       "js_secret_hit":              (.js_secret_hit // false),
       "js_endpoint_hit":            (.js_endpoint_hit // false),
       "triage_ignored":             (.triage_ignored // false),
-      "triage_ignored_reason":      (.triage_ignored_reason // null)
+      "triage_ignored_reason":      (.triage_ignored_reason // null),
+      "triage_confidence":          (.confidence // "low"),
+      "triage_pattern_only":        (.pattern_only // false),
+      "confidence":                 (.confidence // "low"),
+      "pattern_only":               (.pattern_only // false),
+      "final_score":                .score,
+      "last_triaged":               (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      "ai_rec":                     (.ai_rec // null),
+      "ai_score":                   (.ai_score // null)
     }}
   ' "$in" > "$tmp"
 
@@ -1155,10 +1251,13 @@ notify_discord_findings() {
   log "Discord: $fc fresh findings"
   local payload
   # Sort fresh findings by [tier_rank, -score, -novelty] before building embeds
+  # Fix 13: @here ONLY when confidence=high (confirmed tech + 2+ signals)
+  # Fix 11: include confidence info in Discord output
   payload="$(jq -s '
     sort_by([(.tier_rank // 4), -(.score // 0)]) |
+    (map(select((.confidence // "low") == "high")) | length > 0) as $has_high_conf |
     {
-      content: ("@here **" + (length|tostring) + " new TRUE-FRESH finding(s)** — claim fast"),
+      content: (if $has_high_conf then "@here **" + (length|tostring) + " new TRUE-FRESH finding(s)** — claim fast" else "**" + (length|tostring) + " new TRUE-FRESH finding(s)**" end),
       embeds: [.[] | {
         title: ("[" + .priority + "·" + (.score|tostring) + "·" + (.payout_tier // "none") + "] " + (.host | .[0:230])),
         url: (if (.url // "") != "" then .url else null end),
@@ -1176,6 +1275,8 @@ notify_discord_findings() {
           (if (.triage_breaking_vuln // false) then "💥 **BREAKING VULN** tier=" + (.triage_vuln_tier // "?") + "\n" else "" end) +
           (if (.js_secret_hit // false) then "🔑 **JS SECRET** disclosure\n" else "" end) +
           (if (.js_endpoint_hit // false) then "🛤️ **JS endpoint** disclosure\n" else "" end) +
+          # Fix 11: confidence band + pattern_only marker in Discord embed
+          "**Confidence:** " + (.confidence // "low") + (if (.pattern_only // false) then " ⚠️ **PATTERN-ONLY** — hypothesis only" else "" end) + "\n" +
           "**" + (.signals | map(select(startswith("penalty:") | not)) | join(" · ") | .[0:140]) + "**"
         ),
         fields: ([
@@ -1266,7 +1367,7 @@ main() {
   # targets tracked); drop only genuinely-low-value out-of-scope noise.
   local floored; floored="$(mktemp)"
   if jq -c --argjson min "${MIN_SCORE:-3}" \
-       'select((.score >= $min) or (.in_scope==true) or ((.true_fresh//false)==true) or ((.kev_match//false)==true))' \
+       'select((.score >= $min) or (.in_scope==true) or ((.triage_true_fresh//false)==true) or ((.kev_match//false)==true))' \
        "$enriched2" > "$floored" 2>/dev/null && [[ -s "$floored" ]]; then
     local pre post; pre="$(wc -l < "$enriched2" | tr -d ' ')"; post="$(wc -l < "$floored" | tr -d ' ')"
     mv "$floored" "$enriched2"

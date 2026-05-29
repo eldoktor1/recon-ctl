@@ -84,7 +84,7 @@ LOCK_FILE="$HOME/recon/state/nuclei.lock"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
+ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 ES_AUTH=(-u "$ES_USER:$ES_PASS")
 
 # Discord routing uses per-channel files via discord_hook() (recon_net.sh):
@@ -104,6 +104,28 @@ mkdir -p "$RESULTS_DIR" "$FP_DIR" "$NUCLEI_DIR/templates"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "nuclei already running"; exit 0; }
+
+# Prune stale results dirs (run_* and bounty_*) older than NUCLEI_RESULTS_KEEP_DAYS (default 7).
+# Individual per-host out_files live inside these dirs; confirmed findings are already
+# appended to confirmed.jsonl so pruning run dirs loses nothing.
+NUCLEI_RESULTS_KEEP_DAYS="${NUCLEI_RESULTS_KEEP_DAYS:-7}"
+if [[ -d "$RESULTS_DIR" ]]; then
+  _pruned_dirs=0
+  while IFS= read -r -d '' _rdir; do
+    rm -rf "$_rdir" && (( _pruned_dirs++ )) || true
+  done < <(find "$RESULTS_DIR" -maxdepth 1 -type d \( -name 'run_*' -o -name 'bounty_*' \) \
+    -mtime +"$NUCLEI_RESULTS_KEEP_DAYS" -print0 2>/dev/null)
+  [[ "$_pruned_dirs" -gt 0 ]] && log "Pruned $_pruned_dirs stale results dirs (>${NUCLEI_RESULTS_KEEP_DAYS}d old)"
+fi
+
+# Prune cooldown markers older than 2x COOLDOWN_HOURS to avoid unbounded accumulation.
+_cooldown_max_age_days=$(( (COOLDOWN_HOURS * 2 + 23) / 24 ))
+_pruned_markers=0
+while IFS= read -r -d '' _marker; do
+  rm -f "$_marker" && (( _pruned_markers++ )) || true
+done < <(find "$NUCLEI_DIR" -maxdepth 1 -name '.last_*' \
+  -mtime +"$_cooldown_max_age_days" -print0 2>/dev/null)
+[[ "$_pruned_markers" -gt 0 ]] && log "Pruned $_pruned_markers stale cooldown markers (>${_cooldown_max_age_days}d old)"
 
 [[ -s "$CVE_DIR/kev_targets.jsonl" ]] || {
   log "No KEV targets to scan (run recon_cve_intel.sh match first)"
@@ -196,11 +218,28 @@ jq -s --slurpfile scope <(jq -s '.' "$SCOPE_TMP") \
   )
 ' "${TARGETS_TMP}.tier" > "${TARGETS_TMP}.merged"
 
-# 4. Cooldown filter (file-system based — same as before)
+# 4. Cooldown filter + Fix 9: Cloudflare Bot Management pre-check
 : > "$TARGETS_TMP"
 jq -c '.[]' "${TARGETS_TMP}.merged" 2>/dev/null | while IFS= read -r line; do
   host="$(echo "$line" | jq -r '.host')"
   sig="$(echo "$line" | jq -r '.matched_signal // .signal')"
+
+  # Fix 9: Cloudflare Bot Management check — query ES for tech[] field
+  # If host has "Cloudflare Bot Management" in tech[], skip nuclei and mark as manual-only
+  es_tech="$(curl -fsS -m 8 "${ES_AUTH[@]}" \
+    -H 'Content-Type: application/json' \
+    -X GET "$ES_URL/$INDEX_NAME/_doc/$host" 2>/dev/null \
+    | jq -r '(.["_source"].tech // []) | map(ascii_downcase) | join(",")' 2>/dev/null || echo "")"
+  if printf '%s' "$es_tech" | grep -qi 'cloudflare bot management' 2>/dev/null; then
+    log "SKIP (CF Bot Management) $host — marking waf_blocks_scanners=true, manual-only"
+    # ES update: waf_blocks_scanners=true
+    curl -fsS -m 10 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+      -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
+      -d '{"doc":{"waf_blocks_scanners":true,"nuclei_skip_reason":"cloudflare_bot_management"}}' \
+      >/dev/null 2>&1 || true
+    continue
+  fi
+
   cooldown_marker="$NUCLEI_DIR/.last_$(echo "${host}_${sig}" | sha256sum | cut -c1-16)"
   if [[ -f "$cooldown_marker" ]]; then
     last="$(cat "$cooldown_marker")"
