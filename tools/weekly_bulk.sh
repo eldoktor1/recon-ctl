@@ -51,7 +51,7 @@ log "VPN OK (exit=$exit_host)"
 # ── 3. ES gate — bulk is useless if ES is down ────────────────────────────
 if [[ -f "$HOME/.recon_es_pass" ]]; then
   ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-  es_status="$(curl -fsS -m5 -u "elastic:$ep" http://127.0.0.1:9200/_cluster/health 2>/dev/null \
+  es_status="$(curl -fsS -m5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200/_cluster/health 2>/dev/null \
     | jq -r '.status // "unreachable"' 2>/dev/null || echo "unreachable")"
   if [[ "$es_status" != "green" && "$es_status" != "yellow" ]]; then
     log "ABORT — ES unreachable (status=$es_status). Start from Docker Desktop first."

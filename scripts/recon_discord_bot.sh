@@ -212,7 +212,7 @@ cmd_rescue() {
     # ES check
     local ep
     ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-    if curl -fsS -m 5 -u "elastic:$ep" "http://127.0.0.1:9200/_cluster/health" >/dev/null 2>&1; then
+    if curl -fsS -m 5 --netrc-file "$HOME/.recon_es_netrc" "http://127.0.0.1:9200/_cluster/health" >/dev/null 2>&1; then
         lines+=("[OK] ES reachable")
     else
         lines+=("[FAIL] ES unreachable - check Docker on Windows")

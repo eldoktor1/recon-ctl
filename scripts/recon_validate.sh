@@ -35,7 +35,8 @@ ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-}"
 [[ -z "$ES_PASS" && -f "$HOME/.recon_es_pass" ]] && ES_PASS="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
 [[ -z "$ES_PASS" ]] && die "ES password not set"
-ES_AUTH=(-u "$ES_USER:$ES_PASS")
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 # httpx tuning (set by daemon based on mode)
 HTTPX_THREADS="${HTTPX_THREADS:-15}"
@@ -416,7 +417,7 @@ main() {
   if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
     log "Chaining to triage (background)"
     ( 9>&-  # close inherited lane lock fd so triage doesn't hold the flock
-      ES_URL="$ES_URL" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
+      ES_URL="$ES_URL" ES_USER="$ES_USER" \
       INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
       || warn "triage exited non-zero" ) &
     disown $! 2>/dev/null || true

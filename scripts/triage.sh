@@ -54,7 +54,8 @@ ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-}"
 [[ -z "$ES_PASS" && -f "$HOME/.recon_es_pass" ]] && ES_PASS="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
 [[ -z "$ES_PASS" ]] && die "ES password not set"
-ES_AUTH=(-u "$ES_USER:$ES_PASS")
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 P0_THRESHOLD="${P0_THRESHOLD:-15}"
 P1_THRESHOLD="${P1_THRESHOLD:-8}"
@@ -1152,7 +1153,7 @@ run_ai_review_layer() {
   [[ "${ENABLE_OLLAMA_AI:-1}" == "1" ]] || return 0
   [[ -x "$AI_SCORE_SCRIPT" ]] || { warn "AI score script missing or not executable: $AI_SCORE_SCRIPT"; return 0; }
   log "AI review layer enabled"
-  BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" ES_USER="$ES_USER" ES_PASS="$ES_PASS" \
+  BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" ES_USER="$ES_USER" \
     bash "$AI_SCORE_SCRIPT" "$in" || warn "AI scoring failed"
   if [[ -x "$AI_PACK_SCRIPT" ]]; then
     BASE_DIR="$BASE_DIR" bash "$AI_PACK_SCRIPT" || warn "AI packet build failed"

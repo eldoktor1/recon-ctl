@@ -35,6 +35,12 @@ LOCK_FILE="$STATE_DIR/params.lock"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
+# write netrc so ES password stays off curl command line
+if [[ -f "$HOME/.recon_es_pass" ]]; then
+  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  [[ -n "$_netrc_ep" ]] && { printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc"; chmod 600 "$HOME/.recon_es_netrc"; }
+  unset _netrc_ep
+fi
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 
@@ -68,8 +74,8 @@ SCANNED_FILE="$STATE_DIR/.params_scanned.tsv"
 mkdir -p "$PARAMS_DIR" "$STATE_DIR"
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
 
-es()  { curl -sS -m30 -u "$ES_USER:$ES_PASS" "$@"; }
-es_up() { local c; c="$(curl -sS -o /dev/null -m5 -u "$ES_USER:$ES_PASS" -w '%{http_code}' "$ES_URL" 2>/dev/null || echo 000)"; [[ "$c" == "200" ]]; }
+es()  { curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" "$@"; }
+es_up() { local c; c="$(curl -sS -o /dev/null -m5 --netrc-file "$HOME/.recon_es_netrc" -w '%{http_code}' "$ES_URL" 2>/dev/null || echo 000)"; [[ "$c" == "200" ]]; }
 
 ensure_index() {
   es -fsS "$ES_URL/$PARAMS_INDEX" >/dev/null 2>&1 && return 0

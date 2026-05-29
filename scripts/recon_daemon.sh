@@ -37,6 +37,13 @@ TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
 
+# ES connection globals used by auto_cleanup() scroll queries
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"
+INDEX_NAME="${INDEX_NAME:-recon_alive}"
+ALIVE_HOSTS="${ALIVE_HOSTS:-$STATE_DIR/alive_hosts.txt}"
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
+
 prepare_scanner_dirs() {
   local shared_dirs=(
     "$BASE_DIR"
