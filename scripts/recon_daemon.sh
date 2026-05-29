@@ -279,6 +279,7 @@ auto_cleanup() {
       local _before; _before="$(wc -l < "$ALIVE_HOSTS" 2>/dev/null | tr -d ' ')"
       sort -u "$_alive_tmp" -o "$_alive_tmp"
       mv "$_alive_tmp" "$ALIVE_HOSTS"
+      command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$ALIVE_HOSTS" 2>/dev/null || true
       local _after; _after="$(wc -l < "$ALIVE_HOSTS" | tr -d ' ')"
       date -u +%s > "$_prune_marker"
       log "auto_cleanup: alive_hosts rebuilt $_before → $_after lines (30d window, $INDEX_NAME)"

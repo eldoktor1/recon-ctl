@@ -133,7 +133,7 @@ browser_curl() {
 setup_es_netrc() {
   local ep; ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
   [[ -z "$ep" ]] && return 0
-  if printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc" 2>/dev/null; then
+  if ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null; then
     chmod 600 "$HOME/.recon_es_netrc"
     command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true
   fi
