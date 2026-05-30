@@ -51,15 +51,16 @@ trap "rm -f '$PID_FILE'" EXIT
 api_get()  { curl_direct -fsS -m 10 "${HDR[@]}" "$API$1" 2>/dev/null; }
 api_post() { curl_direct -fsS -m 10 "${HDR[@]}" -X POST -d "$2" "$API$1" 2>/dev/null; }
 api_get_with_code() {
-  local code
-  code="$(curl_direct -fsS -m 10 -o /tmp/_bot_resp.$$ -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"
+  local code _resp_tmp
+  _resp_tmp="$(mktemp)"
+  code="$(curl_direct -fsS -m 10 -o "$_resp_tmp" -w '%{http_code}' "${HDR[@]}" "$API$1" 2>/dev/null || echo 000)"
   if [[ "$code" =~ ^2 ]]; then
-    cat /tmp/_bot_resp.$$ 2>/dev/null
-    rm -f /tmp/_bot_resp.$$
+    cat "$_resp_tmp" 2>/dev/null
+    rm -f "$_resp_tmp"
     return 0
   else
-    local snippet; snippet="$(head -c 200 /tmp/_bot_resp.$$ 2>/dev/null | tr -d '\n')"
-    rm -f /tmp/_bot_resp.$$
+    local snippet; snippet="$(head -c 200 "$_resp_tmp" 2>/dev/null | tr -d '\n')"
+    rm -f "$_resp_tmp"
     printf 'HTTP=%s %s' "$code" "$snippet" >&2
     return 1
   fi
@@ -368,9 +369,9 @@ main() {
         err="$(mktemp)"
         if ! resp="$(api_get_with_code "$url" 2>"$err")"; then
           warn "Poll failed: $(cat "$err" 2>/dev/null | head -1)"
-          rm -f "$err"
-          # Back off on 429 rate-limit
+          # Back off on 429 rate-limit (check before deleting the file)
           if grep -q 'HTTP=429' "$err" 2>/dev/null; then sleep 30; fi
+          rm -f "$err"
           continue
         fi
         rm -f "$err"

@@ -83,8 +83,6 @@ LOCK_FILE="$HOME/recon/state/nuclei.lock"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 setup_es_netrc
 ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 

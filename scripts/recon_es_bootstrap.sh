@@ -9,18 +9,11 @@ die()  { printf '[%s ES FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
-[[ -n "$ES_PASS" ]] || die "ES password not set"
-# write netrc so ES password stays off curl command line
-if [[ -f "$HOME/.recon_es_pass" ]]; then
-  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-  [[ -n "$_netrc_ep" ]] && { ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null && chmod 600 "$HOME/.recon_es_netrc" && { command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true; }; }
-  unset _netrc_ep
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh"
+setup_es_netrc
 ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATE="${VALIDATE:-$SCRIPT_DIR/recon_validate.sh}"
 
 delete_recon_index() {

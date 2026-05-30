@@ -41,6 +41,7 @@ SCANNER_USER="${SCANNER_USER:-reconrun}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ALIVE_HOSTS="${ALIVE_HOSTS:-$STATE_DIR/alive_hosts.txt}"
+source "$SCRIPT_DIR/recon_net.sh"
 setup_es_netrc
 ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
