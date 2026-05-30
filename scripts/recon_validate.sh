@@ -68,7 +68,9 @@ run_scan() {
       --httpx-flags "-silent -nc -json -tech-detect -status-code -title -web-server -content-type -content-length -ip -cname -cdn -favicon -location -timeout ${HTTPX_TIMEOUT} -retries 1" \
       -o "$output" 2>/dev/null
   else
-    timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
+    # nice -n 10: httpx yields CPU to higher-priority processes (Ollama, ES)
+    # automatically when they need it — full speed when system is idle.
+    nice -n 10 timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
       -l "$input" -silent -nc -json \
       -tech-detect -status-code -title -web-server \
       -content-type -content-length \
