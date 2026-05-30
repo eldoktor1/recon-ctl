@@ -113,7 +113,7 @@ VULN_T2_BONUS="${VULN_T2_BONUS:-5}"
 VULN_T3_BONUS="${VULN_T3_BONUS:-2}"
 
 # JS-scanner findings (Phase 5)
-JS_FINDINGS_FILE="${JS_FINDINGS_FILE:-$HOME/recon/js_findings.jsonl}"
+JS_FINDINGS_FILE="${JS_FINDINGS_FILE:-$HOME/recon/js_recon/findings.jsonl}"
 JS_SECRET_BONUS="${JS_SECRET_BONUS:-10}"
 JS_ENDPOINT_BONUS="${JS_ENDPOINT_BONUS:-5}"
 
@@ -529,7 +529,7 @@ score_raw() {
       # archive lookups return nothing, and tech-detection false positives are common.
       # Suppress unless they hit a confirmed high-value signal (port, KEV, etc).
       (if (.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i")) then
-        {pts:-6, sig:"penalty:uuid-cloud-infra", class:"low-priority", strength:"pattern", action:""} else empty end),
+        {pts:-10, sig:"penalty:uuid-cloud-infra", class:"low-priority", strength:"pattern", action:""} else empty end),
 
       empty
     ] as $signals |
@@ -933,6 +933,24 @@ apply_cluster_and_submission() {
       then ($h | gsub("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "uuid-cluster."))
       else $h end;
 
+    # Regional-replication dedup helpers.
+    # Strips AWS-region and short environment labels from individual hostname
+    # segments so that us-east-1/us-west-2/pa/pb variants of the same service
+    # all hash to a single cluster key.
+    def is_region_label:
+      test("^(us-east-[12]|us-west-[12]|eu-west-[1-3]|eu-central-1|eu-north-1|ap-southeast-[12]|ap-northeast-[1-3]|ap-south-1|ca-central-1|sa-east-1)$");
+
+    def is_env_label:
+      test("^(pa|pb|pc|pd|prod-a|prod-b|prod-c|staging|stage|dev|development|qa|uat)$");
+
+    def has_region_or_env:
+      .host | split(".") | any(is_region_label or is_env_label);
+
+    def regional_cluster_key:
+      .root_domain + "|" + (
+        .host | split(".") | map(select((is_region_label | not) and (is_env_label | not))) | join(".")
+      ) + "|" + (.signals | map(select(startswith("penalty:") | not)) | sort | join(","));
+
     def cluster_key:
       .root_domain + "|" + (uuid_normalized_host) + "|" + (.signals | map(select(startswith("penalty:") | not)) | sort | join(","));
 
@@ -956,6 +974,34 @@ apply_cluster_and_submission() {
         end
       )
     ) | flatten |
+    # Regional cluster second pass — runs after UUID normalisation.
+    # Collapses hosts that differ only by AWS-region or environment label into
+    # one cluster: top scorer keeps full score + note:regional-rep signal;
+    # all others take a -5 penalty. Guard: only fires when 2+ hosts share a
+    # regional key AND at least one actually contains a region/env label
+    # (prevents accidentally merging unrelated short hostnames).
+    group_by(regional_cluster_key) |
+    map(
+      . as $rgrp |
+      if (($rgrp | length) > 1) and ($rgrp | any(has_region_or_env)) then
+        $rgrp | sort_by(-.score) | to_entries | map(
+          .value as $h |
+          if .key == 0 then
+            $h + {signals: ($h.signals + ["note:regional-rep"])}
+          else
+            # -5 penalty + hard P0 ceiling so non-reps always drop below P0
+            # regardless of how many strong signals they accumulated.
+            (($h.score - 5) | if . >= '"$P0_THRESHOLD"' then '"$P0_THRESHOLD"' - 1 else . end) as $new_score |
+            $h + {
+              score: $new_score,
+              signals: ($h.signals + ["penalty:regional-cluster-member"] +
+                        (if $new_score == '"$P0_THRESHOLD"' - 1 then ["cap:regional-no-p0"] else [] end)),
+              cluster_penalised: true
+            }
+          end
+        )
+      else $rgrp end
+    ) | flatten |
     # Submission dampening: -5 if same host already submitted,
     # -2 if a different host on the same root_domain was submitted (org-level damp)
     map(
@@ -976,6 +1022,17 @@ apply_cluster_and_submission() {
         score: ('"$P0_THRESHOLD"' - 1),
         signals: (.signals + ["cap:pattern-only-no-p0"]),
         pattern_only_capped: true
+      }
+    else . end) |
+    # UUID hard cap — structurally prevents UUID-prefixed hosts from reaching P0
+    # regardless of tech signals. The -10 in score_raw handles the typical case;
+    # this catches unusual combos (critical port + KEV + truefresh on same host).
+    map(if (.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i"))
+        and (.score >= '"$P0_THRESHOLD"') then
+      . + {
+        score: ('"$P0_THRESHOLD"' - 1),
+        signals: (.signals + ["cap:uuid-no-p0"]),
+        uuid_capped: true
       }
     else . end) |
 
