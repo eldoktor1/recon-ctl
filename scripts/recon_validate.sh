@@ -47,6 +47,37 @@ HTTPX_THREADS="${HTTPX_THREADS:-15}"
 HTTPX_RATE="${HTTPX_RATE:-15}"
 HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
 HTTPX_MAX_RUNTIME="${HTTPX_MAX_RUNTIME:-900}"   # 15 min hard cap (browse)
+
+# Axiom distributed scan (optional — set AXIOM_ENABLED=1 to activate).
+# When enabled, axiom-scan replaces the local httpx call, distributing the
+# batch across the Axiom fleet. Output is identical httpx JSON so the rest
+# of the pipeline (normalize → ES → triage) is completely unchanged.
+# Fleet selection defaults to 'recon*' — override with AXIOM_FLEET.
+# Falls back to local httpx automatically if axiom-scan is not in PATH.
+AXIOM_ENABLED="${AXIOM_ENABLED:-0}"
+AXIOM_FLEET="${AXIOM_FLEET:-recon*}"
+
+# run_scan INPUT OUTPUT — runs httpx locally or via axiom-scan depending on
+# AXIOM_ENABLED. Always writes httpx JSON to OUTPUT. Returns non-zero on failure.
+run_scan() {
+  local input="$1" output="$2"
+  if [[ "$AXIOM_ENABLED" == "1" ]] && command -v axiom-scan >/dev/null 2>&1; then
+    log "  scan mode: axiom-scan fleet=$AXIOM_FLEET"
+    axiom-select "$AXIOM_FLEET" >/dev/null 2>&1 || true
+    axiom-scan "$input" -m httpx \
+      --httpx-flags "-silent -nc -json -tech-detect -status-code -title -web-server -content-type -content-length -ip -cname -cdn -favicon -location -timeout ${HTTPX_TIMEOUT} -retries 1" \
+      -o "$output" 2>/dev/null
+  else
+    timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
+      -l "$input" -silent -nc -json \
+      -tech-detect -status-code -title -web-server \
+      -content-type -content-length \
+      -ip -cname -cdn -favicon -location \
+      -threads "$HTTPX_THREADS" -rate-limit "$HTTPX_RATE" \
+      -timeout "$HTTPX_TIMEOUT" -retries 1 \
+      > "$output" 2>/dev/null
+  fi
+}
 # Live rate override — recon_ctl rate / recon-rate alias writes this file.
 # Checked here (not only in daemon) so changes take effect without a restart.
 { _ro="$STATE_DIR/rate_override"
@@ -220,15 +251,8 @@ process_batch() {
   local count; count="$(wc -l < "$batch" | tr -d ' ')"
   log "Processing $batch_name ($count hosts) threads=$HTTPX_THREADS rate=$HTTPX_RATE timeout=${HTTPX_MAX_RUNTIME}s"
 
-  # ---- httpx with HARD timeout ----
-  if ! timeout --kill-after=30 "$HTTPX_MAX_RUNTIME" httpx \
-        -l "$batch" -silent -nc -json \
-        -tech-detect -status-code -title -web-server \
-        -content-type -content-length \
-        -ip -cname -cdn -favicon -location \
-        -threads "$HTTPX_THREADS" -rate-limit "$HTTPX_RATE" \
-        -timeout "$HTTPX_TIMEOUT" -retries 1 \
-        > "$httpx_out" 2>/dev/null; then
+  # ---- scan (local httpx or axiom-scan fleet, depending on AXIOM_ENABLED) ----
+  if ! run_scan "$batch" "$httpx_out"; then
     # v2.5.4: bounded retry. Prior behaviour moved the batch back to inbox
     # forever — a single poisoned batch (DNS-flake host, hung TLS, etc.)
     # would bounce inbox↔processing on every cycle indefinitely. Now we
