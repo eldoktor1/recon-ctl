@@ -97,6 +97,15 @@ prepare_scanner_dirs() {
     -m "u:${owner_user}:rwx" \
     -m "d:u:${owner_user}:rwx" \
     "${shared_dirs[@]}" 2>/dev/null || true
+
+  # Default ACLs only propagate to NEW files — existing files that predate the
+  # ACL setup (e.g. firstblood TSVs created before setfacl ran on the dir) need
+  # to be fixed explicitly. reconrun owns these files so d0k cannot setfacl them
+  # directly; run as reconrun (file owner) to grant d0k rw. Idempotent, ~ms.
+  sudo -n -u "$SCANNER_USER" bash -c "
+    find '$BASE_DIR/firstblood' -maxdepth 1 -type f 2>/dev/null \
+      | xargs -r setfacl -m 'u:${owner_user}:rw' 2>/dev/null || true
+  " 2>/dev/null || true
 }
 
 run_scanner() {
