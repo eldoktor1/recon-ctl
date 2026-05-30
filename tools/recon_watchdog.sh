@@ -51,17 +51,16 @@ fi
 
 # ── 3. ES check (ES lives in Windows Docker Desktop — read-only check) ────
 es_ok=0
-if [[ -f "$HOME/.recon_es_pass" ]]; then
-  ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-  ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null && chmod 600 "$HOME/.recon_es_netrc" && { command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true; }
-  es_status="$(curl -fsS -m5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200/_cluster/health 2>/dev/null \
-    | jq -r '.status // "unreachable"' 2>/dev/null || echo "unreachable")"
-  if [[ "$es_status" == "green" || "$es_status" == "yellow" ]]; then
-    log "ES OK (status=$es_status)"
-    es_ok=1
-  else
-    log "ES unreachable — start from Windows Docker Desktop"
-  fi
+_wdog_net="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/recon_net.sh"
+# shellcheck source=../scripts/recon_net.sh
+[[ -f "$_wdog_net" ]] && source "$_wdog_net" && setup_es_netrc 2>/dev/null || true
+es_status="$(curl -fsS -m5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200/_cluster/health 2>/dev/null \
+  | jq -r '.status // "unreachable"' 2>/dev/null || echo "unreachable")"
+if [[ "$es_status" == "green" || "$es_status" == "yellow" ]]; then
+  log "ES OK (status=$es_status)"
+  es_ok=1
+else
+  log "ES unreachable — start from Windows Docker Desktop"
 fi
 
 # ── 4. Restart daemon if all conditions met ────────────────────────────────

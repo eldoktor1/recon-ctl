@@ -31,11 +31,8 @@ KILL_FILE="$STATE_DIR/kill/v2_vuln_feed"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
-ES_AUTH=()
 setup_es_netrc
-[[ -f "$HOME/.recon_es_netrc" ]] && ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 RECON_OWNER_USER="${RECON_OWNER_USER:-d0k}"
 
 FEED_JSONL="$VULN_DIR/vuln_feed.jsonl"

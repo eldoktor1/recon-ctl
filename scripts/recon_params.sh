@@ -33,14 +33,8 @@ PARAMS_DIR="$BASE_DIR/params"
 LOCK_FILE="$STATE_DIR/params.lock"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
-# write netrc so ES password stays off curl command line
-if [[ -f "$HOME/.recon_es_pass" ]]; then
-  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-  [[ -n "$_netrc_ep" ]] && { ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null && chmod 600 "$HOME/.recon_es_netrc" && { command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true; }; }
-  unset _netrc_ep
-fi
+source "$SCRIPT_DIR/recon_net.sh"
+setup_es_netrc
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 

@@ -20,8 +20,8 @@ KILL_FILE="$HOME/recon/state/kill/v2_cve"
 LOCK_FILE="$HOME/recon/state/cve_intel.lock"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(cat "$HOME/.recon_es_pass" 2>/dev/null)}"
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 mkdir -p "$CVE_DIR" "$RAW_DIR" "$(dirname "$LOCK_FILE")"
 
@@ -471,7 +471,7 @@ match_kev_targets() {
     }')"
 
     local resp
-    resp="$(curl -sS -u "$ES_USER:$ES_PASS" -H 'Content-Type: application/json' \
+    resp="$(curl -sS "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
            -X POST "$ES_URL/$INDEX_NAME/_search" -d "$query" 2>/dev/null)" || continue
 
     echo "$resp" | jq -c --argjson cves "$cves_for_sig" --arg sig "$sig" '
