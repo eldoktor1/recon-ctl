@@ -35,14 +35,14 @@ die()  { printf '[%s FATAL] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; e
 # ---- Config ---------------------------------------------------------------
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 FB_DIR="${FB_DIR:-$BASE_DIR/firstblood}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 LOG_DIR="${LOG_DIR:-$BASE_DIR/logs}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 CLAIM_FILE="$FB_DIR/takeovers_to_claim.tsv"
 WATCH_FILE="$FB_DIR/takeovers_watching.tsv"
@@ -454,7 +454,6 @@ fastly_post_claim_check() {
 # =============================================================================
 es_tag_takeover() {
   local host="$1" svc="$2" cname="$3" confidence="$4" payout="$5" detected_at="$6"
-  [[ -z "$ES_PASS" ]] && return 0
 
   local payload
   payload="$(jq -n \
@@ -468,7 +467,7 @@ es_tag_takeover() {
 
   [[ -z "$payload" ]] && return 0
 
-  curl -sS -m15 -u "$ES_USER:$ES_PASS" \
+  curl -sS -m15 "${ES_AUTH[@]}" \
     -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_update_by_query?conflicts=proceed&wait_for_completion=false" \
     -d "$payload" >/dev/null 2>&1 || true

@@ -371,13 +371,14 @@ PY
 }
 
 mode_js_scan() {
-  local dump_dir="$BASE_DIR/js_dump"
-  local findings_file="$BASE_DIR/js_findings.jsonl"
+  local js_dir="$BASE_DIR/js_recon"
+  local dump_dir="$js_dir/dump"
+  local findings_file="$js_dir/findings.jsonl"
   local max_bytes="${JS_MAX_BYTES:-2097152}"
   local host_limit="${JS_HOST_LIMIT:-20}"
   local max_scripts="${JS_MAX_SCRIPTS:-15}"
 
-  mkdir -p "$dump_dir" "$(dirname "$findings_file")"
+  mkdir -p "$dump_dir" "$js_dir"
   touch "$findings_file"
 
   local tmp; tmp="$(mktemp)"
@@ -424,6 +425,9 @@ mode_js_scan() {
     browser_curl -sSL -m 15 --max-filesize "$max_bytes" -o "$html_file" "$url" 2>/dev/null || true
     [[ -s "$html_file" ]] || { rm -rf "$host_dir"; continue; }
 
+    # Track line count before scanning this host so we can identify new findings after
+    local _pre_lines; _pre_lines="$(wc -l < "$findings_file" 2>/dev/null | tr -d ' ')"
+
     local count=0
     while IFS= read -r js_url; do
       [[ "$count" -ge "$max_scripts" ]] && break
@@ -469,6 +473,44 @@ except Exception:
     done < <(extract_script_srcs "$html_file" "$url")
 
     rm -rf "$host_dir"
+
+    # ── Alert if this host produced new secrets ─────────────────────────────
+    local _post_lines; _post_lines="$(wc -l < "$findings_file" 2>/dev/null | tr -d ' ')"
+    local _new=$(( _post_lines - _pre_lines ))
+    if [[ "$_new" -gt 0 ]]; then
+      # Extract secret-type findings from the new lines only
+      local _secret_kinds
+      _secret_kinds="$(tail -n "$_new" "$findings_file" \
+        | jq -r 'select(.finding_type == "secret") | .match_type' 2>/dev/null \
+        | sort -u | tr '\n' ' ' | sed 's/ $//')"
+      if [[ -n "$_secret_kinds" ]]; then
+        log "🔑 SECRET(s) in JS on $host: $_secret_kinds"
+        # Discord: fire immediately — don't let secrets sit unreported until next triage cycle
+        discord_send "$(jq -nc \
+          --arg host "$host" --arg url "$url" --arg kinds "$_secret_kinds" \
+          '{
+            content: "🔑 **JS SECRETS DETECTED**",
+            embeds: [{
+              title: ("[JS-SECRET] " + $host),
+              url: $url,
+              color: 15158332,
+              description: ("Credential pattern(s) found in JS files: **" + $kinds + "**"),
+              fields: [{name:"Action",value:"Verify manually — grep the js_recon/findings.jsonl for full match context",inline:false}],
+              footer: {text: "recon · js-scan · fresh-first"}
+            }]
+          }')" || true
+        # ES: tag the host and boost score so triage sees it
+        curl -fsS -m 10 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+          -X POST "$ES_URL/$INDEX_NAME/_update_by_query?wait_for_completion=false&conflicts=proceed" \
+          -d "$(jq -nc --arg h "$host" '{
+            script: {
+              source: "ctx._source.js_secrets_found = true; ctx._source.triage_score = (ctx._source.triage_score != null ? ctx._source.triage_score + 10 : 10);",
+              lang: "painless"
+            },
+            query: {term: {"host.keyword": $h}}
+          }')" >/dev/null 2>&1 || true
+      fi
+    fi
   done < "$tmp"
 
   log "js-scan done — findings file has $(wc -l < "$findings_file" | tr -d ' ') total entries"

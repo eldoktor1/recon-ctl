@@ -27,6 +27,8 @@ warn() { printf '[%s DAST WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true   # robust discord_post()
+setup_es_netrc 2>/dev/null || true
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
@@ -38,8 +40,6 @@ LOCK_FILE="$STATE_DIR/dast.lock"
 KILL_FILE="$STATE_DIR/kill/v2_dast"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 # Discord: DAST findings → #vulns via discord_hook() (recon_net.sh, per-channel)
 
@@ -87,7 +87,7 @@ command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 
 # ---- 1. Fresh-first in-scope-paying target selection from ES ---------------
 es_up() {
-  local code; code="$(curl -sS -o /dev/null -m 5 -u "$ES_USER:$ES_PASS" -w '%{http_code}' "$ES_URL" 2>/dev/null || echo 000)"
+  local code; code="$(curl -sS -o /dev/null -m 5 "${ES_AUTH[@]}" -w '%{http_code}' "$ES_URL" 2>/dev/null || echo 000)"
   [[ "$code" == "200" ]]
 }
 es_up || { warn "ES not reachable — cannot select targets"; exit 0; }
@@ -112,7 +112,7 @@ QUERY=$(cat <<JSON
 JSON
 )
 
-resp="$(curl -sS -m 30 -u "$ES_USER:$ES_PASS" -H 'Content-Type: application/json' \
+resp="$(curl -sS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
         -X POST "$ES_URL/$INDEX_NAME/_search" -d "$QUERY" 2>/dev/null)" || resp=""
 [[ -z "$resp" ]] && { warn "ES query failed"; exit 0; }
 
