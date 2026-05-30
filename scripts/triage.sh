@@ -934,14 +934,37 @@ apply_cluster_and_submission() {
       else $h end;
 
     # Regional-replication dedup helpers.
-    # Strips AWS-region and short environment labels from individual hostname
-    # segments so that us-east-1/us-west-2/pa/pb variants of the same service
-    # all hash to a single cluster key.
+    # A hostname segment is a "deployment variant" label when it encodes only
+    # WHERE or WHICH INSTANCE the service runs, not WHAT the service is.
+    # Stripping these from every label lets us collapse regional replicas,
+    # numbered instances, and env-tier duplicates into a single cluster key.
+    #
+    # Safety: the guard `has_region_or_env` requires at least one member to
+    # carry a recognisable variant label before the cluster fires, and the
+    # cluster key still includes signals — different tech stacks don't merge.
     def is_region_label:
-      test("^(us-east-[12]|us-west-[12]|eu-west-[1-3]|eu-central-1|eu-north-1|ap-southeast-[12]|ap-northeast-[1-3]|ap-south-1|ca-central-1|sa-east-1)$");
+      # AWS standard regions
+      test("^(us-east-[12]|us-west-[12]|eu-west-[1-3]|eu-central-1|eu-north-1|ap-southeast-[12]|ap-northeast-[1-3]|ap-south-1|ca-central-1|sa-east-1)$") or
+      # AWS regions with AZ suffix (us-east-1a … us-east-1f)
+      test("^(us-east-[12]|us-west-[12]|eu-west-[1-3]|eu-central-1|ap-southeast-[12]|ap-northeast-[1-3]|ap-south-1|ca-central-1|sa-east-1)[a-f]$") or
+      # GCP regions
+      test("^(us-central1|us-east[1-9]|us-west[1-9]|northamerica-northeast[12]|southamerica-east1|southamerica-west1|europe-west[1-9]|europe-north1|europe-central2|europe-southwest1|asia-east[12]|asia-northeast[1-3]|asia-south[12]|asia-southeast[12]|australia-southeast[12]|me-west1|me-central1|africa-south1)$") or
+      # Azure regions
+      test("^(eastus|eastus2|westus|westus2|westus3|centralus|northcentralus|southcentralus|westcentralus|eastasia|southeastasia|japaneast|japanwest|australiaeast|australiasoutheast|australiacentral|brazilsouth|brazilsoutheast|canadacentral|canadaeast|northeurope|westeurope|uksouth|ukwest|francecentral|francesouth|germanywestcentral|germanynorth|switzerlandnorth|norwayeast|koreacentral|koreasouth|southindia|centralindia|westindia|uaenorth|uaecentral|southafricanorth)$");
 
     def is_env_label:
-      test("^(pa|pb|pc|pd|prod-a|prod-b|prod-c|staging|stage|dev|development|qa|uat)$");
+      # Named environment tiers (exact word matches)
+      test("^(pa|pb|pc|pd|prod-[a-z]|production|preprod|pre-prod|ppe|preview|staging|stage|stg|dev|development|qa|uat|test|testing|sandbox|sbx|sit|int|integration|alpha|beta|canary|gamma|dark|hotfix|release|perf|performance|load|smoke|lab|demo|nightly|experimental|feature|feat|local)$") or
+      # Environment word + optional 1-2 digit suffix: prod1, dev2, stg01, qa3
+      test("^(prod|production|staging|stg|dev|qa|test|uat|preprod|sandbox|sbx|int|sit|perf|alpha|beta|canary|gamma|stage|preview)[0-9]{1,2}$") or
+      # Infrastructure slot labels: dc1, az2, zone3, pod1, cell4, colo1
+      test("^(dc|az|zone|pod|cell|colo|rack|shard|node|replica)[0-9]{1,3}$") or
+      # Numbered instance: web1, app01, api2, db3, es1 (2+ letters then 1-3 digits)
+      test("^[a-z]{2,}[0-9]{1,3}$") or
+      # Version prefix: v1, v2, v10, v21
+      test("^v[0-9]{1,3}$") or
+      # Pure sequence number label: 1, 2, 01, 001 (up to 3 digits, no leading-zero only)
+      test("^0*[1-9][0-9]{0,2}$");
 
     def has_region_or_env:
       .host | split(".") | any(is_region_label or is_env_label);
@@ -974,12 +997,13 @@ apply_cluster_and_submission() {
         end
       )
     ) | flatten |
-    # Regional cluster second pass — runs after UUID normalisation.
-    # Collapses hosts that differ only by AWS-region or environment label into
-    # one cluster: top scorer keeps full score + note:regional-rep signal;
-    # all others take a -5 penalty. Guard: only fires when 2+ hosts share a
-    # regional key AND at least one actually contains a region/env label
-    # (prevents accidentally merging unrelated short hostnames).
+    # Deployment-variant cluster second pass — runs after UUID normalisation.
+    # Collapses hosts that differ only by a deployment variant label (AWS/Azure/GCP
+    # region, environment tier, numbered instance, version, AZ suffix) into one
+    # cluster: top scorer keeps full score + note:regional-rep; all others take
+    # -5 penalty capped at P0_THRESHOLD-1 so they can never reach P0.
+    # Guard: only fires when 2+ hosts share a normalised key AND at least one
+    # member actually carries a recognisable variant label.
     group_by(regional_cluster_key) |
     map(
       . as $rgrp |
