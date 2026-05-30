@@ -72,6 +72,8 @@ prepare_scanner_dirs() {
     "$BASE_DIR/vuln/raw"
     "$BASE_DIR/ai_review"
     "$BASE_DIR/ai_review/pending"
+    "$BASE_DIR/js_recon"
+    "$BASE_DIR/js_recon/dump"
   )
   local scanner_dirs=(
     "$BASE_DIR/nuclei"

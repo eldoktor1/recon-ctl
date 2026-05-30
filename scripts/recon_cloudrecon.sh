@@ -31,6 +31,9 @@ warn() { printf '[%s CLOUDRECON WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
+source "$SCRIPT_DIR/recon_net.sh"
+setup_es_netrc
+ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
@@ -40,8 +43,6 @@ KNOWN_HOSTS="$STATE_DIR/known_hosts.txt"     # shared with discovery (delta sour
 LOCK_FILE="$STATE_DIR/cloudrecon.lock"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
-ES_USER="${ES_USER:-elastic}"
-ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 
 CADUCEUS_BIN="${CADUCEUS_BIN:-$HOME/go/bin/caduceus}"
@@ -77,7 +78,7 @@ if [[ "$(inbox_count)" -ge "$INBOX_FILE_CAP" ]]; then
 fi
 
 # ---- 1. Refresh the in-scope IP seed list from ES (bounded, cached) --------
-es_curl() { curl -sS -m 30 -u "$ES_USER:$ES_PASS" "$@"; }
+es_curl() { curl -sS -m 30 "${ES_AUTH[@]}" "$@"; }
 
 refresh_inscope_ips() {
   local last age
@@ -88,7 +89,7 @@ refresh_inscope_ips() {
   fi
   # ES up?
   local code
-  code="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' -u "$ES_USER:$ES_PASS" "$ES_URL" 2>/dev/null || echo 000)"
+  code="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "${ES_AUTH[@]}" "$ES_URL" 2>/dev/null || echo 000)"
   if [[ "$code" != "200" ]]; then
     warn "ES not reachable ($code) — using existing IP cache if any"
     return 0
