@@ -1997,6 +1997,21 @@ cmd_bulk() {
       printf "  RAM note: one domain at a time, output streamed to disk — not held in memory.\n"
       printf "  If RAM climbs, use --threads 5 (default: %s).\n\n" "$sf_threads"
 
+      # ── Resume support ──────────────────────────────────────────────────────
+      # BULK_RESUME_FILE tracks completed domains. If it exists on startup,
+      # domains already listed are skipped — bulk continues from where it left
+      # off. Deleted only on clean exit so crashes/stops are always resumable.
+      local BULK_RESUME_FILE="$STATE_DIR/bulk_resume.txt"
+      local skipped=0
+      declare -A _bulk_done=()
+      if [[ -f "$BULK_RESUME_FILE" ]]; then
+        while IFS= read -r _d; do
+          [[ -n "$_d" ]] && _bulk_done["$_d"]=1
+        done < "$BULK_RESUME_FILE"
+        skipped="${#_bulk_done[@]}"
+        printf "  Resuming — skipping %s already-completed domains.\n\n" "$skipped"
+      fi
+
       local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
       local batch_n=0 batch_count=0 batch_file="" found=0 queued=0 dom_n=0
       mkdir -p "$QUEUE_DIR/inbox"
@@ -2029,6 +2044,13 @@ cmd_bulk() {
         while IFS= read -r domain; do
           [[ -z "$domain" ]] && continue
           dom_n=$(( dom_n + 1 ))
+
+          # Resume: skip domains already completed in a prior run
+          if [[ -n "${_bulk_done[$domain]+_}" ]]; then
+            printf "  [%s/%s] %-44s SKIP (already done)\n" "$dom_n" "$total_d" "$domain"
+            continue
+          fi
+
           printf "  [%s/%s] %-44s " "$dom_n" "$total_d" "$domain"
 
           # Stream subfinder to disk — never hold output in a bash variable
@@ -2045,14 +2067,19 @@ cmd_bulk() {
           done < "$sub_tmp"
 
           : > "$sub_tmp"  # free disk between domains
+
+          # Mark domain done for resume
+          printf '%s\n' "$domain" >> "$BULK_RESUME_FILE"
         done < "$domains_file"
       fi
 
       rm -f "$domains_file" "$direct_file" "$sub_tmp"
+      # Clean exit — delete resume file so next run starts fresh
+      rm -f "$BULK_RESUME_FILE"
 
       echo
       printf "  ── Done ────────────────────────────────────────────────────\n"
-      printf "  Wildcard domains enumerated: %s\n" "$dom_n"
+      printf "  Wildcard domains enumerated: %s  (skipped: %s already done)\n" "$dom_n" "$skipped"
       printf "  Subdomains discovered:       %s\n" "$found"
       printf "  Direct hosts queued:         %s\n" "$total_h"
       printf "  Total hosts queued:          %s  (in %s batch files)\n" "$queued" "$batch_n"
