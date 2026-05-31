@@ -438,6 +438,14 @@ PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
 PARAMS_INTERVAL="${PARAMS_INTERVAL:-1800}"
 run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
 
+# ---- Port scanner (recon_portscan.sh) ----------------------------------------
+# Targeted sweep of ~120 purposeful ports on P1+ in-scope paying hosts that
+# are not CDN-fronted and have not been scanned in the last 7 days.
+# 90-min interval: processes 50 hosts/cycle → full P1+ pool scanned weekly.
+PORTSCAN_SCRIPT="${PORTSCAN_SCRIPT:-$(script_path recon_portscan.sh)}"
+PORTSCAN_INTERVAL="${PORTSCAN_INTERVAL:-5400}"   # 90 minutes
+run_portscan() { v21_killed portscan && return 0; [[ -f "$PORTSCAN_SCRIPT" ]] && run_scanner bash "$PORTSCAN_SCRIPT" || true; }
+
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
 # gate, and the guard must keep running while down to detect recovery). Fast
@@ -524,6 +532,7 @@ run_discord_bot() {
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
   supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
+  supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
 
     # Long-running — supervised with simple restart loops
   (

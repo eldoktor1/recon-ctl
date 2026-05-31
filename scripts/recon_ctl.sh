@@ -1509,6 +1509,60 @@ cmd_view() {
 }
 
 # ---------------------------------------------------------------------------
+# cmd_ports — show hosts with open non-standard ports discovered by portscan
+# cmd_exposed — critical-only view (Docker/Redis/MongoDB/K8s/etcd)
+# ---------------------------------------------------------------------------
+cmd_ports() {
+  local n="${1:-50}" critical_only="${2:-0}"
+  local label="Hosts with exposed non-standard ports"
+  [[ "$critical_only" == "1" ]] && label="CRITICAL exposed services (Docker/Redis/MongoDB/K8s/etcd)"
+  hdr "$label"
+
+  local crit_filter=""
+  [[ "$critical_only" == "1" ]] && crit_filter=',"must":[{"term":{"portscan_critical":true}}]'
+
+  local resp
+  resp="$(_es_search "$(printf '{
+    "size":%s,
+    "_source":["host","portscan_open_ports","portscan_critical","portscan_at",
+                "triage_priority","triage_score","triage_program","triage_payout_tier"],
+    "query":{"bool":{"filter":[{"exists":{"field":"portscan_open_ports"}},
+                               {"range":{"portscan_open_ports":{"gt":0}}}]%s}},
+    "sort":[{"portscan_critical":{"order":"desc"}},{"triage_score":{"order":"desc"}}]
+  }' "$n" "$crit_filter")")"
+
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0')"
+  printf '%s' "$resp" | jq -r '
+    .hits.hits[]._source |
+    [
+      (if .portscan_critical then "🔴" else "🟠" end),
+      (.triage_priority // "?"),
+      ((.triage_score // 0) | tostring),
+      (.triage_payout_tier // "?"),
+      (.host // "?"),
+      ((.portscan_open_ports // []) | map(tostring) | join(",")),
+      (.triage_program // "?"),
+      (.portscan_at // "" | split("T")[0])
+    ] | @tsv
+  ' 2>/dev/null | awk -F'\t' 'NF{
+    printf "%-3s %-3s %-4s %-8s %-50s %-30s %-25s %s\n",$1,$2,$3,$4,$5,$6,$7,$8
+  }'
+
+  printf '\n  total with open ports in ES: %s\n' "$total"
+  printf '  tip: recon-inspect <host> for full detail  |  recon-exposed for critical only\n'
+}
+
+cmd_exposed() { cmd_ports "${1:-100}" "1"; }
+
+cmd_portscan_now() {
+  local ps_script="$SCRIPT_DIR/recon_portscan.sh"
+  [[ -f "$ps_script" ]] || { echo "recon_portscan.sh not found"; return 1; }
+  echo "Triggering port scan cycle (running as reconrun via VPN)..."
+  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+    ES_URL="${ES_URL:-http://127.0.0.1:9200}" \
+    bash "$ps_script"
+}
+
 # cmd_js — JS secrets + interesting endpoints from ES
 # ---------------------------------------------------------------------------
 cmd_js() {
@@ -2409,6 +2463,11 @@ usage() {
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
   printf "  ${G}recon-params verify${R} <xss|sqli> [N]  Probe top N URLs — xss=canary reflection  sqli=DB errors\n\n"
 
+  printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
+  printf "  ${G}recon-ports${R} [N]               All hosts with open non-standard ports (from ES)\n"
+  printf "  ${G}recon-exposed${R}                 Critical-only: Docker/Redis/MongoDB/K8s/etcd exposed\n"
+  printf "  ${G}recon-portscan${R}                Trigger a port scan cycle now (daemon runs every 90m)\n\n"
+
   printf "${B}── TAKEOVERS ───────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-takeovers${R}                ES-confirmed + claim file (deduped by CNAME target)\n"
   printf "  ${G}recon-watching${R}                 Medium-confidence watch queue with age + provider breakdown\n"
@@ -2505,6 +2564,9 @@ case "${1:-}" in
   view|dashboard) shift; cmd_view "$@" ;;
   js)           shift; cmd_js "$@" ;;
   ignored)      shift; cmd_ignored "$@" ;;
+  ports)        shift; cmd_ports "$@" ;;
+  exposed)      cmd_exposed ;;
+  portscan)     cmd_portscan_now ;;
   fetch|get|pull) shift; cmd_fetch "$@" ;;
   bulk)         shift; cmd_bulk "$@" ;;
   fp)           shift; cmd_fp "$@" ;;
