@@ -55,6 +55,30 @@ bootstrap_mapping() {
     ES_USER="$ES_USER" BATCHES_PER_CYCLE=0 RUN_TRIAGE=0 \
     bash "$VALIDATE" >/dev/null
   log "bootstrapped mapping: $INDEX_NAME"
+  apply_screenshot_mapping
+}
+
+# Idempotent: PUT explicit mappings for fields that must NOT be auto-detected.
+# screenshot_thumb_b64 in particular — without this, ES dynamic mapping would
+# pick `text` and the 5-8KB base64 strings would be analyzed + inverted-index'd,
+# bloating the index by an order of magnitude. doc_values:false + store:false
+# keeps the field _source-only (which is exactly how the gallery reads it).
+apply_screenshot_mapping() {
+  curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+    -X PUT "$ES_URL/$INDEX_NAME/_mapping" \
+    -d '{
+      "properties": {
+        "screenshot_at":        {"type": "date"},
+        "screenshot_status":    {"type": "keyword"},
+        "screenshot_path":      {"type": "keyword"},
+        "screenshot_title":     {"type": "text"},
+        "screenshot_w":         {"type": "integer"},
+        "screenshot_h":         {"type": "integer"},
+        "screenshot_error":     {"type": "keyword", "ignore_above": 256},
+        "screenshot_thumb_b64": {"type": "binary", "doc_values": false, "store": false}
+      }
+    }' >/dev/null
+  log "applied screenshot_* mapping"
 }
 
 verify_mapping() {
