@@ -185,7 +185,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_score)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_score|portscan|bypass|restale|digest)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -1563,6 +1563,74 @@ cmd_portscan_now() {
     bash "$ps_script"
 }
 
+# ---------------------------------------------------------------------------
+# cmd_bypass — view confirmed access-control bypasses (from ES)
+# ---------------------------------------------------------------------------
+cmd_bypass() {
+  local n="${1:-30}"
+  hdr "Confirmed access-control bypasses (top $n, by confidence)"
+  local resp
+  resp="$(_es_search "{
+    \"size\": $n,
+    \"_source\": [\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",
+                  \"triage_program\",\"bypass_technique\",\"bypass_top_confidence\",
+                  \"bypass_waf\",\"bypass_paths\",\"bypass_checked_at\"],
+    \"query\": {\"term\":{\"bypass_confirmed\":true}},
+    \"sort\": [
+      {\"bypass_top_confidence\":{\"order\":\"desc\",\"missing\":\"_last\"}},
+      {\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}}
+    ]
+  }")"
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+  if [[ "$total" -eq 0 ]]; then echo "  (no confirmed bypasses yet)"; return; fi
+  printf '%-3s %-4s %-6s %-12s %-44s %-22s %-22s %s\n' \
+    "PRI" "SCR" "CONF" "WAF" "HOST" "PROGRAM" "BEST TECHNIQUE" "PATHS"
+  printf '%s\n' "$(printf '─%.0s' {1..150})"
+  printf '%s' "$resp" | jq -r '
+    .hits.hits[]._source |
+    [
+      (.triage_priority // "-"),
+      ((.triage_score // 0) | tostring),
+      ((.bypass_top_confidence // 0) | tostring),
+      (.bypass_waf // "?"),
+      (.host // ""),
+      (.triage_program // "-"),
+      (.bypass_technique // "?"),
+      ((.bypass_paths // []) | map(.path) | unique | join(","))
+    ] | @tsv' 2>/dev/null \
+  | while IFS=$'\t' read -r pri scr conf waf host prog tech paths; do
+      printf '%-3s %-4s %-6s %-12s %-44s %-22s %-22s %s\n' \
+        "$pri" "$scr" "$conf" "${waf:0:12}" "${host:0:44}" "${prog:0:22}" "${tech:0:22}" "${paths:0:60}"
+    done
+  echo
+  printf "  showing: %s of %s confirmed bypass(es)\n" \
+    "$(printf '%s' "$resp" | jq -r '.hits.hits | length' 2>/dev/null)" "$total"
+  printf "  tip: recon-inspect <host>   for full detail incl. all paths\n"
+}
+
+cmd_bypass_now() {
+  local s="$SCRIPT_DIR/recon_bypass.sh"
+  [[ -f "$s" ]] || { echo "recon_bypass.sh not found"; return 1; }
+  echo "Triggering bypass cycle (running as reconrun via VPN)..."
+  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+    ES_URL="${ES_URL:-http://127.0.0.1:9200}" \
+    bash "$s"
+}
+
+cmd_revalidate_now() {
+  local s="$SCRIPT_DIR/recon_restale.sh"
+  [[ -f "$s" ]] || { echo "recon_restale.sh not found"; return 1; }
+  echo "Re-queuing stale P0/P1 hosts into inbox..."
+  bash "$s"
+}
+
+cmd_digest_now() {
+  local s="$SCRIPT_DIR/recon_digest.sh"
+  [[ -f "$s" ]] || { echo "recon_digest.sh not found"; return 1; }
+  echo "Posting daily digest to #health channel..."
+  bash "$s"
+}
+
 # cmd_js — JS secrets + interesting endpoints from ES
 # ---------------------------------------------------------------------------
 cmd_js() {
@@ -2567,6 +2635,10 @@ case "${1:-}" in
   ports)        shift; cmd_ports "$@" ;;
   exposed)      cmd_exposed ;;
   portscan)     cmd_portscan_now ;;
+  bypass)       shift; cmd_bypass "$@" ;;
+  bypass-now)   cmd_bypass_now ;;
+  revalidate)   cmd_revalidate_now ;;
+  digest-now)   cmd_digest_now ;;
   fetch|get|pull) shift; cmd_fetch "$@" ;;
   bulk)         shift; cmd_bulk "$@" ;;
   fp)           shift; cmd_fp "$@" ;;
