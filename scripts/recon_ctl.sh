@@ -815,7 +815,6 @@ cmd_fresh() {
   mkdir -p "$FRESH_DIR"
   touch "$SEEN_FILE"
 
-  local ES_PASS_VAL; ES_PASS_VAL="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
   local resp
   resp="$(curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" \
     -H 'Content-Type: application/json' \
@@ -962,7 +961,6 @@ cmd_tech() {
 
   local TECH_DIR="$BASE_DIR/tech"
   mkdir -p "$TECH_DIR"
-  local ES_PASS_VAL; ES_PASS_VAL="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
 
   # Build a should[OR] clause for each tech:
   #   (a) wildcard on `tech` field — case-insensitive, matches versioned values e.g. "WordPress:5.7"

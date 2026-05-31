@@ -21,7 +21,7 @@ if grep -qi 'microsoft\|WSL' /proc/version 2>/dev/null; then
   echo "(verify the IP above is your VPN exit, not your home IP)"
   echo ""
   echo "== local ES check =="
-  sudo -n -u reconrun curl -s --max-time 5 -u "elastic:$(tr -d '[:space:]' < ~/.recon_es_pass)" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'
+  sudo -n -u reconrun curl -s --max-time 5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'
   exit 0
 fi
 
@@ -43,4 +43,4 @@ echo "(verify the IP above is your VPN's, not your home IP)"
 
 echo
 echo "== local ES should work =="
-sudo -n -u reconrun curl -s --max-time 5 -u "elastic:$(tr -d '[:space:]' < ~/.recon_es_pass)" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'
+sudo -n -u reconrun curl -s --max-time 5 --netrc-file "$HOME/.recon_es_netrc" http://127.0.0.1:9200 | jq -r '.cluster_name // .name'

@@ -27,11 +27,11 @@ must be compatible with a live restart — the daemon stays up.
 
 **Never touch nftables/iptables** — WSL2 uses Windows Mullvad for egress, no local kill-switch needed.
 
-**ES password** lives at `~/.recon_es_pass` (32 bytes, no trailing newline).
-All ES curl calls must use `-u "elastic:$(cat ~/.recon_es_pass)"`.
-The `tr -d '[:space:]'` idiom for reading the password **does not work** when
-called from `wsl -d kali-linux -- bash -c "..."` due to shell escaping. Use
-heredoc (`wsl -d kali-linux -- bash << 'EOF' ... EOF`) instead.
+**ES auth** uses `~/.recon_es_netrc` (mode 600). All ES curl calls must use
+`--netrc-file "$HOME/.recon_es_netrc"`. Never `-u elastic:PASSWORD` (exposes
+creds in `ps aux`). Call `setup_es_netrc` (from `recon_net.sh`) before any
+ES curl. When calling from Windows via WSL, use a heredoc:
+`wsl -d kali-linux -- bash << 'EOF' ... EOF`
 
 ---
 

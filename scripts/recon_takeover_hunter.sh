@@ -58,9 +58,9 @@ CNAME_WHITELIST_FILE="${CNAME_WHITELIST_FILE:-$SCRIPT_DIR/data/cname_whitelist.t
 # Fingerprint DB — provider signatures for subdomain takeover detection
 FINGERPRINT_DB_FILE="${FINGERPRINT_DB_FILE:-$SCRIPT_DIR/data/takeover_fingerprints.tsv}"
 
-# HackerOne / Bugcrowd disclosed-report lookup (Fix 7)
+# HackerOne disclosed-report lookup (Fix 7)
 HACKERONE_API_TOKEN="${HACKERONE_API_TOKEN:-}"
-BUGCROWD_API_TOKEN="${BUGCROWD_API_TOKEN:-}"
+H1_USERNAME="${H1_USERNAME:-d0k}"   # HackerOne username for API auth
 
 # Resolvers used in parallel — 2-of-3 must agree
 RESOLVERS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
@@ -170,12 +170,17 @@ check_already_disclosed() {
   [[ -z "$HACKERONE_API_TOKEN" ]] && return 1
   # Search H1 disclosed reports — simplified query (root domain matching)
   local root; root="$(extract_apex "$host")"
+  # Write a per-call netrc so the token never appears on the command line
+  local _h1rc; _h1rc="$(mktemp)"; chmod 600 "$_h1rc"
+  printf 'machine api.hackerone.com\nlogin %s\npassword %s\n' \
+    "$H1_USERNAME" "$HACKERONE_API_TOKEN" > "$_h1rc"
   local resp
   resp="$(curl -sS -m10 \
-    -u "d0k:${HACKERONE_API_TOKEN}" \
+    --netrc-file "$_h1rc" \
     -H "Accept: application/json" \
     "https://api.hackerone.com/v1/hackers/reports?filter[state][]=resolved&filter[keyword][]=${root}&page[size]=1" \
     2>/dev/null)"
+  rm -f "$_h1rc"
   local count; count="$(printf '%s' "$resp" | jq -r '.data | length // 0' 2>/dev/null || echo 0)"
   [[ "${count:-0}" -gt 0 ]] && return 0
   return 1
@@ -655,11 +660,14 @@ probe_host() {
       # delivered — otherwise a failed Discord POST would permanently suppress
       # the first-blood ping. If notifications are disabled, mark SEEN at once.
       # Fix 1: TSV now has 9 columns: ts host svc cname confidence stages diff notes last_verified claim_status
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
-        "$now_epoch" "$claim_status" \
-        >> "$CLAIM_FILE"
-      printf '%s\t%s\t%s\tCLAIM\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+      # flock: probe_host runs in parallel — guard all shared-file appends
+      ( flock -x 200
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
+          "$now_epoch" "$claim_status" \
+          >> "$CLAIM_FILE"
+        printf '%s\t%s\t%s\tCLAIM\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+      ) 200>"${CLAIM_FILE}.lock"
 
       log "🚨 $confidence takeover candidate: $host ($svc, $stages_str, claim_status=$claim_status)"
 
@@ -676,22 +684,24 @@ probe_host() {
 
       if [[ "$NOTIFY_HIGH" == "1" ]]; then
         if notify_takeover "$host" "$idx" "$effective_confidence" "$cname" "$stages_str" "$notes" "$claim_status"; then
-          echo "$host" >> "$SEEN_FILE"
+          ( flock -x 201; echo "$host" >> "$SEEN_FILE" ) 201>"${SEEN_FILE}.lock"
         else
           log "  alert undelivered for $host — left unseen, will retry next cycle"
         fi
       else
-        echo "$host" >> "$SEEN_FILE"
+        ( flock -x 201; echo "$host" >> "$SEEN_FILE" ) 201>"${SEEN_FILE}.lock"
       fi
       ;;
     MEDIUM)
       # Write to WATCH file — periodic recheck
       # Fix 7: add last_verified epoch column
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
-        "$now_epoch" \
-        >> "$WATCH_FILE"
-      printf '%s\t%s\t%s\tWATCH\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+      ( flock -x 202
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
+          "$now_epoch" \
+          >> "$WATCH_FILE"
+        printf '%s\t%s\t%s\tWATCH\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+      ) 202>"${WATCH_FILE}.lock"
       log "  ⚠ MEDIUM watching: $host ($svc, $stages_str)"
 
       # Fix 13: no @here on MEDIUM — notify_takeover with unknown claim_status (no ping)
