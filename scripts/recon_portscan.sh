@@ -173,21 +173,18 @@ PORTSCAN_MIN_SCORE="${PORTSCAN_MIN_SCORE:-8}" # min triage_score to target
 PORTSCAN_COOLDOWN="${PORTSCAN_COOLDOWN:-604800}" # 7 days in seconds
 PORTSCAN_MAX_RUNTIME="${PORTSCAN_MAX_RUNTIME:-1800}" # hard cap: 30 min
 
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"
-[[ -z "$DISCORD_WEBHOOK" && -f "$HOME/.recon_discord_webhook" ]] && \
-  DISCORD_WEBHOOK="$(cat "$HOME/.recon_discord_webhook" 2>/dev/null || true)"
-
 # ── Tool check ───────────────────────────────────────────────────────────────
 [[ -x "$NAABU_BIN" ]] || die "naabu not found — install: go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"
 
 es_curl() { curl -sS -m30 "${ES_AUTH[@]}" "$@"; }
 
+# discord_alert: uses discord_hook + discord_post from recon_net.sh.
+# Reads webhook from ~/.recon_discord_ports (per-channel pattern).
+# Rate-limit aware (429 retry), 5-attempt delivery guarantee.
 discord_alert() {
-  local msg="$1"
-  [[ -z "$DISCORD_WEBHOOK" ]] && return 0
-  curl -sS -m10 -X POST "$DISCORD_WEBHOOK" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -nc --arg c "$msg" '{content:$c}')" 2>/dev/null || true
+  local hook; hook="$(discord_hook ports)"
+  [[ -z "$hook" ]] && return 0
+  discord_post "$hook" "$(jq -nc --arg c "$1" '{content:$c}')"
 }
 
 # ── Target selection ─────────────────────────────────────────────────────────
