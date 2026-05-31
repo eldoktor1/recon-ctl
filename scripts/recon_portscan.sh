@@ -78,7 +78,7 @@ PORTS_CRITICAL=(
   4848               # GlassFish admin console
   8983               # Apache Solr admin (SSRF + data exposure)
 )
-CRITICAL_SET=" ${PORTS_CRITICAL[*]} "   # fast membership test
+CRITICAL_SET=" $(printf '%s ' "${PORTS_CRITICAL[@]}") "   # space-delimited; IFS-safe (IFS=$'\n\t' would break array expansion)
 
 # ADMIN: management panels — auth bypass / default creds common. +6 bonus.
 PORTS_ADMIN=(
@@ -104,7 +104,7 @@ PORTS_ADMIN=(
   8086               # InfluxDB (metrics + possible auth bypass)
   5000 5001          # Docker Registry, Flask dev, various
 )
-ADMIN_SET=" ${PORTS_ADMIN[*]} "
+ADMIN_SET=" $(printf '%s ' "${PORTS_ADMIN[@]}") "
 
 # ALT-HTTP: shadow APIs and dev servers. +3 bonus if live HTTP response.
 PORTS_ALT_HTTP=(
@@ -222,7 +222,7 @@ resp="$(es_curl -H 'Content-Type: application/json' \
   -X POST "$ES_URL/$INDEX_NAME/_search" -d "$query" 2>/dev/null)"
 
 total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0')"
-log "Eligible targets (P${PORTSCAN_MIN_SCORE}+, no CDN, not scanned in 7d): $total — scanning up to $PORTSCAN_BATCH"
+log "Eligible targets (score≥${PORTSCAN_MIN_SCORE} / P1+, no CDN, not scanned in 7d): $total — scanning up to $PORTSCAN_BATCH"
 [[ "$total" -eq 0 ]] && { log "Nothing to scan this cycle"; exit 0; }
 
 # Build host list
@@ -272,13 +272,18 @@ log "naabu found $nfindings open port(s)"
 declare -A HOST_PORTS        # host → space-separated port list
 declare -A HOST_CRITICAL     # host → 1 if any critical port
 declare -A HOST_TIER         # host → max tier (critical/admin/althttp)
+declare -A HOST_IP           # host → resolved IP (for CDN dedup)
+declare -A IP_PORT_HITS      # "ip:port" → count of distinct hosts sharing it
 
 while IFS= read -r line; do
   h="$(printf '%s' "$line" | jq -r '.host // empty' 2>/dev/null)"
   p="$(printf '%s' "$line" | jq -r '.port // empty' 2>/dev/null)"
+  ip="$(printf '%s' "$line" | jq -r '.ip // empty' 2>/dev/null)"
   [[ -z "$h" || -z "$p" ]] && continue
 
   HOST_PORTS[$h]="${HOST_PORTS[$h]:-} $p"
+  [[ -n "$ip" ]] && HOST_IP[$h]="$ip"
+  [[ -n "$ip" ]] && IP_PORT_HITS["${ip}:${p}"]=$(( ${IP_PORT_HITS["${ip}:${p}"]:-0} + 1 ))
 
   if [[ "$CRITICAL_SET" == *" $p "* ]]; then
     HOST_CRITICAL[$h]=1
@@ -290,8 +295,93 @@ while IFS= read -r line; do
   fi
 done < "$scan_out"
 
+# ── CDN verification: filter shared-IP CDN edges and httpx-confirmed CDN ─────
+# Pass 1 — IP dedup: if the same IP:port is shared by 3+ different hosts it is
+# almost certainly a CDN edge node (Fastly/Cloudflare shared infra), not per-
+# host exposure.  Removes e.g. *.shopify.com all hitting the same Fastly IP.
+for _cdnhost in "${!HOST_PORTS[@]}"; do
+  _cdnip="${HOST_IP[$_cdnhost]:-}"
+  _clean_ports=""
+  for _cdnp in ${HOST_PORTS[$_cdnhost]}; do
+    _cnt="${IP_PORT_HITS["${_cdnip}:${_cdnp}"]:-1}"
+    if [[ -n "$_cdnip" && "$_cnt" -ge 3 ]]; then
+      log "  CDN-dedup: $_cdnhost:$_cdnp (IP $_cdnip shared by $_cnt hosts — CDN edge)"
+    else
+      _clean_ports="$_clean_ports $_cdnp"
+    fi
+  done
+  _clean_ports="${_clean_ports# }"   # strip leading space
+  if [[ -z "$_clean_ports" ]]; then
+    unset "HOST_PORTS[$_cdnhost]" "HOST_CRITICAL[$_cdnhost]" "HOST_TIER[$_cdnhost]" 2>/dev/null || true
+    es_curl -H 'Content-Type: application/json' \
+      -X POST "$ES_URL/$INDEX_NAME/_update/$_cdnhost" \
+      -d "$(jq -nc --arg n "$now_iso" '{"doc":{"cdn_name":"portscan-cdn","portscan_at":$n}}')" \
+      2>/dev/null > /dev/null || true
+  else
+    HOST_PORTS[$_cdnhost]="$_clean_ports"
+  fi
+done
+
+# Pass 2 — httpx CDN check: for remaining HTTP-tier findings, run httpx with
+# -cdn to catch CDN fronting that IP-dedup missed (single-host CDN aliases,
+# per-region anycast where each host has a different edge IP).
+HTTPX_BIN="${HTTPX_BIN:-$(command -v httpx 2>/dev/null || echo '')}"
+if [[ -n "$HTTPX_BIN" && "${#HOST_PORTS[@]}" -gt 0 ]]; then
+  _vtmp="$(mktemp)"; _vout="$(mktemp)"
+  for _vh in "${!HOST_PORTS[@]}"; do
+    for _vp in ${HOST_PORTS[$_vh]}; do
+      _vsc="http"
+      [[ "$_vp" =~ ^(8443|443|2376|5001)$ ]] && _vsc="https"
+      printf '%s://%s:%s\n' "$_vsc" "$_vh" "$_vp"
+    done
+  done | sort -u > "$_vtmp"
+
+  timeout 120 "$HTTPX_BIN" -list "$_vtmp" -cdn -silent -json -timeout 8 \
+    >> "$_vout" 2>/dev/null || true
+  rm -f "$_vtmp"
+
+  while IFS= read -r _vl; do
+    # httpx CDN field is boolean .cdn or non-empty string ."cdn-name"
+    _vc="$(printf '%s' "$_vl" | jq -r \
+      'if (.cdn==true) or (."cdn-name"//""!="") then "cdn" else "ok" end' 2>/dev/null)"
+    [[ "$_vc" != "cdn" ]] && continue
+    # Extract host — httpx may report as .host or inside .url
+    _vh2="$(printf '%s' "$_vl" | jq -r '.host // empty' 2>/dev/null)"
+    [[ -z "$_vh2" ]] && \
+      _vh2="$(printf '%s' "$_vl" | jq -r '.url // empty' 2>/dev/null | \
+              sed -E 's|^https?://||;s|:[0-9]+(/.*)?$||')"
+    _vp2="$(printf '%s' "$_vl" | jq -r '(.port // 0) | tostring' 2>/dev/null)"
+    [[ -z "$_vh2" ]] && continue
+    log "  CDN-httpx: $_vh2:$_vp2 (CDN-fronted — filtered)"
+    _vrem=""
+    for _vpp in ${HOST_PORTS[$_vh2]:-}; do
+      [[ "$_vpp" == "$_vp2" ]] || _vrem="$_vrem $_vpp"
+    done
+    _vrem="${_vrem# }"
+    if [[ -z "$_vrem" ]]; then
+      unset "HOST_PORTS[$_vh2]" "HOST_CRITICAL[$_vh2]" "HOST_TIER[$_vh2]" 2>/dev/null || true
+      es_curl -H 'Content-Type: application/json' \
+        -X POST "$ES_URL/$INDEX_NAME/_update/$_vh2" \
+        -d "$(jq -nc --arg n "$now_iso" '{"doc":{"cdn_name":"portscan-cdn","portscan_at":$n}}')" \
+        2>/dev/null > /dev/null || true
+    else
+      HOST_PORTS[$_vh2]="$_vrem"
+      # Recalculate tier for remaining ports
+      HOST_TIER[$_vh2]="althttp"; unset "HOST_CRITICAL[$_vh2]" 2>/dev/null || true
+      for _vpp2 in ${HOST_PORTS[$_vh2]}; do
+        if [[ "$CRITICAL_SET" == *" $_vpp2 "* ]]; then
+          HOST_CRITICAL[$_vh2]=1; HOST_TIER[$_vh2]="critical"; break
+        elif [[ "$ADMIN_SET" == *" $_vpp2 "* ]]; then
+          [[ "${HOST_TIER[$_vh2]}" != "critical" ]] && HOST_TIER[$_vh2]="admin"
+        fi
+      done
+    fi
+  done < "$_vout"
+  rm -f "$_vout"
+fi
+
 nhosts_with_findings="${#HOST_PORTS[@]}"
-log "$nhosts_with_findings host(s) have open ports"
+log "$nhosts_with_findings host(s) have open ports (after CDN filtering)"
 
 # ── Process each host ─────────────────────────────────────────────────────────
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -404,7 +494,7 @@ done < <(printf '%s' "$resp" | jq -r '.hits.hits[] | [._id, ._source.host] | @ts
 es_curl -X POST "$ES_URL/$INDEX_NAME/_refresh" > /dev/null 2>&1 || true
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-critical_hosts="$(printf '%s\n' "${!HOST_CRITICAL[@]}" | wc -l | tr -d ' ')"
+critical_hosts="${#HOST_CRITICAL[@]}"   # array length — correct even when empty
 log "=== portscan cycle done ==="
 log "  Scanned: $nhosts hosts"
 log "  Open ports found on: $nhosts_with_findings host(s)"
