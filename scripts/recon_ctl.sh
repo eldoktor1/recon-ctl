@@ -185,7 +185,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_score|portscan|bypass|restale|digest)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_score|portscan|bypass|restale|digest|screenshot)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -1631,6 +1631,98 @@ cmd_digest_now() {
   bash "$s"
 }
 
+# ---------------------------------------------------------------------------
+# Screenshot module (Playwright + stealth)
+# ---------------------------------------------------------------------------
+SHOT_VENV="${SHOT_VENV:-$HOME/recon/venv/screenshot}"
+SHOT_SCRIPT="${SHOT_SCRIPT:-$SCRIPT_DIR/recon_screenshot.sh}"
+SHOT_DIR="${SHOT_DIR:-$BASE_DIR/screenshots}"
+
+cmd_screenshot_install() {
+  hdr "Screenshot module install"
+  mkdir -p "$SHOT_DIR" "$HOME/recon/venv"
+  if [[ ! -x "$SHOT_VENV/bin/python" ]]; then
+    echo "Creating venv at $SHOT_VENV"
+    python3 -m venv "$SHOT_VENV"
+  fi
+  "$SHOT_VENV/bin/pip" install --quiet --upgrade pip
+  "$SHOT_VENV/bin/pip" install --quiet playwright playwright-stealth pillow
+  echo "Installing chromium (one-time, ~120MB)..."
+  "$SHOT_VENV/bin/playwright" install chromium 2>&1 | tail -5
+  echo "Done. Smoke test: recon-screenshot-test example.com"
+}
+
+cmd_screenshot_now() {
+  [[ -f "$SHOT_SCRIPT" ]] || { echo "recon_screenshot.sh not found"; return 1; }
+  echo "Running one screenshot cycle..."
+  bash "$SHOT_SCRIPT" cycle
+}
+
+cmd_screenshot_backfill() {
+  [[ -f "$SHOT_SCRIPT" ]] || { echo "recon_screenshot.sh not found"; return 1; }
+  local n="${1:-200}"
+  echo "Backfilling up to $n hosts that have NO screenshot_at yet..."
+  bash "$SHOT_SCRIPT" backfill "$n"
+}
+
+cmd_screenshot_test() {
+  local host="${1:?usage: recon-screenshot-test <host>}"
+  [[ -f "$SHOT_SCRIPT" ]] || { echo "recon_screenshot.sh not found"; return 1; }
+  bash "$SHOT_SCRIPT" test "$host"
+}
+
+cmd_gallery() {
+  [[ -f "$SHOT_SCRIPT" ]] || { echo "recon_screenshot.sh not found"; return 1; }
+  bash "$SHOT_SCRIPT" gallery "${1:-1000}"
+  local out="$SHOT_DIR/index.html"
+  if [[ -f "$out" ]]; then
+    echo "Gallery: $out"
+    # WSL: explorer.exe opens with the Windows shell. Translate path if needed.
+    if command -v wslpath >/dev/null 2>&1; then
+      local winpath; winpath="$(wslpath -w "$out" 2>/dev/null || true)"
+      [[ -n "$winpath" ]] && echo "Open with: explorer.exe '$winpath'"
+    fi
+  else
+    echo "(gallery file not produced — check daemon log)"
+  fi
+}
+
+cmd_screenshots() {
+  local n="${1:-30}"
+  hdr "Screenshots — top $n (from ES)"
+  local resp
+  resp="$(_es_search "{
+    \"size\": $n,
+    \"_source\": [\"host\",\"triage_priority\",\"triage_score\",\"triage_program\",
+                  \"screenshot_status\",\"screenshot_at\",\"screenshot_title\",
+                  \"screenshot_w\",\"screenshot_h\"],
+    \"query\": {\"exists\":{\"field\":\"screenshot_at\"}},
+    \"sort\": [{\"screenshot_at\":{\"order\":\"desc\"}}]
+  }")"
+  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+  if [[ "$total" -eq 0 ]]; then echo "  (no screenshots yet — run: recon-screenshot-backfill)"; return; fi
+  printf '%-3s %-4s %-8s %-44s %-22s %s\n' "PRI" "SCR" "STATUS" "HOST" "PROGRAM" "TITLE"
+  printf '%s\n' "$(printf '─%.0s' {1..130})"
+  printf '%s' "$resp" | jq -r '
+    .hits.hits[]._source |
+    [
+      (.triage_priority // "-"),
+      ((.triage_score // 0) | tostring),
+      (.screenshot_status // "?"),
+      (.host // ""),
+      (.triage_program // "-"),
+      (.screenshot_title // "")
+    ] | @tsv' 2>/dev/null \
+  | while IFS=$'\t' read -r pri scr st host prog title; do
+      printf '%-3s %-4s %-8s %-44s %-22s %s\n' \
+        "$pri" "$scr" "$st" "${host:0:44}" "${prog:0:22}" "${title:0:55}"
+    done
+  echo
+  printf "  showing: %s of %s screenshotted host(s)\n" \
+    "$(printf '%s' "$resp" | jq -r '.hits.hits | length' 2>/dev/null)" "$total"
+  printf "  tip: recon-gallery   open the HTML gallery in explorer\n"
+}
+
 # cmd_js — JS secrets + interesting endpoints from ES
 # ---------------------------------------------------------------------------
 cmd_js() {
@@ -2639,6 +2731,12 @@ case "${1:-}" in
   bypass-now)   cmd_bypass_now ;;
   revalidate)   cmd_revalidate_now ;;
   digest-now)   cmd_digest_now ;;
+  screenshot|shot)       cmd_screenshot_now ;;
+  screenshot-backfill|shot-backfill) shift; cmd_screenshot_backfill "$@" ;;
+  screenshot-test|shot-test)         shift; cmd_screenshot_test "$@" ;;
+  screenshot-install|shot-install)   cmd_screenshot_install ;;
+  screenshots|shots)    shift; cmd_screenshots "$@" ;;
+  gallery)              shift; cmd_gallery "$@" ;;
   fetch|get|pull) shift; cmd_fetch "$@" ;;
   bulk)         shift; cmd_bulk "$@" ;;
   fp)           shift; cmd_fp "$@" ;;

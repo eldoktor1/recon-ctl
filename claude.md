@@ -131,22 +131,43 @@ ai_review/
 
 ```
 recon_daemon.sh (PID in state/recon_daemon.pid)
-  ├── discovery          subfinder + assetfinder → inbox batches
-  ├── validate           httpx → ES ingest → takeover-hunter → triage (normal lane)
-  ├── validate-fast      same but --prefix 00_ (true-fresh hot-seed priority)
-  ├── scope-watch        polls platforms for new scope → inbox
-  ├── takeover-hunter    background NXDOMAIN/CNAME sweep
-  ├── hot-seed           flushes CT results to 00_-prefixed fast-lane batches
-  ├── true-fresh         certstream CT listener + enrichment
-  ├── scope-db           refreshes programs.json every 4h
-  ├── cve-intel          KEV+NVD refresh every 6h
-  ├── vuln-feed          vuln intelligence refresh every 1h
-  ├── nuclei             targeted nuclei on triage output
-  └── discord-bot        polling bot (5s interval)
+  ├── vpnguard          20s — pauses every other loop on Mullvad egress failure
+  ├── discovery         30m — subfinder + assetfinder → inbox batches
+  ├── validate          2m  — httpx → ES → takeover → triage (normal lane)
+  ├── validate-fast     2m  — same but --prefix 00_ (true-fresh fast lane)
+  ├── scope-watch       90m — polls platforms for new scope → inbox
+  ├── takeover-watch    5m  — background NXDOMAIN/CNAME re-sweep
+  ├── hot-seed          5m  — flushes CT results to fast-lane batches
+  ├── true-fresh        2m  — gungnir CT listener + enrichment
+  ├── scope-db          24h — refreshes programs.json
+  ├── cve-kev           1h  — CISA KEV refresh
+  ├── cve-nvd           24h — NVD recent CVEs
+  ├── vuln-feed         1h  — EPSS/Vulnrichment/GHSA normalize
+  ├── nuclei-v21        6h  — targeted nuclei on triage output (bounty templates)
+  ├── bounty-scan       30m — fresh_modules smart-scan
+  ├── deep-scan         24h — fresh_modules deep-scan
+  ├── active-checks     10m — fresh_modules active-checks
+  ├── js-scanner        30m — fresh_modules js-scan
+  ├── cloudrecon        1h  — Caduceus cert neighbor enumeration
+  ├── dast              30m — DAST param-fuzz on fresh hosts
+  ├── params            30m — sus_params catalog (gf classification)
+  ├── portscan          90m — targeted ~120-port sweep on P1+ non-CDN
+  ├── bypass            1h  — WAF-aware 401/403 access-control bypass
+  ├── restale           8h  — re-queue stale P0/P1 (>14d) into inbox
+  ├── digest            24h — daily Discord summary to #health
+  ├── exposure          8h  — nuclei exposure templates (P0/P1)
+  ├── screenshot        2h  — Playwright + stealth, 200x150 thumb to ES
+  └── discord-bot       5s  — operator-facing slash commands
 ```
 
-All loops run `run_scanner()` which executes as `reconrun` via `sudo -n -u reconrun env ...`.
-AC power = 80 threads / 100 rate. Battery = 40 threads / 50 rate.
+Target-facing loops run via `run_scanner()` → `sudo -n -u reconrun env ...`.
+Non-target-facing loops (digest, restale) run as `d0k` directly.
+Edge case: `screenshot` is target-facing but runs as `d0k` because Playwright
+lives in `$HOME` — the supervise_loop VPN gate still pauses it on egress
+failure, so the real IP is never exposed.
+
+AC power = 150 threads / 100 rate (default). Battery = halved. Override per-
+session with `recon-rate light|easy|medium|full` or a custom `<t> <r>` pair.
 
 ---
 
@@ -179,19 +200,50 @@ Priority bands: P0 ≥15, P1 ≥8, P2 ≥4, P3 ≥3
 
 ---
 
-## Shell Aliases (in ~/.zshrc)
+## Shell Aliases (in ~/.recon_aliases, auto-sourced by zsh + bash)
 
 ```bash
-recon-start    # run preflight + start daemon
-recon-stop     # graceful stop
-recon-status   # daemon + queue + ES summary
-recon-health   # full health check
-recon-clean    # archive stale queue files
-recon-logs     # tail daemon log
-recon-boost    # enable boost mode
-recon-browse   # enable browse mode
-recon-ai       # AI review status
-recon-queue    # queue file counts
+# Daemon lifecycle
+recon-up               # start ES + daemon
+recon-start            # preflight + daemon
+recon-stop             # graceful stop (covers all module loops)
+recon-restart          # stop + start
+recon-status           # daemon + queue + ES summary
+recon-health           # full health check (worker dup detection)
+recon-logs             # tail daemon log
+recon-rate             # show / set effective rate (presets: light/easy/medium/full)
+recon-boost            # full rate
+recon-browse           # light rate
+
+# Lead viewers (all read ES)
+recon-top              # top scored
+recon-fresh / -new     # true-fresh P0/P1
+recon-kev              # KEV-matched
+recon-confirmed        # nuclei-confirmed
+recon-vuln             # vuln feed hits
+recon-tech             # tech-fingerprint search
+recon-js               # JS secrets + endpoints
+recon-takeovers        # claim list (ES + raw)
+recon-watching         # pending takeover rechecks
+recon-ports / -exposed # port scanner hits
+recon-bypass           # 401/403 bypass confirmations
+recon-screenshots      # screenshotted hosts table
+recon-gallery          # rebuild HTML gallery
+recon-gallery-open     # open the gallery in Windows Explorer
+recon-ai-*             # AI layer (top/now/high/watch/p0)
+
+# Manual triggers
+recon-portscan         # one cycle now (as reconrun)
+recon-bypass-now       # one cycle now (as reconrun)
+recon-screenshot       # one cycle now (as d0k)
+recon-screenshot-backfill [N]   # one-shot, hosts with NO screenshot_at yet
+recon-screenshot-test <host>    # capture + render gallery
+recon-screenshot-install        # idempotent venv + chromium setup
+recon-revalidate       # re-queue stale P0/P1 into inbox
+recon-digest-now       # send digest now
+
+# Actions
+recon-submit / -ignore / -fp / -inspect / -dupes
 ```
 
 ---
@@ -234,3 +286,72 @@ recon-queue    # queue file counts
 7. **validate processed=0**: Normal when inbox is empty. Discovery feeds inbox.
    If discovery has no live subfinder/assetfinder processes AND hot-seed finds
    nothing, the pipeline is stalled — not broken, just starved of new hosts.
+
+8. **`IFS=$'\n\t'` + space-joining arrays**: Every script sets that IFS. With
+   it set, `${arr[*]}` joins on newline (the first IFS char), NOT space —
+   silently breaks every membership test built from the join. Always:
+   `printf '%s ' "${arr[@]}"`. This bit the port scanner and is the easiest
+   regression to reintroduce.
+
+9. **Apostrophes inside single-quoted jq/bash strings**: An apostrophe in a
+   comment or string inside a single-quoted heredoc terminates the bash string
+   mid-script and produces a runtime syntax error. Use "do not" not "don't",
+   "it is" not "it's". This caused a critical `triage.sh` regression once.
+   Also applies to git commit messages — always use the heredoc form
+   `git commit -m "$(cat <<'GITMSG' ... GITMSG)"`.
+
+10. **`exists` on a `binary` ES field with `doc_values: false` matches zero**.
+    The `screenshot_thumb_b64` mapping has `doc_values: false` to keep the
+    index small; filtering by `{"exists":{"field":"screenshot_thumb_b64"}}`
+    silently returns no documents. Filter on the companion `screenshot_status`
+    keyword instead. Same trap applies to any other field added with
+    `doc_values: false`.
+
+---
+
+## Module-specific Notes
+
+### Bypass (`recon_bypass.sh`)
+- WAF fingerprint is HEAD-then-GET so CDNs that hide headers on HEAD still get
+  classified. Used purely to reorder the technique queue; never gates a probe.
+- The technique catalog is emitted as one text stream with `\x1f` (US) between
+  header values inside one technique line. `_unpack_technique` un-splits and
+  prepends `-H` per value. `_techniques_for_waf_dedup` strips duplicates
+  introduced by the per-WAF priority head.
+- Per-host wall-clock budget (`BYPASS_HOST_BUDGET`, default 180s) protects the
+  daemon loop. Burning the whole budget on one host is fine; the next cycle
+  picks up where we left off because of the 7d cooldown bookkeeping.
+- Stores an **array** of bypass records in ES (`bypass_paths`). Each is
+  `{path, technique, code, size, confidence}`. The `bypass_technique` /
+  `bypass_top_confidence` top-level fields and the Discord embed pull the
+  highest-confidence entry from this array.
+
+### Screenshot (`recon_screenshot.sh` + `tools/screenshot_worker.py`)
+- Python lives in `~/recon/venv/screenshot/` (Kali's PEP 668 blocks system
+  pip). Install via `recon-screenshot-install` — idempotent.
+- Chromium is the **headless shell** build (~120MB, downloaded into
+  `~/.cache/ms-playwright/`). Do not install `--with-deps` from WSL2 — apt
+  deps are large and Playwright runs fine without them on Kali.
+- `playwright_stealth` has two API generations (`stealth_sync` in 1.x,
+  `Stealth` class in 2.x). The worker autodetects.
+- Block detection downscales the screenshot to 10×10 RGB and checks per-
+  channel spread. <15 = essentially solid colour = WAF interstitial. Block
+  hits store `screenshot_status: "blocked"` and do not show in the gallery.
+- ES binary field `screenshot_thumb_b64` stores the 200×150 JPEG at ~5-8KB
+  base64. `doc_values: false, store: false` keeps the index small; you can
+  only read the field via `_source` (which is fine — that is exactly how the
+  gallery renderer consumes it).
+- Gallery is a single static HTML file with inline `data:image/jpeg;base64,…`
+  thumbs and a JS filter box. Opens in Windows Explorer via
+  `recon-gallery-open` (wslpath translates the path).
+- Runs as `d0k` even though it is target-facing. Playwright cache lives in
+  `$HOME` and shuffling through sudo for every cycle is brittle. The
+  supervise_loop VPN gate still pauses this loop on `vpn_down`, so traffic
+  cannot leave with the real IP.
+
+### Restale / Digest
+- Both run as `d0k`, not `run_scanner`. Restale only writes to `queue/inbox/`;
+  digest only reads ES + POSTs to Discord. Neither egresses to a target.
+- Digest uses `_count` with multiple filter clauses; the helper originally had
+  a missing closing brace and returned 0 for every metric. If a digest shows
+  every number as 0, check `_count()` braces first.

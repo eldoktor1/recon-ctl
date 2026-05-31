@@ -473,6 +473,16 @@ run_digest() { [[ -f "$DIGEST_SCRIPT" ]] && bash "$DIGEST_SCRIPT" || true; }
 EXPOSURE_INTERVAL="${EXPOSURE_INTERVAL:-28800}"  # 8h
 run_exposure() { v21_killed exposure && return 0; [[ -f "$V21_NUCLEI" ]] && run_scanner bash "$V21_NUCLEI" exposure || true; }
 
+# ---- Playwright screenshot module (recon_screenshot.sh) ----------------------
+# Target-facing (Chromium issues TCP+TLS to every host), but runs as d0k —
+# Playwright cache + browser deps live in $HOME and shuffling through sudo
+# every cycle is brittle. The supervise_loop VPN gate (vpn_down flag) still
+# pauses this loop on egress failure, so traffic never leaves with the real IP.
+# Killswitch v2_screenshot. Cooldown 24h per host.
+SCREENSHOT_SCRIPT="${SCREENSHOT_SCRIPT:-$(script_path recon_screenshot.sh)}"
+SCREENSHOT_INTERVAL="${SCREENSHOT_INTERVAL:-7200}"  # 2h
+run_screenshot() { v21_killed screenshot && return 0; [[ -f "$SCREENSHOT_SCRIPT" ]] && bash "$SCREENSHOT_SCRIPT" cycle || true; }
+
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
 # gate, and the guard must keep running while down to detect recovery). Fast
@@ -564,6 +574,7 @@ run_discord_bot() {
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &
   supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &
+  supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
 
     # Long-running — supervised with simple restart loops
   (
