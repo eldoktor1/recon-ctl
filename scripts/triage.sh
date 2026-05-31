@@ -941,7 +941,7 @@ apply_cluster_and_submission() {
     #
     # Safety: the guard `has_region_or_env` requires at least one member to
     # carry a recognisable variant label before the cluster fires, and the
-    # cluster key still includes signals — different tech stacks don't merge.
+    # cluster key still includes signals — different tech stacks do not merge.
     def is_region_label:
       # AWS standard regions
       test("^(us-east-[12]|us-west-[12]|eu-west-[1-3]|eu-central-1|eu-north-1|ap-southeast-[12]|ap-northeast-[1-3]|ap-south-1|ca-central-1|sa-east-1)$") or
