@@ -446,6 +446,33 @@ PORTSCAN_SCRIPT="${PORTSCAN_SCRIPT:-$(script_path recon_portscan.sh)}"
 PORTSCAN_INTERVAL="${PORTSCAN_INTERVAL:-5400}"   # 90 minutes
 run_portscan() { v21_killed portscan && return 0; [[ -f "$PORTSCAN_SCRIPT" ]] && run_scanner bash "$PORTSCAN_SCRIPT" || true; }
 
+# ---- 401/403 bypass tester (recon_bypass.sh) ---------------------------------
+# WAF-fingerprint + tech-driven multi-path access-control bypass on score>=6
+# in-scope paying hosts. 1h cycle, 30 hosts/batch, 7d per-host cooldown.
+BYPASS_SCRIPT="${BYPASS_SCRIPT:-$(script_path recon_bypass.sh)}"
+BYPASS_INTERVAL="${BYPASS_INTERVAL:-3600}"
+run_bypass() { v21_killed bypass && return 0; [[ -f "$BYPASS_SCRIPT" ]] && run_scanner bash "$BYPASS_SCRIPT" || true; }
+
+# ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
+# Re-queues high-value hosts not seen in N days so they flow back through
+# httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
+RESTALE_SCRIPT="${RESTALE_SCRIPT:-$(script_path recon_restale.sh)}"
+RESTALE_INTERVAL="${RESTALE_INTERVAL:-28800}"    # 8h
+run_restale() { [[ -f "$RESTALE_SCRIPT" ]] && bash "$RESTALE_SCRIPT" || true; }
+
+# ---- Daily Discord digest (recon_digest.sh) ----------------------------------
+# Posts a 24h activity summary to #health. Read-only ES queries, not target-
+# facing, no killswitch — runs as d0k.
+DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(script_path recon_digest.sh)}"
+DIGEST_INTERVAL="${DIGEST_INTERVAL:-86400}"      # 24h
+run_digest() { [[ -f "$DIGEST_SCRIPT" ]] && bash "$DIGEST_SCRIPT" || true; }
+
+# ---- Nuclei exposure scan (recon_nuclei.sh exposure subcommand) --------------
+# Target-facing; uses the existing nuclei script with its `exposure` mode.
+# Killswitch v2_exposure separate from v2_nuclei so it can be paused alone.
+EXPOSURE_INTERVAL="${EXPOSURE_INTERVAL:-28800}"  # 8h
+run_exposure() { v21_killed exposure && return 0; [[ -f "$V21_NUCLEI" ]] && run_scanner bash "$V21_NUCLEI" exposure || true; }
+
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
 # gate, and the guard must keep running while down to detect recovery). Fast
@@ -533,6 +560,10 @@ run_discord_bot() {
   supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
+  supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
+  supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
+  supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &
+  supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &
 
     # Long-running — supervised with simple restart loops
   (

@@ -75,6 +75,174 @@ if [[ "${1:-}" == "bounty" ]]; then
   fi
   exit 0
 fi
+# =============================================================================
+# Subcommand: `recon_nuclei.sh exposure`
+# Scans P0/P1 in-scope paying hosts for exposed files, backup configs, and
+# common misconfigurations (CORS, Spring actuators, directory listings,
+# environment files, git repos in webroot, etc.).
+#
+# This runs SEPARATELY from the KEV CVE scanner — different target pool
+# (all P0/P1, not just KEV-matched), different templates, different cooldown.
+# Findings go to ~/recon/nuclei/exposure_confirmed.jsonl + ES + Discord #vulns.
+#
+# Template coverage:
+#   http/exposed-files/   — .env, wp-config.php.bak, docker-compose.yml, etc.
+#   http/exposures/       — broader exposure category (git, config, secrets)
+#   http/misconfiguration/cors-misconfig.yaml — CORS origin reflection
+#   http/misconfiguration/springboot/         — Spring actuator endpoints
+#   http/misconfiguration/proxy-open-redirect.yaml
+#   http/misconfiguration/aws-object-listing.yaml — S3/CloudFront misconfig
+# =============================================================================
+if [[ "${1:-}" == "exposure" ]]; then
+  shift
+
+  EXP_BATCH="${EXP_BATCH:-100}"
+  EXP_COOLDOWN_DAYS="${EXP_COOLDOWN_DAYS:-7}"
+  EXP_RATE="${EXP_RATE:-15}"
+  EXP_TIMEOUT="${EXP_TIMEOUT:-30}"
+  EXP_RESULTS="$NUCLEI_DIR/exposure_confirmed.jsonl"
+
+  LOCK_FILE_EXP="$HOME/recon/state/nuclei_exposure.lock"
+  exec 9>"$LOCK_FILE_EXP"
+  flock -n 9 || { log "exposure scan already running"; exit 0; }
+
+  KILL_FILE_EXP="$HOME/recon/state/kill/v2_exposure"
+  [[ -f "$KILL_FILE_EXP" ]] && { warn "exposure nuclei killswitch active"; exit 0; }
+
+  setup_es_netrc
+  ES_AUTH_EXP=(--netrc-file "$HOME/.recon_es_netrc")
+
+  exp_cutoff="$(date -u -d "-${EXP_COOLDOWN_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
+    python3 -c "
+from datetime import datetime, timedelta
+print((datetime.utcnow()-timedelta(days=${EXP_COOLDOWN_DAYS})).strftime('%Y-%m-%dT%H:%M:%SZ'))
+")"
+
+  # Build target list from ES: P0/P1, in-scope, pays, not WAF-blocked,
+  # not exposure-scanned in last 7 days
+  exp_query="$(jq -nc \
+    --argjson size "$EXP_BATCH" \
+    --arg cutoff "$exp_cutoff" '{
+      size: $size,
+      _source: ["host","url","triage_score"],
+      query: {bool: {
+        filter: [
+          {terms: {triage_priority: ["P0","P1"]}},
+          {term: {triage_in_scope: true}},
+          {term: {triage_pays: true}}
+        ],
+        must_not: [
+          {term: {waf_blocks_scanners: true}},
+          {range: {exposure_scan_at: {gte: $cutoff}}}
+        ]
+      }},
+      sort: [{triage_score: {order: "desc"}}]
+    }')"
+
+  exp_resp="$(curl -sS -m30 "${ES_AUTH_EXP[@]}" -H 'Content-Type: application/json' \
+    -X POST "${ES_URL:-http://127.0.0.1:9200}/${INDEX_NAME:-recon_alive}/_search" \
+    -d "$exp_query" 2>/dev/null)"
+
+  exp_total="$(printf '%s' "$exp_resp" | jq -r '.hits.total.value // 0')"
+  log "[exposure] targets (P0/P1, not scanned in ${EXP_COOLDOWN_DAYS}d): $exp_total — scanning up to $EXP_BATCH"
+  [[ "$exp_total" -eq 0 ]] && { log "[exposure] nothing to scan"; exit 0; }
+
+  # Write URL list for nuclei
+  exp_url_list="$(mktemp)"
+  printf '%s' "$exp_resp" | jq -r '.hits.hits[]._source | .url // ("https://" + .host)' \
+    > "$exp_url_list"
+
+  EXP_RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+  EXP_OUT="$RESULTS_DIR/exposure_${EXP_RUN_TS}.jsonl"
+  mkdir -p "$RESULTS_DIR"
+  touch "$EXP_RESULTS"
+
+  log "[exposure] scanning $(wc -l < "$exp_url_list" | tr -d ' ') hosts"
+
+  # Template set: exposed-files + exposures + targeted misconfigs
+  # Use -tags to include community templates not under these paths too
+  timeout 3600 nuclei \
+    -l "$exp_url_list" \
+    -t "http/exposed-files/" \
+    -t "http/exposures/" \
+    -t "http/misconfiguration/cors-misconfig.yaml" \
+    -t "http/misconfiguration/springboot/" \
+    -t "http/misconfiguration/proxy-open-redirect.yaml" \
+    -t "http/misconfiguration/aws-object-listing.yaml" \
+    -tags "exposure,backup,config,env,cors,spring" \
+    -severity critical,high,medium \
+    -rate-limit "$EXP_RATE" \
+    -timeout "$EXP_TIMEOUT" \
+    -retries 1 -no-color -silent -nc \
+    -jsonl -o "$EXP_OUT" 2>/dev/null || true
+
+  rm -f "$exp_url_list"
+
+  exp_now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  # Mark all queried hosts as scanned regardless of findings
+  printf '%s' "$exp_resp" | jq -r '.hits.hits[]._source.host' | while IFS= read -r exp_host; do
+    curl -sS -m15 "${ES_AUTH_EXP[@]}" -H 'Content-Type: application/json' \
+      -X POST "${ES_URL:-http://127.0.0.1:9200}/${INDEX_NAME:-recon_alive}/_update/$exp_host" \
+      -d "$(jq -nc --arg n "$exp_now" '{"doc":{"exposure_scan_at":$n}}')" \
+      2>/dev/null > /dev/null || true
+  done
+
+  if [[ -s "$EXP_OUT" ]]; then
+    nfindings="$(wc -l < "$EXP_OUT" | tr -d ' ')"
+    log "[exposure] $nfindings finding(s) — appending to exposure_confirmed.jsonl"
+    cat "$EXP_OUT" >> "$EXP_RESULTS"
+
+    # Alert to #vulns channel for each finding
+    exp_hook="$(discord_hook vulns)"
+    if [[ -n "$exp_hook" ]]; then
+      while IFS= read -r exp_f; do
+        exp_host="$(printf '%s' "$exp_f" | jq -r '.host // empty')"
+        exp_tmpl="$(printf '%s' "$exp_f" | jq -r '."template-id" // empty')"
+        exp_sev="$(printf '%s' "$exp_f" | jq -r '.info.severity // "?"')"
+        exp_name="$(printf '%s' "$exp_f" | jq -r '.info.name // $tmpl' --arg tmpl "$exp_tmpl")"
+        exp_matched="$(printf '%s' "$exp_f" | jq -r '."matched-at" // empty')"
+        [[ -z "$exp_host" || -z "$exp_tmpl" ]] && continue
+
+        # Update ES with finding
+        curl -sS -m15 "${ES_AUTH_EXP[@]}" -H 'Content-Type: application/json' \
+          -X POST "${ES_URL:-http://127.0.0.1:9200}/${INDEX_NAME:-recon_alive}/_update/$exp_host" \
+          -d "$(jq -nc \
+            --arg tmpl "$exp_tmpl" --arg sev "$exp_sev" --arg n "$exp_now" \
+            '{"doc":{"exposure_nuclei_template":$tmpl,"exposure_nuclei_severity":$sev,"exposure_scan_at":$n}}')" \
+          2>/dev/null > /dev/null || true
+
+        exp_payload="$(jq -nc \
+          --arg host "$exp_host" \
+          --arg tmpl "$exp_tmpl" \
+          --arg sev "$exp_sev" \
+          --arg name "$exp_name" \
+          --arg matched "$exp_matched" \
+          --arg ts "$exp_now" '{
+            embeds: [{
+              title: ("🧪 EXPOSURE FIND — " + $host),
+              url: $matched,
+              color: 16744272,
+              fields: [
+                {name: "Template",  value: $tmpl, inline: true},
+                {name: "Severity",  value: $sev,  inline: true},
+                {name: "Matched",   value: (if $matched != "" then $matched else "n/a" end), inline: false}
+              ],
+              footer: {text: "nuclei exposure scan"},
+              timestamp: $ts
+            }]
+          }')"
+        discord_post "$exp_hook" "$exp_payload" || true
+      done < "$EXP_OUT"
+    fi
+  else
+    log "[exposure] no findings this run"
+  fi
+
+  log "[exposure] cycle complete"
+  exit 0
+fi
+
 CVE_DIR="$HOME/recon/cve"
 SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
 [[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"
