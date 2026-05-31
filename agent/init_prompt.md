@@ -41,8 +41,7 @@ jq -c 'select(.ai.ai_relevance_score >= 70) | {host,url,score,priority,payout_ti
 
 **3. Fetch the priority queue**
 ```bash
-ES_PASS=$(tr -d '[:space:]' < ~/.recon_es_pass)
-curl -s -u "elastic:$ES_PASS" http://localhost:9200/recon_alive/_search \
+curl -s --netrc-file ~/.recon_es_netrc http://127.0.0.1:9200/recon_alive/_search \
   -H 'Content-Type: application/json' -d '{
     "query": {"bool": {
       "filter": [

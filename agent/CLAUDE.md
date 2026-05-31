@@ -36,8 +36,8 @@ STATE_DIR=~/recon/agent
 
 ### ES queries (always use this pattern to read ES)
 ```bash
-ES_PASS=$(tr -d '[:space:]' < ~/.recon_es_pass)
-curl -s -u "elastic:$ES_PASS" http://localhost:9200/recon_alive/_search \
+# Auth via netrc — never -u user:pass (exposes creds in ps aux)
+curl -s --netrc-file ~/.recon_es_netrc http://127.0.0.1:9200/recon_alive/_search \
   -H 'Content-Type: application/json' -d '{ ... }'
 ```
 
@@ -98,8 +98,7 @@ Work the queue in this order. Do not skip ahead. Finish each tier before the nex
 
 **Priority fetch query (run at session start):**
 ```bash
-ES_PASS=$(tr -d '[:space:]' < ~/.recon_es_pass)
-curl -s -u "elastic:$ES_PASS" http://localhost:9200/recon_alive/_search \
+curl -s --netrc-file ~/.recon_es_netrc http://127.0.0.1:9200/recon_alive/_search \
   -H 'Content-Type: application/json' -d '{
     "query": {"bool": {
       "filter": [

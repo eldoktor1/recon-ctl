@@ -156,12 +156,13 @@ archive_file() {
   mv "$file" "$dest_dir/" 2>/dev/null || true
 }
 
-# ---- Single instance ----
-if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  log "Daemon already running (pid $(cat "$PID_FILE"))" >> "$LOG_FILE"
+# ---- Single instance (atomic via flock on the PID file) ----
+exec 8>"$PID_FILE"
+if ! flock -n 8; then
+  log "Daemon already running (pid $(cat "$PID_FILE" 2>/dev/null))" >> "$LOG_FILE"
   exit 0
 fi
-echo $$ > "$PID_FILE"
+echo $$ >&8
 
 # ---- Shutdown handling ----
 SHUTDOWN=0
