@@ -804,9 +804,11 @@ cmd_fresh() {
       *) shift ;;
     esac
   done
-  # --new: always fetch a large pool so we can filter unseen before capping at N
+  # --new: fetch a large pool so we can filter unseen before capping at N.
+  # Use 2000 — with 3000+ P0/P1 hosts during a bulk sweep, a pool of 500
+  # gets exhausted by already-seen high-scorers, leaving nothing new to show.
   local fetch_n="$n"
-  [[ "$new_only" -eq 1 && "$n" -lt 500 ]] && fetch_n=500
+  [[ "$new_only" -eq 1 && "$n" -lt 2000 ]] && fetch_n=2000
 
   local FRESH_DIR="$BASE_DIR/fresh"
   local SEEN_FILE="$STATE_DIR/fresh_seen.txt"
@@ -870,12 +872,14 @@ cmd_fresh() {
       fi
     done <<< "$rows"
   else
+    # Non---new browse: never write to seen file. Writing here poisons the
+    # seen list with high-scoring hosts that the user may not have acted on,
+    # making subsequent recon-fresh-new calls return nothing.
     while IFS=$'\t' read -r icon pri score tier host prog sigs date ai; do
       [[ -z "$host" ]] && continue
       # Fix 12: skip if host is in active ignore list
       if printf '%s\n' "$ignored_hosts" | grep -qxF "$host" 2>/dev/null; then continue; fi
       shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}	${ai}"$'\n'
-      new_hosts="${new_hosts}${host}"$'\n'
     done <<< "$rows"
   fi
 
@@ -900,8 +904,9 @@ cmd_fresh() {
   [[ "$new_only" -eq 1 ]] && shown_n="$count" || shown_n="$(printf '%s' "$shown_rows" | awk 'NF' | wc -l | tr -d ' ')"
   printf '\n  showing: %s  |  total true-fresh P0/P1 in ES: %s\n' "$shown_n" "$total"
 
-  # Record newly seen hosts
-  if [[ -n "$new_hosts" ]]; then
+  # Record newly seen hosts — ONLY in --new mode. Regular recon-fresh is
+  # browsing; only recon-fresh-new means "I have acknowledged these targets".
+  if [[ "$new_only" -eq 1 && -n "$new_hosts" ]]; then
     printf '%s' "$new_hosts" >> "$SEEN_FILE"
     sort -u "$SEEN_FILE" -o "$SEEN_FILE"
   fi
