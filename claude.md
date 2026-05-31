@@ -221,8 +221,9 @@ recon-queue    # queue file counts
    boot. After any reboot you must: clear the stale PID file, confirm ES/Docker
    are up, then run `recon-start`.
 
-4. **ES auth**: All ES requests need `-u "elastic:$(cat ~/.recon_es_pass)"`.
+4. **ES auth**: All ES requests need `--netrc-file "$HOME/.recon_es_netrc"`.
    The cluster returns 401 without it, not connection refused.
+   Never use `-u elastic:PASSWORD` — it exposes credentials in `ps aux`.
 
 5. **Daemon log path**: `/home/d0k/recon/logs/recon_daemon.log` — all loops
    redirect stderr there. This is the single source of truth for what's happening.
