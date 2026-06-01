@@ -292,6 +292,11 @@ while IFS= read -r line; do
   fi
 done < "$scan_out"
 
+# Define now_iso here so CDN dedup ES updates below have a valid timestamp.
+# (The "Process each host" section reuses this same variable; defining it once
+# here is correct — both sections run in the same second anyway.)
+now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
 # ── CDN verification: filter shared-IP CDN edges and httpx-confirmed CDN ─────
 # Pass 1 — IP dedup: if the same IP:port is shared by 3+ different hosts it is
 # almost certainly a CDN edge node (Fastly/Cloudflare shared infra), not per-
@@ -381,7 +386,8 @@ nhosts_with_findings="${#HOST_PORTS[@]}"
 log "$nhosts_with_findings host(s) have open ports (after CDN filtering)"
 
 # ── Process each host ─────────────────────────────────────────────────────────
-now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+# now_iso already set above (before CDN dedup) so all ES updates use the same
+# consistent timestamp throughout this run.
 
 for host in "${!HOST_PORTS[@]}"; do
   ports_str="${HOST_PORTS[$host]}"

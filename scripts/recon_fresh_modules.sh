@@ -474,15 +474,18 @@ except Exception:
 
     rm -rf "$host_dir"
 
-    # ── Alert if this host produced new secrets ─────────────────────────────
+    # ── Alert if this host produced new secrets or endpoints ─────────────────
     local _post_lines; _post_lines="$(wc -l < "$findings_file" 2>/dev/null | tr -d ' ')"
     local _new=$(( _post_lines - _pre_lines ))
     if [[ "$_new" -gt 0 ]]; then
-      # Extract secret-type findings from the new lines only
-      local _secret_kinds
+      # Extract secret-type and endpoint findings from the new lines only
+      local _secret_kinds _has_endpoints
       _secret_kinds="$(tail -n "$_new" "$findings_file" \
         | jq -r 'select(.finding_type == "secret") | .match_type' 2>/dev/null \
         | sort -u | tr '\n' ' ' | sed 's/ $//')"
+      _has_endpoints="$(tail -n "$_new" "$findings_file" \
+        | jq -r 'select(.finding_type == "endpoint") | .match_type' 2>/dev/null \
+        | head -1)"
       if [[ -n "$_secret_kinds" ]]; then
         log "🔑 SECRET(s) in JS on $host: $_secret_kinds"
         # Discord: fire immediately — don't let secrets sit unreported until next triage cycle
@@ -499,15 +502,20 @@ except Exception:
               footer: {text: "recon · js-scan · fresh-first"}
             }]
           }')" || true
-        # ES: tag the host and boost score so triage sees it
+      fi
+      # ES: tag the host with correct field names and boost score so triage sees it
+      # immediately. host is already a keyword field — query directly on "host",
+      # NOT "host.keyword" (keyword fields have no .keyword subfield in ES 8.x).
+      if [[ -n "$_secret_kinds" || -n "$_has_endpoints" ]]; then
+        local _painless=""
+        [[ -n "$_secret_kinds"  ]] && _painless="${_painless}ctx._source.js_secret_hit = true; "
+        [[ -n "$_has_endpoints" ]] && _painless="${_painless}ctx._source.js_endpoint_hit = true; "
+        _painless="${_painless}ctx._source.triage_score = (ctx._source.triage_score != null ? ctx._source.triage_score + 10 : 10);"
         curl -fsS -m 10 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
           -X POST "$ES_URL/$INDEX_NAME/_update_by_query?wait_for_completion=false&conflicts=proceed" \
-          -d "$(jq -nc --arg h "$host" '{
-            script: {
-              source: "ctx._source.js_secrets_found = true; ctx._source.triage_score = (ctx._source.triage_score != null ? ctx._source.triage_score + 10 : 10);",
-              lang: "painless"
-            },
-            query: {term: {"host.keyword": $h}}
+          -d "$(jq -nc --arg h "$host" --arg painless "$_painless" '{
+            script: {source: $painless, lang: "painless"},
+            query: {term: {host: $h}}
           }')" >/dev/null 2>&1 || true
       fi
     fi
