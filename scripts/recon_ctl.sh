@@ -400,7 +400,7 @@ cmd_top() {
     \"_source\": [\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",
                   \"triage_program\",\"triage_classes\",\"triage_true_fresh\",
                   \"triage_kev_match\",\"js_secret_hit\",\"js_endpoint_hit\",
-                  \"ai_rec\",\"ai_score\"],
+                  \"ai_recommendation\",\"ai_relevance_score\"],
     \"query\": {\"bool\":{
       \"filter\": [{\"exists\":{\"field\":\"triage_score\"}}],
       \"must_not\": [{\"term\":{\"triage_ignored\":true}}]
@@ -423,10 +423,10 @@ cmd_top() {
       (.triage_payout_tier // "-"),
       (.host // "?"),
       (.triage_program // "-"),
-      (if   (.ai_rec // "") == "test_now"      then "TN"
-       elif (.ai_rec // "") == "manual_review" then "MR"
-       elif (.ai_rec // "") == "skip"          then "SK"
-       elif (.ai_rec // "") == "watch"         then "WA"
+      (if   (.ai_recommendation // "") == "test_now"      then "TN"
+       elif (.ai_recommendation // "") == "manual_review" then "MR"
+       elif (.ai_recommendation // "") == "skip"          then "SK"
+       elif (.ai_recommendation // "") == "watch"         then "WA"
        else "-" end),
       ((.triage_classes // []) | map(select(. != "low-priority" and . != "low-signal")) | join(","))
     ] | @tsv' 2>/dev/null \
@@ -822,7 +822,7 @@ cmd_fresh() {
       \"size\": $fetch_n,
       \"_source\": [\"host\",\"url\",\"triage_priority\",\"triage_score\",\"triage_signals\",
                     \"triage_program\",\"triage_payout_tier\",\"triage_kev_match\",\"first_seen\",
-                    \"ai_rec\",\"ai_score\"],
+                    \"ai_recommendation\",\"ai_relevance_score\"],
       \"query\": {\"bool\": {\"filter\": [
         {\"term\": {\"triage_true_fresh\": true}},
         {\"term\": {\"triage_pays\": true}},
@@ -845,10 +845,10 @@ cmd_fresh() {
       (.triage_program // "?"),
       ((.triage_signals // []) | join(",")),
       (.first_seen // "" | split("T")[0]),
-      (if   (.ai_rec // "") == "test_now"      then "AI:TN"
-       elif (.ai_rec // "") == "manual_review" then "AI:MR"
-       elif (.ai_rec // "") == "watch"         then "AI:WA"
-       elif (.ai_rec // "") == "skip"          then "AI:SK"
+      (if   (.ai_recommendation // "") == "test_now"      then "AI:TN"
+       elif (.ai_recommendation // "") == "manual_review" then "AI:MR"
+       elif (.ai_recommendation // "") == "watch"         then "AI:WA"
+       elif (.ai_recommendation // "") == "skip"          then "AI:SK"
        else "" end)
     ] | @tsv
   ' 2>/dev/null)"
@@ -1230,7 +1230,7 @@ cmd_ai() {
         \"size\": 1,
         \"query\": {\"bool\":{\"filter\":[
           {\"exists\":{\"field\":\"ai_reviewed_at\"}},
-          {\"term\":{\"host.keyword\":\"$target\"}}
+          {\"term\":{\"host\":\"$target\"}}
         ]}}
       }")"
       local hit; hit="$(printf '%s' "$resp" | jq -r '.hits.hits[0]._source // empty' 2>/dev/null)"
@@ -1242,7 +1242,7 @@ cmd_ai() {
           \"_source\": [\"host\"],
           \"query\": {\"bool\":{\"filter\":[
             {\"exists\":{\"field\":\"ai_reviewed_at\"}},
-            {\"wildcard\":{\"host.keyword\":{\"value\":\"*${target}*\",\"case_insensitive\":true}}}
+            {\"wildcard\":{\"host\":{\"value\":\"*${target}*\",\"case_insensitive\":true}}}
           ]}}
         }")"
         printf '%s' "$fuzz" | jq -r '.hits.hits[]._source.host' 2>/dev/null | sed 's/^/  /'
