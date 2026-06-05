@@ -142,7 +142,16 @@ fi
 if [[ -s "$RAW_DIR/intigriti.json" ]]; then
   jq -c "$TIER_FRAG"' .[] | select(.handle != null) |
     (((.max_bounty.value // 0) | tonumber? // 0)) as $mb |
-    ($mb > 0) as $pays |
+    # Intigriti RDPs/VDPs can carry a program-level max_bounty while every in-scope
+    # target is tagged "No Bounty" (e.g. bpost, handle "dummy", mb=1500 but all
+    # targets No Bounty). The per-target impact is authoritative: a program pays
+    # only if max_bounty>0 AND at least one in-scope target is not "No Bounty".
+    # NOTE: "Tier 1/2/3" are severity tiers that appear on non-paying VDPs too
+    # (NVIDIA/Ubisoft VDP have mb=0 + Tier 2), so a tier alone does NOT imply a
+    # bounty — hence the AND with max_bounty, not an OR.
+    ([.targets.in_scope[]? | .impact // null]) as $impacts |
+    (($impacts | length > 0) and ($impacts | all(. == "No Bounty"))) as $all_no_bounty |
+    (($mb > 0) and ($all_no_bounty | not)) as $pays |
     {
       handle: .handle,
       name: (.name // .handle),
