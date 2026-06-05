@@ -1632,6 +1632,16 @@ cmd_digest_now() {
   bash "$s"
 }
 
+cmd_leads() {
+  # Curated high-signal lead digest — read-only preview to stdout (no posting).
+  bash "$SCRIPT_DIR/recon_digest_leads.sh" print
+}
+
+cmd_leads_post() {
+  # Headless-Claude verification + post to #leads (deterministic fallback inside).
+  bash "$SCRIPT_DIR/../tools/recon_leads_digest.sh"
+}
+
 # ---------------------------------------------------------------------------
 # Screenshot module (Playwright + stealth)
 # ---------------------------------------------------------------------------
@@ -2732,6 +2742,8 @@ case "${1:-}" in
   bypass-now)   cmd_bypass_now ;;
   revalidate)   cmd_revalidate_now ;;
   digest-now)   cmd_digest_now ;;
+  leads)        cmd_leads ;;
+  leads-post)   cmd_leads_post ;;
   screenshot|shot)       cmd_screenshot_now ;;
   screenshot-backfill|shot-backfill) shift; cmd_screenshot_backfill "$@" ;;
   screenshot-test|shot-test)         shift; cmd_screenshot_test "$@" ;;
