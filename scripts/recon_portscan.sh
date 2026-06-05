@@ -24,7 +24,8 @@
 #   ✔ Hard cap per cycle — configurable batch, default 50 hosts
 #
 # OUTPUT
-#   • ES: portscan_at, portscan_open_ports[], portscan_critical (bool)
+#   • ES: portscan_at, portscan_open_ports[], portscan_critical (0/1 — the field
+#     auto-mapped to `long`, so ALL writers/readers use integer, never boolean)
 #   • triage_signals updated with port:N entries for every open port
 #   • triage_score boosted: +12 critical / +6 admin / +3 alt-http
 #   • Discord alert for any critical port find
@@ -253,7 +254,7 @@ if [[ ! -s "$scan_out" ]]; then
     printf '%s' "$resp" | jq -r '.hits.hits[]._id' | while read -r doc_id; do
       es_curl -H 'Content-Type: application/json' \
         -X POST "$ES_URL/$INDEX_NAME/_update/$doc_id" \
-        -d '{"doc":{"portscan_at":"'"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"'","portscan_open_ports":[],"portscan_critical":false}}' \
+        -d '{"doc":{"portscan_at":"'"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"'","portscan_open_ports":[],"portscan_critical":0}}' \
         2>/dev/null | grep -q '"result"' || true
     done
   }
@@ -495,7 +496,7 @@ while IFS=$'\t' read -r doc_id h; do
   es_curl -H 'Content-Type: application/json' \
     -X POST "$ES_URL/$INDEX_NAME/_update/$doc_id" \
     -d "$(jq -nc --arg now "$now_iso" \
-      '{"doc":{"portscan_at":$now,"portscan_open_ports":[],"portscan_critical":false}}')" \
+      '{"doc":{"portscan_at":$now,"portscan_open_ports":[],"portscan_critical":0}}')" \
     2>/dev/null | grep -q '"result"' || true
 done < <(printf '%s' "$resp" | jq -r '.hits.hits[] | [._id, ._source.host] | @tsv')
 
