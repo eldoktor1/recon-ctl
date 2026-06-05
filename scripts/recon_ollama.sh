@@ -9,17 +9,25 @@ PROMPT_FILE="${2:?prompt file required}"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 OLLAMA_TIMEOUT="${OLLAMA_TIMEOUT:-120}"
 OLLAMA_RETRIES="${OLLAMA_RETRIES:-3}"
+# Cap inference threads. ollama defaults to ~all physical cores; on this 14-core
+# WSL2 box that lets a 50-lead AI scoring burst saturate every core at the
+# ollama service's nice 0, starving root /init so `wsl.exe` session creation from
+# Windows times out (WSAETIMEDOUT / 0x8007274c). An 8B-Q4 model is memory-
+# bandwidth bound, so 6 threads costs little throughput while leaving ~8 cores
+# for /init, the 9p file server and the rest of the pipeline. 0 = let ollama decide.
+OLLAMA_NUM_THREAD="${OLLAMA_NUM_THREAD:-6}"
 
 [[ -s "$PROMPT_FILE" ]] || exit 1
 
 payload="$(jq -n \
   --arg model "$MODEL" \
+  --argjson nthread "$OLLAMA_NUM_THREAD" \
   --rawfile prompt "$PROMPT_FILE" \
   '{
     model: $model,
     stream: false,
     format: "json",
-    options: {temperature: 0.1, num_ctx: 8192},
+    options: ({temperature: 0.1, num_ctx: 8192} + (if $nthread > 0 then {num_thread: $nthread} else {} end)),
     messages: [
       {
         role: "system",

@@ -389,11 +389,17 @@ log "$nhosts_with_findings host(s) have open ports (after CDN filtering)"
 # now_iso already set above (before CDN dedup) so all ES updates use the same
 # consistent timestamp throughout this run.
 
+# Count critical hosts here (during the loop) rather than reading
+# ${#HOST_CRITICAL[@]} in the summary: under `set -u`, taking the length of an
+# empty/fully-unset associative array raises "unbound variable" (happens on
+# cycles with findings but no critical ports). A plain counter sidesteps it.
+critical_hosts=0
 for host in "${!HOST_PORTS[@]}"; do
   ports_str="${HOST_PORTS[$host]}"
   # Build sorted unique port array
   mapfile -t port_arr < <(printf '%s' "$ports_str" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un)
   is_critical="${HOST_CRITICAL[$host]:-0}"
+  [[ "$is_critical" == "1" ]] && critical_hosts=$((critical_hosts + 1))
   tier="${HOST_TIER[$host]:-althttp}"
 
   log "  $host — open ports: ${port_arr[*]} [tier=$tier]"
@@ -497,7 +503,7 @@ done < <(printf '%s' "$resp" | jq -r '.hits.hits[] | [._id, ._source.host] | @ts
 es_curl -X POST "$ES_URL/$INDEX_NAME/_refresh" > /dev/null 2>&1 || true
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-critical_hosts="${#HOST_CRITICAL[@]}"   # array length — correct even when empty
+# critical_hosts counted during the per-host loop above (see note there).
 log "=== portscan cycle done ==="
 log "  Scanned: $nhosts hosts"
 log "  Open ports found on: $nhosts_with_findings host(s)"
