@@ -94,6 +94,11 @@ TIER_MID_BONUS="${TIER_MID_BONUS:-3}"
 TIER_HIGH_BONUS="${TIER_HIGH_BONUS:-5}"
 TIER_ELITE_BONUS="${TIER_ELITE_BONUS:-8}"
 KEV_BONUS="${KEV_BONUS:-5}"
+# Reduced KEV bonus for tech-class matches we cannot confirm at scoring time
+# (no DNS/HTTP in the hot path) — e.g. an appliance/CMS fingerprint whose
+# vulnerable version or surface is unknown. They become leads (kev_needs_verify),
+# not P0 certainties. See Fix 3 in apply_scope_kev_enrichment.
+KEV_UNVERIFIED_BONUS="${KEV_UNVERIFIED_BONUS:-1}"
 TRUEFRESH_BONUS="${TRUEFRESH_BONUS:-10}"
 OOS_PENALTY="${OOS_PENALTY:--10}"
 
@@ -162,7 +167,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","ai_recommendation","ai_relevance_score"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","ai_recommendation","ai_relevance_score","takeover_confirmed"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -502,12 +507,32 @@ score_raw() {
         {pts:3, sig:"host:storage-pattern", class:"storage-surface", strength:"pattern",
         action:"Storage/backup — listing, predictable paths | old code/data"} else empty end),
 
-      # === CNAME TAKEOVER (kept for legacy — takeover_hunter is primary path) ===
-      (if cname_match("(github\\.io|amazonaws\\.com|herokuapp\\.com|azurewebsites\\.net|cloudfront\\.net|trafficmanager\\.net|s3\\.|wordpress\\.com|tumblr\\.com|shopify\\.com|fastly\\.net|ghost\\.io|readme\\.io|surge\\.sh|netlify\\.app|vercel\\.app|pantheonsite\\.io|zendesk\\.com|freshdesk\\.com|helpscout\\.net|statuspage\\.io|webflow\\.io|netlify\\.com)") and
-          (.status_code == 404 or .status_code == 0 or
-           title_match("there isn.t a github page|no such app|repository not found|not found|404|doesn.t exist|no settings were found|deactivated")) then
-        {pts:10, sig:"takeover:dangling-cname", class:"takeover", strength:"confirmed",
-        action:"PROBABLE TAKEOVER — see takeover_hunter for instant verification & claim instructions"} else empty end),
+      # === CONFIRMED TAKEOVER (from recon_takeover_hunter.sh) ===
+      # The hunter does real verification — multi-stage NXDOMAIN + provider
+      # unclaimed-fingerprint + 30s stability — and writes takeover_confirmed=true
+      # to ES. THIS is the only takeover signal allowed to mint P0.
+      (if (.takeover_confirmed // false) == true then
+        {pts:15, sig:"takeover:confirmed", class:"takeover", strength:"confirmed",
+        action:"CONFIRMED TAKEOVER — claim now: firstblood/takeovers_to_claim.tsv | recon-takeovers"} else empty end),
+
+      # === CNAME-to-provider LEAD (legacy heuristic — NOT confirmation) ===
+      # A CNAME to a known provider + a 404/empty root is only a HINT, not a
+      # takeover: live apps behind Azure App Service / AWS ELB / CloudFront very
+      # commonly 404 at root while the CNAME target is fully registered and
+      # serving. triage cannot resolve DNS in the hot path, so this scores LOW
+      # (pattern lead) and never mints P0 on its own — recon_takeover_hunter.sh
+      # confirms (signal above). Excludes same-apex CNAMEs (e.g.
+      # test.shopify.com -> wc.shopify.com), GitHub org pages (github.github.io)
+      # and named Fastly map services — none are takeoverable.
+      (if cname_match("(github\\.io|amazonaws\\.com|herokuapp\\.com|azurewebsites\\.net|cloudfront\\.net|trafficmanager\\.net|s3\\.|wordpress\\.com|tumblr\\.com|shopify\\.com|fastly\\.net|ghost\\.io|readme\\.io|surge\\.sh|netlify\\.app|vercel\\.app|pantheonsite\\.io|zendesk\\.com|freshdesk\\.com|helpscout\\.net|statuspage\\.io|webflow\\.io|netlify\\.com)")
+          and (.status_code == 404 or .status_code == 0 or
+               title_match("there isn.t a github page|no such app|repository not found|not found|404|doesn.t exist|no settings were found|deactivated"))
+          and ((.takeover_confirmed // false) != true)
+          and ((.cname // "") | ascii_downcase | (test("github\\.github\\.io$") or test("\\.map\\.fastly\\.net$")) | not)
+          and (((.cname // "") | ascii_downcase | sub("\\.$";"") | split(".") | .[-2:] | join("."))
+               != ((.host // "") | ascii_downcase | sub("\\.$";"") | split(".") | .[-2:] | join("."))) then
+        {pts:3, sig:"takeover:cname-lead", class:"takeover-lead", strength:"pattern",
+        action:"CNAME->provider + 404 = LEAD ONLY (not confirmed) — recon_takeover_hunter verifies; run recon-takeover-check"} else empty end),
 
       # === NEGATIVE SIGNALS ===
       (if is_redirect and no_tech then {pts:-2, sig:"penalty:redirect-no-tech", class:"low-signal", strength:"pattern", action:""} else empty end),
@@ -653,6 +678,7 @@ apply_scope_kev_enrichment() {
     --argjson tier_high_bonus      "$TIER_HIGH_BONUS" \
     --argjson tier_elite_bonus     "$TIER_ELITE_BONUS" \
     --argjson kev_bonus            "$KEV_BONUS" \
+    --argjson kev_unverified_bonus "$KEV_UNVERIFIED_BONUS" \
     --argjson oos_penalty          "$OOS_PENALTY" \
     '
     ($scopes[0] // {}) as $S |
@@ -684,14 +710,38 @@ apply_scope_kev_enrichment() {
       # plugin+version is confirmed (plugin_name + plugin_version fields set in ES doc).
       # Generic "tech:wordpress" alone does NOT trigger KEV bonus.
       (($k.signal // "") | test("wordpress|wp-"; "i")) as $is_wp_kev |
-      (($r.tech // []) | map(ascii_downcase) | any(. == "wordpress")) as $has_wp_tech |
+      (($r.tech // []) | map(ascii_downcase)) as $tech_lc |
+      ($tech_lc | any(. == "wordpress")) as $has_wp_tech |
       # A "wordpress KEV" without confirmed plugin+version is not actionable
       (($r.plugin_name // null) != null and ($r.plugin_version // null) != null) as $has_plugin_confirm |
-      (if ($k.signal // null) != null then
-         (if ($is_wp_kev and $has_wp_tech and ($has_plugin_confirm | not))
-          then 0   # WordPress KEV without confirmed plugin version — no bonus
-          else $kev_bonus end)
-       else 0 end) as $kev_b |
+      ($k.signal // "") as $ksig |
+      # Fix 3 — version/surface-aware KEV gating. tech tokens carry versions as
+      # "Name:Version" (e.g. "drupal:10"), so where a CVE class is version- or
+      # surface-bound we avoid minting P0 on a bare tech fingerprint.
+      # (a) Drupal: the Drupal entries in the KEV catalog are Drupalgeddon-class
+      #     (CVE-2018-7600/7602, 2019-6340) and only affect Drupal < 8. If the
+      #     detected major is >= 8 the host is not affected — drop the bonus.
+      (($tech_lc | map(select(startswith("drupal:"))) | first // "")
+        | ltrimstr("drupal:") | split(".")[0] | (tonumber? // 0)) as $drupal_major |
+      (($ksig == "tech:drupal") and ($drupal_major >= 8)) as $kev_drupal_patched |
+      # (b) Appliances / heavy apps whose KEV requires a specific vulnerable
+      #     version AND/OR a management surface that triage cannot probe in the
+      #     hot path. A bare fingerprint is a LEAD, not a confirmed P0.
+      (["tech:confluence","tech:jira","tech:f5-bigip","tech:citrix","tech:fortinet",
+        "tech:ivanti-pulse","tech:paloalto","tech:vmware","tech:exchange-owa",
+        "tech:weblogic","tech:websphere","tech:manageengine","tech:coldfusion",
+        "tech:moveit","tech:sitecore","tech:aem"] | index($ksig) != null) as $kev_surface_dependent |
+      # reason flag (null = fully actionable KEV match)
+      (if ($k.signal // null) == null then null
+       elif ($is_wp_kev and $has_wp_tech and ($has_plugin_confirm | not)) then "wordpress-plugin-unconfirmed"
+       elif $kev_drupal_patched then "drupal-version-patched"
+       elif $kev_surface_dependent then "version-or-surface-unconfirmed"
+       else null end) as $kev_needs_verify |
+      (if ($k.signal // null) == null then 0
+       elif ($kev_needs_verify == "wordpress-plugin-unconfirmed") then 0
+       elif ($kev_needs_verify == "drupal-version-patched") then 0
+       elif ($kev_needs_verify == "version-or-surface-unconfirmed") then $kev_unverified_bonus
+       else $kev_bonus end) as $kev_b |
 
       # Out-of-scope penalty
       (if ($s.out_of_scope // false) then $oos_penalty else 0 end) as $oos_b |
@@ -713,6 +763,7 @@ apply_scope_kev_enrichment() {
         kev_cves:        ($k.cves          // []),
         kev_cvss_max:    ($k.cvss_max      // 0),
         kev_bonus:       $kev_b,
+        kev_needs_verify: $kev_needs_verify,
         oos_penalty_applied: $oos_b
       }
     end
@@ -1137,6 +1188,7 @@ update_es_scores() {
       "triage_out_of_scope":(.out_of_scope // false),
       "triage_kev_match":   (.kev_match // false),
       "triage_kev_signal":  (.kev_signal // null),
+      "triage_kev_needs_verify": (.kev_needs_verify // null),
       "triage_kev_cves":    [(.kev_cves // [])[].id],
       "triage_true_fresh":          (.triage_true_fresh // false),
       "triage_true_fresh_bonus":    (.triage_true_fresh_bonus // 0),

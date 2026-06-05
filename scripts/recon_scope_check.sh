@@ -45,54 +45,49 @@ fi
 # v2.2: payout_tier added (10th column). Old TSVs without 5th column → "mid" if pays=true.
 # =============================================================================
 batch_match() {
+  # Optimized 2026-06-05: hash exact patterns + check only the host's own
+  # suffixes for wildcards -> O(hosts x labels) instead of O(hosts x 40k patterns).
+  # Verified byte-identical to the prior linear matcher on a 5k-host sample.
   awk -v out_tsv="$OUTSCOPE_TSV" -v in_tsv="$INSCOPE_TSV" '
     BEGIN {
       FS = "\t"
-
-      # Load OUT-of-scope patterns
+      # Load OUT patterns -> exact/wildcard hashes. Keep the LOWEST file index per key
+      # so "first match in file order" (the original loop semantics) is preserved.
+      oi = 0
       while ((getline line < out_tsv) > 0) {
         n = split(line, f, "\t")
-        if (n >= 1 && f[1] != "") {
-          out_pat[++out_n] = f[1]
-          out_prog[out_n] = (n >= 2 ? f[2] : "")
-          out_plat[out_n] = (n >= 3 ? f[3] : "")
+        if (n < 1 || f[1] == "") continue
+        oi++
+        pat = f[1]
+        meta = oi SUBSEP pat SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"")
+        if (substr(pat,1,2) == "*.") {
+          apex = substr(pat,3)
+          if (!(apex in out_wild)) out_wild[apex] = meta
+        } else {
+          if (!(pat in out_exact)) out_exact[pat] = meta
         }
       }
       close(out_tsv)
-
-      # Load IN-scope patterns
+      ii = 0
       while ((getline line < in_tsv) > 0) {
         n = split(line, f, "\t")
-        if (n >= 1 && f[1] != "") {
-          in_pat[++in_n] = f[1]
-          in_prog[in_n] = (n >= 2 ? f[2] : "")
-          in_plat[in_n] = (n >= 3 ? f[3] : "")
-          in_pays[in_n] = (n >= 4 ? f[4] : "false")
-          # v2.2: payout_tier column. Pre-v2.2 TSVs lack this — default to mid if paying else none.
-          if (n >= 5 && f[5] != "") {
-            in_tier[in_n] = f[5]
-          } else {
-            in_tier[in_n] = (in_pays[in_n] == "true" ? "mid" : "none")
-          }
+        if (n < 1 || f[1] == "") continue
+        ii++
+        pays = (n>=4?f[4]:"false")
+        if (n>=5 && f[5]!="") tier = f[5]; else tier = (pays=="true"?"mid":"none")
+        pat = f[1]
+        meta = ii SUBSEP pat SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"") SUBSEP pays SUBSEP tier
+        if (substr(pat,1,2) == "*.") {
+          apex = substr(pat,3)
+          if (!(apex in in_wild)) in_wild[apex] = meta
+        } else {
+          if (!(pat in in_exact)) in_exact[pat] = meta
         }
       }
       close(in_tsv)
-
-      FS = "\n"  # for stdin
+      FS = "\n"
     }
-
-    function host_matches(host, pat,    suf, suflen, apex) {
-      if (pat == host) return 1
-      if (substr(pat, 1, 2) == "*.") {
-        suf = substr(pat, 2)
-        suflen = length(suf)
-        if (length(host) > suflen && substr(host, length(host) - suflen + 1) == suf) return 1
-        apex = substr(pat, 3)
-        if (host == apex) return 1
-      }
-      return 0
-    }
-
+    function rank(t) { return (t=="elite"?0:(t=="high"?1:(t=="mid"?2:(t=="low"?3:4)))) }
     {
       raw = $0
       gsub(/[ \t\r\n]/, "", raw)
@@ -102,80 +97,45 @@ batch_match() {
       if (raw == "") next
       host = raw
 
-      # ============================================================
-      # HARD EXCLUSION (v2.1.3): .mil and federal restricted TLDs
-      # No automated scanning of military or restricted government infra,
-      # regardless of any matching scope pattern.
-      # Override behavior: in_scope=false, out_of_scope=true, reason set.
-      # ============================================================
-      hard_excluded = 0
-      hard_reason = ""
-      if (host ~ /\.mil$/ || host ~ /\.mil\./ ) {
-        hard_excluded = 1; hard_reason = "hard-exclude:mil-tld"
-      }
-      # Other federal restricted TLDs that explicitly forbid scanning
-      else if (host ~ /\.smil\.mil$/ || host ~ /\.nipr\.mil$/ || host ~ /\.sipr\.mil$/) {
-        hard_excluded = 1; hard_reason = "hard-exclude:classified-tld"
+      hard_excluded = 0; hard_reason = ""
+      if (host ~ /\.mil$/ || host ~ /\.mil\./ ) { hard_excluded=1; hard_reason="hard-exclude:mil-tld" }
+      else if (host ~ /\.smil\.mil$/ || host ~ /\.nipr\.mil$/ || host ~ /\.sipr\.mil$/) { hard_excluded=1; hard_reason="hard-exclude:classified-tld" }
+      if (hard_excluded) { printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\tnone\n", host, hard_reason; next }
+
+      # ---- OUT: lowest file index among matches (exact host + wildcard suffixes) ----
+      out_idx = -1; out_meta = ""
+      if (host in out_exact) { split(out_exact[host], m, SUBSEP); out_idx = m[1]+0; out_meta = out_exact[host] }
+      c = host
+      while (1) {
+        if (c in out_wild) { split(out_wild[c], m, SUBSEP); if (out_idx < 0 || (m[1]+0) < out_idx) { out_idx = m[1]+0; out_meta = out_wild[c] } }
+        p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
       }
 
-      if (hard_excluded) {
-        printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\tnone\n", host, hard_reason
-        next
+      # ---- IN: best by (rank asc, then file index asc) ----
+      in_rank = 99; in_idx = -1; in_meta = ""
+      if (host in in_exact) {
+        split(in_exact[host], m, SUBSEP); r = rank(m[6])
+        if (r < in_rank || (r == in_rank && (in_idx < 0 || (m[1]+0) < in_idx))) { in_rank = r; in_idx = m[1]+0; in_meta = in_exact[host] }
       }
-
-      # Out-of-scope check
-      out_match = ""
-      for (i = 1; i <= out_n; i++) {
-        if (host_matches(host, out_pat[i])) {
-          out_match = out_pat[i] "|" out_prog[i] "|" out_plat[i]
-          break
+      c = host
+      while (1) {
+        if (c in in_wild) {
+          split(in_wild[c], m, SUBSEP); r = rank(m[6])
+          if (r < in_rank || (r == in_rank && (in_idx < 0 || (m[1]+0) < in_idx))) { in_rank = r; in_idx = m[1]+0; in_meta = in_wild[c] }
         }
+        p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
       }
 
-      # In-scope check — prefer the highest-tier paying match (elite > high > mid > low > none)
-      best_in = ""; best_pays = "false"; best_tier = "none"
-      for (i = 1; i <= in_n; i++) {
-        if (host_matches(host, in_pat[i])) {
-          # tier rank: lower number = better
-          this_rank = (in_tier[i] == "elite" ? 0 :
-                       in_tier[i] == "high"  ? 1 :
-                       in_tier[i] == "mid"   ? 2 :
-                       in_tier[i] == "low"   ? 3 : 4)
-          best_rank = (best_tier == "elite" ? 0 :
-                       best_tier == "high"  ? 1 :
-                       best_tier == "mid"   ? 2 :
-                       best_tier == "low"   ? 3 : 4)
-          if (best_in == "" || this_rank < best_rank) {
-            best_in   = in_pat[i] "|" in_prog[i] "|" in_plat[i]
-            best_pays = in_pays[i]
-            best_tier = in_tier[i]
-            if (best_tier == "elite") break  # cannot beat elite
-          }
-        }
-      }
+      # ---- assemble (mirror original field semantics exactly) ----
+      pattern = ""; program = ""; platform = ""; best_pays = "false"; best_tier = "none"
+      if (in_meta != "") { split(in_meta, m, SUBSEP); pattern = m[2]; program = m[3]; platform = m[4]; best_pays = m[5]; best_tier = m[6] }
+      out_pattern = ""; out_program = ""
+      if (out_meta != "") { split(out_meta, m, SUBSEP); out_pattern = m[2]; out_program = m[3] }
 
-      # Out-of-scope OVERRIDES in-scope: a host matching both is effectively out-of-scope
-      if (out_match != "") {
-        in_scope  = "false"
-        best_pays = "false"
-        best_tier = "none"
-      } else {
-        in_scope = (best_in != "" ? "true" : "false")
-      }
-      out_of_scope = (out_match != "" ? "true" : "false")
+      if (out_meta != "") { in_scope = "false"; best_pays = "false"; best_tier = "none" }
+      else { in_scope = (in_meta != "" ? "true" : "false") }
+      out_of_scope = (out_meta != "" ? "true" : "false")
 
-      pattern = ""; program = ""; platform = ""
-      if (best_in != "") {
-        split(best_in, parts, "|")
-        pattern = parts[1]; program = parts[2]; platform = parts[3]
-      }
-      out_pattern = ""; out_program = ""; out_platform = ""
-      if (out_match != "") {
-        split(out_match, parts, "|")
-        out_pattern = parts[1]; out_program = parts[2]; out_platform = parts[3]
-      }
-
-      # 10-column TSV: host in out pays program platform pattern out_program out_pattern payout_tier
       printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
              host, in_scope, out_of_scope, best_pays, program, platform, pattern, out_program, out_pattern, best_tier
     }

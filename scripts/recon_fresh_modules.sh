@@ -390,7 +390,12 @@ mode_js_scan() {
 
   # Ignore list: legitimate 3rd-party SDKs and placeholder strings that produce FPs.
   local ignore_re='(heroku|twilio|firebase|supabase|example|sample|test|public|demo|placeholder|your-|insert-|replace-me|sentry\.io|segment\.io|segment\.com|amplitude\.com|honeybadger|rollbar|logrocket|analytics\.google|googletagmanager|hotjar|intercom\.io|crisp\.chat|drift\.com|hubspot\.net|salesforce\.com)'
-  local aws_re='AKIA[0-9A-Z]{16}'
+  # Boundary-anchored: AKIA + 16 must NOT sit inside a continuous alnum run (e.g.
+  # base64/base32 asset blobs in WASM/source maps). Real keys are quoted/assigned/
+  # whitespace-delimited (all non-alnum). The captured boundary char does not
+  # affect the hit/no-hit check below. (Was 'AKIA[0-9A-Z]{16}', which matched the
+  # substring anywhere — e.g. a byte-identical base64 run across two krisp bundles.)
+  local aws_re='(^|[^A-Za-z0-9])AKIA[0-9A-Z]{16}([^A-Za-z0-9]|$)'
   local google_re='AIza[0-9A-Za-z_-]{35}'
   local priv_key_re='-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'
   local jwt_re='eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
