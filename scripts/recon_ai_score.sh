@@ -18,6 +18,13 @@ OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
 AI_MAX_LEADS="${AI_MAX_LEADS:-50}"
 AI_MIN_SCORE="${AI_MIN_SCORE:-12}"
+# Per-host AI cooldown. Without it, triage (every ~2 min) re-sent the SAME top-50
+# P0/P1 leads to the LLM every cycle, pinning ollama near 100% CPU and starving
+# root /init so `wsl.exe` session creation timed out. An LLM verdict for a host
+# does not change materially day-to-day, and the score persists in ES, so we
+# skip hosts scored within the window. New / cooled-down leads still score at once.
+AI_COOLDOWN_DAYS="${AI_COOLDOWN_DAYS:-7}"
+AI_SEEN_FILE="${AI_SEEN_FILE:-$BASE_DIR/state/.ai_scored.tsv}"
 
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
@@ -129,6 +136,25 @@ jq -c --argjson min "$AI_MIN_SCORE" '
                       (if (.pays // false) then 0 else 1 end),
                       -(.score // 0) ]) | .[]' \
 > "$all_candidates_tmp"
+
+# ── Cooldown filter: drop candidates AI-scored within AI_COOLDOWN_DAYS ────────
+mkdir -p "$(dirname "$AI_SEEN_FILE")" 2>/dev/null || true
+[[ -f "$AI_SEEN_FILE" ]] || : > "$AI_SEEN_FILE" 2>/dev/null || true
+# This ledger is appended to by whichever user runs the scorer — reconrun via the
+# daemon (triage→ai), or d0k via recon_brain. They share no group, so make it
+# writable by both; otherwise the non-owner's append silently fails (the cooldown
+# would become a no-op and the LLM would re-score the same hosts every cycle).
+chmod 0666 "$AI_SEEN_FILE" 2>/dev/null || true
+now_epoch="$(date -u +%s)"
+ai_cutoff=$(( now_epoch - AI_COOLDOWN_DAYS * 86400 ))
+cooled_json="$(awk -F'\t' -v c="$ai_cutoff" '($2+0) >= c {print $1}' "$AI_SEEN_FILE" 2>/dev/null \
+              | sort -u | jq -R . | jq -s . 2>/dev/null || echo '[]')"
+before_cd="$(wc -l < "$all_candidates_tmp" | tr -d ' ')"
+jq -c --argjson cooled "$cooled_json" 'select((.host as $h | $cooled | index($h)) | not)' \
+  "$all_candidates_tmp" > "$all_candidates_tmp.f" 2>/dev/null && mv "$all_candidates_tmp.f" "$all_candidates_tmp" || true
+after_cd="$(wc -l < "$all_candidates_tmp" | tr -d ' ')"
+[[ "$before_cd" != "$after_cd" ]] && log "cooldown: skipped $(( before_cd - after_cd )) host(s) AI-scored in last ${AI_COOLDOWN_DAYS}d"
+
 head -n "$AI_MAX_LEADS" "$all_candidates_tmp" > "$candidates_tmp"
 
 total_candidates="$(wc -l < "$candidates_tmp" | tr -d ' ')"
@@ -283,8 +309,20 @@ while IFS= read -r lead; do
     }}
   ' <<< "$enriched" >> "$updates_tmp"
   scored=$((scored + 1))
+  printf '%s\t%s\n' "$host" "$now_epoch" >> "$AI_SEEN_FILE" 2>/dev/null || true
   log "[${attempted}/${total_candidates}] accepted $host ai_score=$(jq -r '.ai.ai_relevance_score // 0' <<< "$enriched") route=$(jq -r '.ai.route // "human"' <<< "$enriched")"
 done < "$candidates_tmp"
+
+# Prune the cooldown ledger: keep only the latest in-window epoch per host so the
+# file cannot grow without bound (one line per host scored in the last window).
+if [[ -s "$AI_SEEN_FILE" ]]; then
+  awk -F'\t' -v c="$ai_cutoff" '($2+0) >= c { if (($2+0) > seen[$1]) seen[$1]=$2 }
+       END { for (h in seen) print h"\t"seen[h] }' "$AI_SEEN_FILE" \
+    > "$AI_SEEN_FILE.tmp" 2>/dev/null && mv "$AI_SEEN_FILE.tmp" "$AI_SEEN_FILE" || rm -f "$AI_SEEN_FILE.tmp"
+  # the mv replaced the file with one owned by THIS run's user; keep it writable
+  # by the other pipeline user (reconrun/d0k) so cross-user appends keep working.
+  chmod 0666 "$AI_SEEN_FILE" 2>/dev/null || true
+fi
 
 if [[ -s "$updates_tmp" ]]; then
   curl -fsS -m 30 --netrc-file "$HOME/.recon_es_netrc" -H 'Content-Type: application/x-ndjson' \

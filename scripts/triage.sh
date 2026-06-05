@@ -1234,11 +1234,15 @@ mark_triage_seen() {
 run_ai_review_layer() {
   local in="$1"
   [[ "${ENABLE_OLLAMA_AI:-1}" == "1" ]] || return 0
-  [[ -x "$AI_SCORE_SCRIPT" ]] || { warn "AI score script missing or not executable: $AI_SCORE_SCRIPT"; return 0; }
+  # Guard on -f (file exists), NOT -x: these are invoked via `bash "$SCRIPT"`
+  # below, which does not need the execute bit. Editing a script over the
+  # \\wsl.localhost UNC path strips +x, and an -x guard here would then SILENTLY
+  # skip the whole AI layer (observed 2026-06-03). Same hardening as SCOPE_CHECK.
+  [[ -f "$AI_SCORE_SCRIPT" ]] || { warn "AI score script missing: $AI_SCORE_SCRIPT"; return 0; }
   log "AI review layer enabled"
   BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" ES_USER="$ES_USER" \
     bash "$AI_SCORE_SCRIPT" "$in" || warn "AI scoring failed"
-  if [[ -x "$AI_PACK_SCRIPT" ]]; then
+  if [[ -f "$AI_PACK_SCRIPT" ]]; then
     BASE_DIR="$BASE_DIR" bash "$AI_PACK_SCRIPT" || warn "AI packet build failed"
   fi
 }

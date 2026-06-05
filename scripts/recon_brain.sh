@@ -102,28 +102,28 @@ case "$mode" in
 
   triage-only)
     log "===== Brain triage-only ====="
-    [[ -x "$TRIAGE" ]] || die "triage script not found: $TRIAGE"
+    [[ -f "$TRIAGE" ]] || die "triage script not found: $TRIAGE"
     bash "$TRIAGE"
     ;;
 
   quick)
     log "===== Brain quick refresh (KEV-only) ====="
-    [[ -x "$SCOPE_DB"  ]] && run_step "scope_db"   bash "$SCOPE_DB"
-    [[ -x "$CVE_INTEL" ]] && run_step "cve_kev"    bash "$CVE_INTEL" kev
-    [[ -x "$VULN_FEED" ]] && run_step "vuln_feed"  bash "$VULN_FEED" all
-    [[ -x "$TRIAGE"    ]] && run_step "triage"     bash "$TRIAGE"
+    [[ -f "$SCOPE_DB"  ]] && run_step "scope_db"   bash "$SCOPE_DB"
+    [[ -f "$CVE_INTEL" ]] && run_step "cve_kev"    bash "$CVE_INTEL" kev
+    [[ -f "$VULN_FEED" ]] && run_step "vuln_feed"  bash "$VULN_FEED" all
+    [[ -f "$TRIAGE"    ]] && run_step "triage"     bash "$TRIAGE"
     ;;
 
   full|*)
     log "===== Brain full refresh ====="
-    [[ -x "$SCOPE_DB"  ]] || warn "scope_db script missing: $SCOPE_DB"
-    [[ -x "$CVE_INTEL" ]] || warn "cve_intel script missing: $CVE_INTEL"
-    [[ -x "$VULN_FEED" ]] || warn "vuln_feed script missing: $VULN_FEED"
-    [[ -x "$TRIAGE"    ]] || die  "triage script missing: $TRIAGE"
+    [[ -f "$SCOPE_DB"  ]] || warn "scope_db script missing: $SCOPE_DB"
+    [[ -f "$CVE_INTEL" ]] || warn "cve_intel script missing: $CVE_INTEL"
+    [[ -f "$VULN_FEED" ]] || warn "vuln_feed script missing: $VULN_FEED"
+    [[ -f "$TRIAGE"    ]] || die  "triage script missing: $TRIAGE"
 
-    [[ -x "$SCOPE_DB"  ]] && run_step "scope_db"  bash "$SCOPE_DB"
-    [[ -x "$CVE_INTEL" ]] && run_step "cve_intel" bash "$CVE_INTEL" all
-    [[ -x "$VULN_FEED" ]] && run_step "vuln_feed" bash "$VULN_FEED" all
+    [[ -f "$SCOPE_DB"  ]] && run_step "scope_db"  bash "$SCOPE_DB"
+    [[ -f "$CVE_INTEL" ]] && run_step "cve_intel" bash "$CVE_INTEL" all
+    [[ -f "$VULN_FEED" ]] && run_step "vuln_feed" bash "$VULN_FEED" all
                               run_step "triage"   bash "$TRIAGE"
     ;;
 esac

@@ -164,6 +164,18 @@ if ! flock -n 8; then
 fi
 echo $$ >&8
 
+# ---- CPU priority: deprioritize the whole daemon tree ----
+# Every loop, scanner, triage run and jq worker is forked from this process and
+# inherits its nice value (verified: the value survives fork, execve AND
+# `sudo -u reconrun env …`). On WSL2 the Linux side shares CPU with the root
+# /init that services `wsl.exe` session creation from Windows; at the default
+# nice 0 a triage burst (up to 8 jq workers) competes EQUALLY with /init and
+# starves it, so `wsl -d kali-linux -- …` from Windows times out (WSAETIMEDOUT
+# / 0x8007274c). Renicing to 10 lets root's nice-0 /init preempt promptly while
+# scans still get all otherwise-idle CPU. (IO scheduler is 'none' on WSL2, so
+# ionice is a no-op — CPU nice is the only effective lever here.)
+renice -n "${RECON_DAEMON_NICE:-10}" -p $$ >/dev/null 2>&1 || true
+
 # ---- Shutdown handling ----
 SHUTDOWN=0
 shutdown_handler() { SHUTDOWN=1; log "Shutdown signal — propagating to children"; }

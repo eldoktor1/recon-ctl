@@ -32,8 +32,11 @@ find_live_outputs() {
   [[ -z "$pids" ]] && return 0
   local pid
   for pid in $pids; do
-    # /proc/$pid/cmdline is null-delimited — convert to newlines then grep for -o arg
-    local args; args="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null)"
+    # /proc/$pid/cmdline is null-delimited — convert to newlines then grep for -o arg.
+    # 2>/dev/null must precede the input redirect: bash applies redirections
+    # left-to-right, so if the process exited (the file open fails — a normal
+    # race), a trailing 2> would not yet be in effect to swallow the open error.
+    local args; args="$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline")"
     [[ -z "$args" ]] && continue
     # The line after '-o' is the output file path
     local outfile; outfile="$(printf '%s\n' "$args" | grep -A1 '^-o$' | tail -1)"

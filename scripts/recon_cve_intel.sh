@@ -64,7 +64,7 @@ NVD_LAST_SUCCESS="$CVE_DIR/nvd_last_success.epoch"
 
 fetch_nvd() {
   local now_ts; now_ts="$(date -u +%Y-%m-%dT%H:%M:%S.000)"
-  local use_mod=false start_param="pubStartDate" start_ts
+  local use_mod=false start_param="pubStartDate" end_param="pubEndDate" start_ts
 
   # Use incremental (lastModified) if we have a successful prior run AND existing data
   if [[ -s "$NVD_LAST_SUCCESS" && -s "$CVE_DIR/nvd_recent.json" ]]; then
@@ -72,6 +72,7 @@ fetch_nvd() {
     start_ts="$(date -u -d "@$last_epoch" +%Y-%m-%dT%H:%M:%S.000 2>/dev/null \
                || python3 -c "import datetime; print(datetime.datetime.utcfromtimestamp(${last_epoch}).strftime('%Y-%m-%dT%H:%M:%S.000'))")"
     start_param="lastModStartDate"
+    end_param="lastModEndDate"
     use_mod=true
     log "Fetching NVD incremental (lastMod since ${start_ts})"
   else
@@ -112,7 +113,7 @@ fetch_nvd() {
         --output "$RAW_DIR/.nvd_page.json" \
         --write-out '%{http_code}\n' \
         --data-urlencode "${start_param}=$pub_start" \
-        --data-urlencode "lastModEndDate=$pub_end" \
+        --data-urlencode "${end_param}=$pub_end" \
         --data-urlencode "startIndex=$start_idx" \
         --data-urlencode "resultsPerPage=$page_size" \
         "$NVD_API" 2>/dev/null </dev/null)"

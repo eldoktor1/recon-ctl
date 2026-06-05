@@ -445,10 +445,22 @@ main() {
   # immediately — previously the 20-30 min triage run held the lock the whole
   # time, blocking new validate batches from starting.
   if [[ "$processed" -gt 0 && "$RUN_TRIAGE" == "1" && -f "$TRIAGE_SCRIPT" ]]; then
-    log "Chaining to triage (background)"
+    # Fast lane (true-fresh, --prefix 00_) must alert within one cycle, so it
+    # forces INCREMENTAL triage (~8k changed docs, ~90s). If left on auto it
+    # would, every 6h, score ~2 fresh hosts inside a 40-min full 487k re-score —
+    # exactly the latency the fast lane exists to avoid. The periodic full
+    # re-score (auto mode) is owned by the normal lane.
+    local triage_mode_override=""
+    [[ -n "$CLAIM_PREFIX" ]] && triage_mode_override="incremental"
+    log "Chaining to triage (background${triage_mode_override:+, mode=$triage_mode_override})"
+    # Export inside the subshell rather than using a `VAR=val cmd` prefix: a
+    # `VAR=val` produced by expansion (e.g. ${x:+TRIAGE_MODE=…}) is NOT treated
+    # as an assignment by bash — it becomes the command name ("command not
+    # found"). Plain exports avoid that entirely and read clearly.
     ( 9>&-  # close inherited lane lock fd so triage doesn't hold the flock
-      ES_URL="$ES_URL" ES_USER="$ES_USER" \
-      INDEX_NAME="$INDEX_NAME" timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
+      export ES_URL ES_USER INDEX_NAME
+      [[ -n "$triage_mode_override" ]] && export TRIAGE_MODE="$triage_mode_override"
+      timeout --kill-after=30 "${TRIAGE_TIMEOUT:-3600}" bash "$TRIAGE_SCRIPT" \
       || warn "triage exited non-zero" ) &
     disown $! 2>/dev/null || true
   fi

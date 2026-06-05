@@ -43,9 +43,12 @@ EPSS_URL="${EPSS_URL:-https://epss.empiricalsecurity.com/epss_scores-current.csv
 NUCLEI_CVES_URL="${NUCLEI_CVES_URL:-https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/cves.json}"
 NUCLEI_RELEASES_URL="${NUCLEI_RELEASES_URL:-https://api.github.com/repos/projectdiscovery/nuclei-templates/releases/latest}"
 VULNRICHMENT_COMMITS_URL="${VULNRICHMENT_COMMITS_URL:-https://api.github.com/repos/cisagov/vulnrichment/commits?per_page=100}"
-# GitHub Security Advisories GraphQL — free, no token needed for public advisories.
-# Returns the 100 most recently published critical/high advisories with PoC availability.
-GHSA_URL="${GHSA_URL:-https://api.github.com/advisories?per_page=100&sort=published&direction=desc&severity=critical,high}"
+# GitHub Security Advisories REST — free, no token needed for public advisories.
+# Returns the 100 most recently published advisories with PoC availability.
+# NOTE: the /advisories `severity` param accepts a SINGLE value only (one of
+# unknown/low/medium/high/critical); a comma list returns HTTP 422. We fetch
+# critical and high in two calls and merge (see fetch_ghsa).
+GHSA_BASE_URL="${GHSA_BASE_URL:-https://api.github.com/advisories?per_page=100&sort=published&direction=desc}"
 
 mkdir -p "$VULN_DIR" "$RAW_DIR" "$STATE_DIR" "$STATE_DIR/kill"
 
@@ -76,12 +79,36 @@ fetch_optional() {
   fi
 }
 
+# GHSA needs one call per severity (comma lists 422); merge critical+high.
+fetch_ghsa() {
+  local out="$RAW_DIR/ghsa_recent.json"
+  log "Fetching GitHub Security Advisories (critical+high)"
+  local sev tmp_all merged_ok=false
+  tmp_all="$(mktemp)"; echo '[]' > "$tmp_all"
+  for sev in critical high; do
+    local tmp_sev="${out}.${sev}.tmp"
+    if curl_net -fsSL -m 60 "${GHSA_BASE_URL}&severity=${sev}" -o "$tmp_sev" \
+       && jq -e 'type=="array"' "$tmp_sev" >/dev/null 2>&1; then
+      jq -s '.[0] + .[1]' "$tmp_all" "$tmp_sev" > "${tmp_all}.m" \
+        && mv "${tmp_all}.m" "$tmp_all" && merged_ok=true
+    fi
+    rm -f "$tmp_sev"
+  done
+  if $merged_ok; then
+    mv "$tmp_all" "$out"
+    log "  ok GitHub Security Advisories ($(jq 'length' "$out" 2>/dev/null || echo '?') advisories)"
+  else
+    warn "  failed GitHub Security Advisories; keeping previous if present"
+    rm -f "$tmp_all"
+  fi
+}
+
 fetch_feeds() {
   fetch_optional "EPSS current" "$EPSS_URL" "$RAW_DIR/epss_scores-current.csv.gz"
   fetch_optional "ProjectDiscovery nuclei CVE index" "$NUCLEI_CVES_URL" "$RAW_DIR/nuclei_cves.json"
   fetch_optional "ProjectDiscovery latest release" "$NUCLEI_RELEASES_URL" "$RAW_DIR/nuclei_latest_release.json"
   fetch_optional "CISA Vulnrichment recent commits" "$VULNRICHMENT_COMMITS_URL" "$RAW_DIR/vulnrichment_commits.json"
-  fetch_optional "GitHub Security Advisories (critical+high)" "$GHSA_URL" "$RAW_DIR/ghsa_recent.json"
+  fetch_ghsa
 }
 
 normalize_feed() {

@@ -2436,7 +2436,7 @@ cmd_vuln() {
       ;;
     status)
       hdr "Vuln intelligence"
-      if [[ -x "$(script_path recon_vuln_feed.sh)" ]]; then
+      if [[ -f "$(script_path recon_vuln_feed.sh)" ]]; then
         bash "$(script_path recon_vuln_feed.sh)" status
       else
         echo "  recon_vuln_feed.sh missing"
