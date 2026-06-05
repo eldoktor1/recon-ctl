@@ -1519,7 +1519,8 @@ cmd_ports() {
   hdr "$label"
 
   local crit_filter=""
-  [[ "$critical_only" == "1" ]] && crit_filter=',"must":[{"term":{"portscan_critical":true}}]'
+  # portscan_critical is a long (0/1), not a boolean — query with 1, not true.
+  [[ "$critical_only" == "1" ]] && crit_filter=',"must":[{"term":{"portscan_critical":1}}]'
 
   local resp
   resp="$(_es_search "$(printf '{
@@ -1535,7 +1536,7 @@ cmd_ports() {
   printf '%s' "$resp" | jq -r '
     .hits.hits[]._source |
     [
-      (if .portscan_critical then "🔴" else "🟠" end),
+      (if (.portscan_critical == 1) then "🔴" else "🟠" end),
       (.triage_priority // "?"),
       ((.triage_score // 0) | tostring),
       (.triage_payout_tier // "?"),
