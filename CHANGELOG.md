@@ -1,5 +1,45 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v2.9.0 - 2026-06-06 - Triage P0 false-positive hardening (CONFIRMED vs LEAD)
+
+Established the CONFIRMED-vs-LEAD discipline (see CLAUDE.md): only a directly
+observed exploitable primitive mints P0; pattern/class matches are LEADs (P1-max);
+stale-past-TTL → LEAD. Worked through a multi-phase pass; one validated change per
+phase.
+
+### PHASE 0 - Fixed: two P0 false-positive classes + stale-priority persistence (triage.sh)
+- **Spring actuator KEV → LEAD.** `tech:spring-actuator` (+ defensive `tech:springboot`/
+  `tech:actuator`) added to the surface/version-unverified KEV gate in
+  `apply_scope_kev_enrichment`. A bare spring fingerprint's `/actuator` surface is
+  usually auth-gated (401/404); it now scores `KEV_UNVERIFIED_BONUS` (+1) and tags
+  `version-or-surface-unconfirmed`, not full `KEV_BONUS`.
+- **Critical-port exemption now requires portscan-confirmed-open.** `score_raw`'s
+  `has_critical_port` gate previously fired on the recorded `.port` number alone; a
+  host can carry `.port=6379` while nmap shows 0/10 open. Now gated on membership in
+  `portscan_open_ports[]` (the portscanner's confirmed-open set).
+- **Enforcement clamp (`cap:kev-unverified-no-p0`).** Reducing the KEV bonus alone
+  could not clear P0 — a confirmed tech base (+7/+9) plus payout-tier already reaches
+  the P0 threshold of 15. New `kev_unverified_sole` flag (set when an unverified-KEV
+  host has NO exploit evidence independent of the version/surface-bound fingerprint —
+  no other confirmed signal, no portscan-confirmed critical port, no confirmed
+  takeover) clamps the host to P0_THRESHOLD-1 in Phase 2.
+- **Root cause of stale P0 surviving a full re-score: `demote_dropped_docs()`.**
+  `update_es_scores` only writes P2+ survivors, so any fetched doc dropped by the
+  score floor / Phase-2 selects (ignored -50, UUID -10, low-score, out-of-scope)
+  kept whatever `triage_priority` a prior run wrote. Added a primitive-safe
+  demotion-writeback: dropped docs whose fetched priority was P0/P1/P2 are reset to
+  P3, EXCEPT those carrying an out-of-band confirmed primitive
+  (`portscan_critical` / `bypass_confirmed` / `takeover_confirmed`).
+- **Index-wide re-score + one-time cleanups.** Full re-score (`TRIAGE_MODE=full`)
+  rewrote 347,890 survivors; stale `takeover:dangling-cname` tags (593, pre-fix
+  leftover — no current emitter, 0 `takeover_confirmed`) demoted to P3; 2,978 stale
+  P0/P1 demoted (primitive-guarded).
+- **Validated:** P0 1006 → 739 (738 current-logic + 1 protected primitive,
+  `sandbox-api.fireblocks.io`, 47 confirmed-open ports). Safety audit clean — 0 of
+  the 939 `kev_unverified_sole` / 2,978 `stale_reset` docs carry a confirmed
+  primitive. Real findings retained: fireblocks P0, `qa-www.elastic.co`
+  (`bypass_confirmed`) P1. `needs_verify=version-or-surface-unconfirmed` 202 → 484.
+
 ## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
 
 ### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)

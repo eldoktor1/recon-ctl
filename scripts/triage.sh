@@ -167,7 +167,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","ai_recommendation","ai_relevance_score","takeover_confirmed"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -565,7 +565,15 @@ score_raw() {
     # it has a confirmed-strength signal, or a critical port (real services
     # that do not lie about their identity even without tech detection).
     [2375,2376,6379,27017,9200,9300,5432,3306,11211,2181] as $critical_ports |
-    ((.port // 0) | (. as $p | $critical_ports | index($p) != null)) as $has_critical_port |
+    (.port // 0) as $hostport |
+    ($critical_ports | index($hostport) != null) as $port_is_critical |
+    # CHANGE 2 — a critical port only escapes pattern_only when the portscanner has
+    # CONFIRMED it open. The recorded .port is just the httpx-probed port number; a
+    # host can carry .port=6379 while nmap shows 0/10 open. recon_portscan.sh writes
+    # the confirmed-open set to portscan_open_ports[] (integers). Gate the exemption
+    # on confirmed-open membership, not the bare number.
+    (((.portscan_open_ports // []) | index($hostport)) != null) as $port_confirmed_open |
+    ($port_is_critical and $port_confirmed_open) as $has_critical_port |
     ((($strengths | any(. == "confirmed")) or $has_critical_port) | not) as $pattern_only |
 
     # Fix 11: confidence band
@@ -606,8 +614,11 @@ score_raw() {
       last_seen:(.last_seen // ""),
       score: $score, base_score: $base_score,
       pattern_only: $pattern_only, age_hours: $age_h,
+      has_critical_port: $has_critical_port,
       confidence: $confidence_band,
       signals: $matched_sigs, strengths: $strengths,
+      confirmed_sigs: ($signals | map(select(.strength == "confirmed") | .sig)),
+      takeover_confirmed: (.takeover_confirmed // false),
       vuln_classes: $vuln_classes, actions: $annotated_actions
     }
   ' "$_chunk" > "${_chunk}.out" 2>/dev/null &
@@ -727,16 +738,42 @@ apply_scope_kev_enrichment() {
       # (b) Appliances / heavy apps whose KEV requires a specific vulnerable
       #     version AND/OR a management surface that triage cannot probe in the
       #     hot path. A bare fingerprint is a LEAD, not a confirmed P0.
+      # CHANGE 1 — Spring actuator added to the surface-dependent set. A bare
+      # spring/actuator fingerprint (sig tech:spring-actuator; recon_cve_intel.sh
+      # maps "spring boot"/"spring-boot"/"actuator" → tech:spring-actuator) is not a
+      # confirmed P0: the /actuator surface is usually auth-gated (401/404). It scores
+      # KEV_UNVERIFIED_BONUS (lead), not full KEV_BONUS. (tech:springboot/tech:actuator
+      # are listed defensively in case the signal is ever renamed; only
+      # tech:spring-actuator is emitted today.)
       (["tech:confluence","tech:jira","tech:f5-bigip","tech:citrix","tech:fortinet",
         "tech:ivanti-pulse","tech:paloalto","tech:vmware","tech:exchange-owa",
         "tech:weblogic","tech:websphere","tech:manageengine","tech:coldfusion",
-        "tech:moveit","tech:sitecore","tech:aem"] | index($ksig) != null) as $kev_surface_dependent |
+        "tech:moveit","tech:sitecore","tech:aem",
+        "tech:spring-actuator","tech:springboot","tech:actuator"] | index($ksig) != null) as $kev_surface_dependent |
       # reason flag (null = fully actionable KEV match)
       (if ($k.signal // null) == null then null
        elif ($is_wp_kev and $has_wp_tech and ($has_plugin_confirm | not)) then "wordpress-plugin-unconfirmed"
        elif $kev_drupal_patched then "drupal-version-patched"
        elif $kev_surface_dependent then "version-or-surface-unconfirmed"
        else null end) as $kev_needs_verify |
+      # ENFORCEMENT — an unverified KEV match (version/surface/plugin) must not mint
+      # P0 on the fingerprint alone; it is a LEAD. Reducing the bonus (+5→+1) is not
+      # enough: a confirmed tech base (+7/+9) + payout-tier already clears P0=15. So
+      # flag the host kev_unverified_sole when its KEV match is unverified AND it has
+      # NO exploit evidence INDEPENDENT of the version/surface-bound fingerprint —
+      # i.e. no other confirmed-strength signal, no portscan-confirmed critical port,
+      # no confirmed takeover. Phase 2 then caps it sub-P0 (cap:kev-unverified-no-p0).
+      (["tech:confluence","tech:jira","tech:f5-bigip","tech:citrix","tech:fortinet",
+        "tech:ivanti-pulse","tech:paloalto","tech:vmware","tech:exchange-owa",
+        "tech:weblogic","tech:websphere","tech:manageengine","tech:coldfusion",
+        "tech:moveit","tech:sitecore","tech:aem",
+        "tech:spring-actuator","tech:springboot","tech:actuator",
+        "tech:drupal","tech:wordpress"]) as $surface_or_version_tech |
+      (($r.confirmed_sigs // []) | any(. as $s | ($surface_or_version_tech | index($s)) == null)) as $has_independent_confirmed |
+      ((($kev_needs_verify // null) != null)
+        and ($has_independent_confirmed | not)
+        and (($r.has_critical_port // false) | not)
+        and (($r.takeover_confirmed // false) != true)) as $kev_unverified_sole |
       (if ($k.signal // null) == null then 0
        elif ($kev_needs_verify == "wordpress-plugin-unconfirmed") then 0
        elif ($kev_needs_verify == "drupal-version-patched") then 0
@@ -764,6 +801,7 @@ apply_scope_kev_enrichment() {
         kev_cvss_max:    ($k.cvss_max      // 0),
         kev_bonus:       $kev_b,
         kev_needs_verify: $kev_needs_verify,
+        kev_unverified_sole: $kev_unverified_sole,
         oos_penalty_applied: $oos_b
       }
     end
@@ -1106,6 +1144,19 @@ apply_cluster_and_submission() {
         uuid_capped: true
       }
     else . end) |
+    # Unverified-KEV no-P0 cap (mirrors cap:pattern-only-no-p0). A host whose only
+    # high-value evidence is a version/surface/plugin-unverified KEV fingerprint
+    # (kev_unverified_sole, computed in apply_scope_kev_enrichment) is a LEAD, not a
+    # P0 — cap it at P0_THRESHOLD-1. Hosts with independent confirmed evidence /
+    # a portscan-confirmed critical port / a confirmed takeover were already exempted
+    # upstream (kev_unverified_sole=false) and keep their score.
+    map(if (.kev_unverified_sole // false) and (.score >= '"$P0_THRESHOLD"') then
+      . + {
+        score: ('"$P0_THRESHOLD"' - 1),
+        signals: (.signals + ["cap:kev-unverified-no-p0"]),
+        kev_unverified_capped: true
+      }
+    else . end) |
 
     # AI score integration - uses ai_recommendation / ai_relevance_score fetched from ES,
     # written by recon_ai_score.sh in the prior triage pass.
@@ -1189,6 +1240,7 @@ update_es_scores() {
       "triage_kev_match":   (.kev_match // false),
       "triage_kev_signal":  (.kev_signal // null),
       "triage_kev_needs_verify": (.kev_needs_verify // null),
+      "triage_kev_unverified_sole": (.kev_unverified_sole // false),
       "triage_kev_cves":    [(.kev_cves // [])[].id],
       "triage_true_fresh":          (.triage_true_fresh // false),
       "triage_true_fresh_bonus":    (.triage_true_fresh_bonus // 0),
@@ -1243,6 +1295,55 @@ update_es_scores() {
   else
     log "Wrote back triage scores to ES ($total_ok docs)"
   fi
+}
+
+# =============================================================================
+# Persist demotions for fetched docs that did NOT survive to the writeback set.
+# update_es_scores only writes P2+ survivors ($scored). Any fetched doc dropped by
+# the score floor / Phase-2 selects (ignored -50, UUID -10, low-score, out-of-scope)
+# keeps whatever triage_priority a PRIOR run wrote — stale P0/P1 that no re-score
+# ever clears (root cause of inflated P0 counts surviving a full re-score). Reset
+# those to P3 here so the index stays self-consistent.
+#
+# SAFETY: a painless guard protects out-of-band confirmed primitives that
+# legitimately set P0 OUTSIDE triage's own scoring — portscan-confirmed critical
+# port (portscan_critical), confirmed WAF bypass (bypass_confirmed), confirmed
+# takeover (takeover_confirmed). Those are never demoted. We only touch docs whose
+# *fetched* priority was already P0/P1/P2 (a stale-high value worth correcting),
+# so unscored/P3 docs are left alone and the write volume stays bounded.
+# =============================================================================
+demote_dropped_docs() {
+  local raw="$1" scored="$2"
+  [[ -s "$raw" ]] || return 0
+  local dropped; dropped="$(mktemp)"
+  comm -23 \
+    <(jq -r 'select((.triage_priority // "") | test("^P[012]$")) | .host' "$raw" 2>/dev/null | sort -u) \
+    <(jq -r '.host' "$scored" 2>/dev/null | sort -u) \
+    > "$dropped"
+  local n; n="$(wc -l < "$dropped" | tr -d ' ')"
+  [[ "$n" -eq 0 ]] && { rm -f "$dropped"; log "demote_dropped_docs: no stale-priority dropped docs"; return 0; }
+  local body; body="$(mktemp)"
+  jq -Rc --arg idx "$INDEX_NAME" '
+    {"update":{"_index":$idx,"_id":.}},
+    {"script":{"lang":"painless","source":
+      "if (ctx._source.portscan_critical != 1 && ctx._source.bypass_confirmed != true && ctx._source.takeover_confirmed != true) { ctx._source.triage_priority = \"P3\"; ctx._source.triage_stale_reset = true; }"}}
+  ' "$dropped" > "$body"
+  local chunkdir; chunkdir="$(mktemp -d)"; split -l 20000 "$body" "$chunkdir/c_"
+  shopt -s nullglob
+  local ok=0 fail=0
+  for c in "$chunkdir"/c_*; do
+    local resp
+    resp="$(curl -sS -m 120 "${ES_AUTH[@]}" -H 'Content-Type: application/x-ndjson' \
+            -X POST "$ES_URL/_bulk" --data-binary @"$c" 2>/dev/null)" || true
+    if printf '%s' "$resp" | jq -e '(.took != null) and (.errors != true)' >/dev/null 2>&1; then
+      ok=$(( ok + $(wc -l < "$c") / 2 ))
+    else
+      fail=$(( fail + $(wc -l < "$c") / 2 ))
+    fi
+  done
+  shopt -u nullglob
+  rm -rf "$chunkdir" "$body" "$dropped"
+  log "demote_dropped_docs: reset $ok stale-priority dropped doc(s) to P3 (fail=$fail, primitives preserved)"
 }
 
 # =============================================================================
@@ -1535,6 +1636,10 @@ main() {
 
   generate_report "$scored" "$REPORT_OUT"
   update_es_scores "$scored"
+  # Persist demotions for fetched docs dropped before writeback (ignored / UUID /
+  # low-score / out-of-scope) so they don't retain stale P0/P1 from a prior run.
+  # Primitive-safe (portscan_critical / bypass_confirmed / takeover_confirmed kept).
+  demote_dropped_docs "$raw" "$scored"
   run_ai_review_layer "$scored"
 
   local total p0 p1 p2 elite high kev
