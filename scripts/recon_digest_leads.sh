@@ -352,20 +352,19 @@ case "$MODE" in
                       description:($n[0:4000]), color:5793266, timestamp:$ts}]')"
     fi
     idfile="$STATE_DIR/leads_last_msg"
-    # keep the channel to ONE current digest: delete the previously-posted one
-    if [[ -f "$idfile" ]]; then
-      prev="$(cat "$idfile" 2>/dev/null)"
-      [[ -n "$prev" ]] && curl -sS -m 15 -X DELETE "$hook/messages/$prev" >/dev/null 2>&1 || true
-    fi
-    # post with ?wait=true so Discord returns the message object (incl. id)
+    prev=""; [[ -f "$idfile" ]] && prev="$(cat "$idfile" 2>/dev/null)"
+    # POST FIRST (with ?wait=true so Discord returns the message id). Only delete
+    # the previous message AFTER the new one is confirmed posted — otherwise a
+    # failed post would leave the channel empty.
     resp="$(curl -sS -m 25 -H 'Content-Type: application/json' -X POST "${hook}?wait=true" -d "$payload" 2>/dev/null)"
     newid="$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)"
     if [[ -n "$newid" ]]; then
       printf '%s' "$newid" > "$idfile"
+      [[ -n "$prev" && "$prev" != "$newid" ]] && curl -sS -m 15 -X DELETE "$hook/messages/$prev" >/dev/null 2>&1 || true
       append_ledger
       log "Posted curated leads to #leads (msg $newid) + appended ledger ($(printf '%s' "$selected" | jq -c '.counts'))"
     else
-      log "Discord post failed: $(printf '%s' "$resp" | head -c 200)"
+      log "Discord post failed (prior message kept): $(printf '%s' "$resp" | head -c 200)"
       exit 1
     fi
     ;;
