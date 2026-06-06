@@ -272,7 +272,7 @@ cmd_verify() {
   fi
   log "verify($cls): probing $url_count / $total catalog entries"
 
-  local canary="d0k_recon"
+  local canary="d0kxss"
   local sqli_re='SQL syntax|mysql_num_rows|ORA-[0-9]+|SQLSTATE|You have an error in your SQL|Microsoft OLE DB|ODBC SQL Server|Warning.*mysql_|Unclosed quotation mark|quoted string not properly terminated|pg_query\(\)|supplied argument is not a valid MySQL'
   local ua='Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0'
   local out_file="$PARAMS_DIR/verify_${cls}.jsonl"
@@ -283,9 +283,15 @@ cmd_verify() {
     [[ -z "$url" ]] && continue
     checked=$((checked+1))
 
-    local probe_url
+    local probe_url payload
     case "$cls" in
-      xss)  probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "$canary" 2>/dev/null)" ;;
+      # PHASE 4 — XSS must BREAK OUT of context, not merely reflect. Inject a
+      # payload that closes common contexts and opens a UNIQUE tag <d0kxss>. If
+      # that tag survives UNENCODED in the response it is an executable HTML
+      # injection (CONFIRMED). If only the bare marker reflects (angle brackets
+      # entity-encoded), it is reflected-not-exploitable (LEAD, never CONFIRMED).
+      xss)  payload="'\"></script><${canary}>"
+            probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "$payload" 2>/dev/null)" ;;
       sqli) probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "'" 2>/dev/null)" ;;
     esac
     [[ -z "$probe_url" ]] && continue
@@ -293,21 +299,30 @@ cmd_verify() {
     local body
     body="$(curl -sS -m10 -k -L --max-redirs 2 -A "$ua" "$probe_url" 2>/dev/null | head -c 65536)"
 
-    local hit=0
+    local hit=0 status="confirmed"
     case "$cls" in
-      xss)  printf '%s' "$body" | grep -qi "$canary" && hit=1 ;;
+      xss)
+        if printf '%s' "$body" | grep -qiF "<${canary}>"; then hit=1; status="confirmed"
+        elif printf '%s' "$body" | grep -qiF "$canary"; then hit=1; status="reflected-not-exploitable"
+        fi ;;
       sqli) printf '%s' "$body" | grep -qiE "$sqli_re" && hit=1 ;;
     esac
 
     if [[ "$hit" -eq 1 ]]; then
-      hits=$((hits+1))
-      local label="[${cls^^} CONFIRMED]"
+      local label
+      if [[ "$status" == "confirmed" ]]; then
+        hits=$((hits+1)); label="[${cls^^} CONFIRMED]"
+      else
+        # LEAD — reflected but break-out chars were encoded; not exploitable, not counted
+        label="[${cls^^} reflected-not-exploitable]"
+      fi
       [[ "$fresh_tag" == "FRESH" ]] && label="$label [FRESH]"
       printf '%s  %s [%s]  %s\n' "$label" "$program" "$tier" "$probe_url"
       jq -nc --arg u "$url" --arg p "$probe_url" --arg c "$cls" \
              --arg pr "$program" --arg ti "$tier" --arg fr "$fresh_tag" \
+             --arg st "$status" \
              --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-        '{url:$u, probe_url:$p, class:$c, program:$pr, tier:$ti, fresh:($fr=="FRESH"), confirmed_at:$ts}' \
+        '{url:$u, probe_url:$p, class:$c, program:$pr, tier:$ti, fresh:($fr=="FRESH"), status:$st, confirmed:($st=="confirmed"), confirmed_at:$ts}' \
         >> "$out_file" 2>/dev/null || true
     fi
 
