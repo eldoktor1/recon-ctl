@@ -39,6 +39,30 @@ phase.
   the 939 `kev_unverified_sole` / 2,978 `stale_reset` docs carry a confirmed
   primitive. Real findings retained: fireblocks P0, `qa-www.elastic.co`
   (`bypass_confirmed`) P1. `needs_verify=version-or-surface-unconfirmed` 202 → 484.
+  (NOTE: PHASE 1 later reclassified fireblocks as a CDN phantom → P1; see below.)
+
+### PHASE 1 - Fixed: portscan reliability — CDN phantoms, scan artifacts, stale opens
+A connect-scan against a CDN edge ACKs every port, so naabu "opens" behind a CDN are
+phantom (real case: `sandbox-api.fireblocks.io`, 47 "open" ports incl Docker/Redis/
+Kafka/ZK, all Cloudflare). Stale `portscan_open_ports` also mislead (atlas.ripe.net
+showed 2181/11211; live nmap = filtered). Implemented CONFIRMED-vs-LEAD discipline
+for the portscan lane:
+- **(a) CDN-range emit guard (recon_portscan.sh).** New `ip_in_cdn()` (integer CIDR
+  match over Cloudflare/Fastly/Akamai blocks) — in addition to the existing
+  cdn_name/IP-dedup/httpx filters. A CDN-range IP now never emits `portscan_critical`.
+- **(b) Artifact cap.** >6 "open" critical ports on one host = scan artifact →
+  `portscan_suspect=true`, excluded from scoring.
+- Suspect hosts: `portscan_critical=0`, `portscan_open_ports=[]` (audit copy in
+  `portscan_suspect_ports` + `portscan_suspect_reason`), no score bump, no P0 promotion.
+- **(c) Freshness TTL (triage.sh).** `has_critical_port` now requires the portscan
+  confirmation to be FRESH (`portscan_at` within `PORTSCAN_CONFIRM_TTL_SECS`, default
+  7d) AND `portscan_suspect != true`. Stale/suspect → LEAD, cannot exempt a host from
+  the pattern_only clamp.
+- **Backfill (snapshot first):** the 2 existing `portscan_critical=1` docs (atlas,
+  fireblocks) reset — `portscan_critical` 2 → 0, `portscan_suspect`=2, +12 bonus
+  removed, phantom `port:*` signals stripped, priority recomputed (fireblocks P0→P1,
+  atlas P1→P3). **P0 739 → 738.** Snapshot:
+  `state/phase1_portscan_snapshot_*.json`.
 
 ## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
 
