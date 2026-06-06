@@ -1,0 +1,72 @@
+# recon-pipeline — standing operating doc
+
+Reference for every session. Established through a full session of manual
+verification. Keep it tight; update it when a principle changes.
+
+## Core principle: CONFIRMED vs LEAD
+Every signal is exactly one of:
+- **CONFIRMED** — an exploitable primitive was directly observed.
+- **LEAD** — a pattern/class suggests it, but it is unverified.
+- **STALE** — was CONFIRMED, now past its freshness TTL → treat as LEAD until re-verified.
+
+**Only CONFIRMED mints P0. LEADs clamp to P1-max. STALE → LEAD.**
+The takeover lane is the REFERENCE PATTERN: `takeover:confirmed` (real multi-stage
+NXDOMAIN + unclaimed-fingerprint verification, +15, P0) vs `takeover:cname-lead`
+(CNAME→provider + 404 heuristic, +3, never P0 on its own). Every other lane should
+match this discipline.
+
+## Documented false-positive patterns (never score as CONFIRMED)
+- **KEV tech-class match without a confirmed in-range version** (Spring actuator,
+  Confluence, Jira, F5, MOVEit, AEM, Magento, Drupal≥8, …) → LEAD, not P0. Verify
+  the running version before treating any KEV match as exploitable. (triage:
+  `kev_needs_verify` + `kev_unverified_sole` clamp.)
+- **Critical port from the recorded port number alone** → must be
+  portscan-confirmed-open AND recent AND not CDN-fronted. CDNs
+  (Cloudflare/Akamai/Fastly) ACK every port — portscan results behind a CDN are
+  meaningless. **>6 "open" critical ports on one host = scan artifact**, not a finding.
+- **`js_secret_hit` fires on ~53% of the corpus = noise.** A token-shaped string is
+  not a secret. Exclude public-by-design: Supabase anon, Stripe `pk_`, Firebase web
+  config, OAuth `client_id`, Google browser API keys.
+- **XSS: reflection ≠ XSS.** Plain string reflection (especially inside JSON or
+  otherwise encoded contexts) is NOT confirmed XSS. Break-out chars (`"><'/`) must
+  survive UNENCODED in an executable context. Encoded reflection →
+  `reflected-not-exploitable` (LEAD).
+- **Dangling CNAME to a LIVE ELB/CloudFront is not a takeover** — live apps 404 at
+  root all the time. Verify unclaimed / NXDOMAIN first.
+
+## Scope discipline (mandatory before any target work)
+- `recon-scope` EVERY host before claiming/reporting. Confirm `pays=true`.
+- VDP / no-payout (program "dummy", `pays=false`) fails the implied `--pays` filter —
+  do not invest effort. Filter on the **per-target authoritative** pays value, not the
+  program-level one.
+- Internal/corp infrastructure (`*.corp.*`, intranet, `dev-internal`) is out of scope
+  even when something is exposed.
+
+## Submission discipline
+- Lead with the most severe **ACCURATE** framing. Don't overclaim — overclaimed
+  severity gets reports closed N/A and dings researcher signal. (Real case: an unauth
+  metadata exposure was honestly P2-class; "confirmed XSS" on inert reflection would
+  have been an N/A.)
+- Verify the primitive before reporting. Document with redacted evidence; the
+  exposure itself is the report.
+
+## Hard line: recon vs attack (NON-NEGOTIABLE)
+- Confirm an exposure exists; do NOT exploit past it. The PoC is "this responds/leaks
+  without auth," never a data harvest.
+- NEVER: pull other users' data; enumerate account IDs that aren't yours; place/amend/
+  cancel orders; initiate transfers/withdrawals/deposits; run RCE primitives (Groovy
+  console, file-read CVEs); attempt to bypass a login to get IN.
+- IDOR/BOLA testing uses TWO accounts the researcher owns — never guessed/enumerated
+  third-party IDs.
+- Authenticated live-target testing stays human-in-the-loop. The pipeline / any agent
+  must NOT autonomously issue authenticated requests against live bug-bounty targets.
+- Never touch nftables/iptables/VPN config. Mullvad is sole egress; `vpn_down` pauses
+  all scanning.
+
+## Operational notes
+- WSL: use heredoc form for execution; never `bash -c "..."` (var/escaping breaks).
+- ES auth: `-u "elastic:$(cat ~/.recon_es_pass)"`. Field types differ in queries:
+  `triage_pays` is a JSON bool; `portscan_critical` is numeric.
+- Daemon control: `recon-start` / `start_recon_safe.sh` only. Live-restart safe — the
+  daemon stays up; edits take effect next cycle.
+- Do NOT touch reconrun-owned `firstblood/` permissions.
