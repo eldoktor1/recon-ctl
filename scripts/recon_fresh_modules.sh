@@ -388,35 +388,72 @@ mode_js_scan() {
   [[ "$n" -eq 0 ]] && { log "no fresh targets"; return 0; }
   log "scanning $n fresh hosts for JS secrets/endpoints"
 
-  # Ignore list: legitimate 3rd-party SDKs and placeholder strings that produce FPs.
-  local ignore_re='(heroku|twilio|firebase|supabase|example|sample|test|public|demo|placeholder|your-|insert-|replace-me|sentry\.io|segment\.io|segment\.com|amplitude\.com|honeybadger|rollbar|logrocket|analytics\.google|googletagmanager|hotjar|intercom\.io|crisp\.chat|drift\.com|hubspot\.net|salesforce\.com)'
-  # Boundary-anchored: AKIA + 16 must NOT sit inside a continuous alnum run (e.g.
-  # base64/base32 asset blobs in WASM/source maps). Real keys are quoted/assigned/
-  # whitespace-delimited (all non-alnum). The captured boundary char does not
-  # affect the hit/no-hit check below. (Was 'AKIA[0-9A-Z]{16}', which matched the
-  # substring anywhere — e.g. a byte-identical base64 run across two krisp bundles.)
+  # PHASE 3 — CONFIRMED vs LEAD for JS "secrets" (CLAUDE.md discipline). A
+  # token-shaped string is not a secret. We split into:
+  #   finding_type="secret"      → a real server-side credential (mints js_secret_hit)
+  #   finding_type="secret_lead" → token-shaped but public-by-design (recorded, no hit)
+  # Ignore list: 3rd-party SDKs, placeholders, AND public-by-design markers
+  # (Stripe publishable pk_, Firebase apiKey, Supabase anon, OAuth client_id via
+  # googleusercontent, and NEXT_PUBLIC_/VITE_/REACT_APP_ env prefixes which by
+  # convention only ever hold values intended for the browser).
+  local ignore_re='(heroku|twilio|firebase|supabase|example|sample|test|public|demo|placeholder|your-|insert-|replace-me|sentry\.io|segment\.io|segment\.com|amplitude\.com|honeybadger|rollbar|logrocket|analytics\.google|googletagmanager|hotjar|intercom\.io|crisp\.chat|drift\.com|hubspot\.net|salesforce\.com|googleusercontent\.com|pk_live_|pk_test_|apiKey|anon[_-]?key|publishableKey|NEXT_PUBLIC_|VITE_|REACT_APP_|VUE_APP_)'
+  # ── CONFIRMED secret types — high-confidence server credentials ──────────────
+  # Boundary-anchored where the body is plain alnum so a base64/WASM blob cannot
+  # produce a phantom match (real keys are quoted/assigned/whitespace-delimited).
   local aws_re='(^|[^A-Za-z0-9])AKIA[0-9A-Z]{16}([^A-Za-z0-9]|$)'
-  local google_re='AIza[0-9A-Za-z_-]{35}'
   local priv_key_re='-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'
-  local jwt_re='eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
   local connstr_re='(mongodb\+srv://|postgres(ql)?://[^[:space:]"]+:[^[:space:]"]+@|mysql://[^[:space:]"]+:[^[:space:]"]+@)'
+  local github_re='(gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{60,})'
+  local slack_re='xox[baprs]-[A-Za-z0-9-]{10,}'
+  local slackhook_re='https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+'
+  local stripe_secret_re='(sk|rk)_live_[A-Za-z0-9]{20,}'
+  local gitlab_re='glpat-[A-Za-z0-9_-]{20,}'
+  local sendgrid_re='SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}'
+  local npm_re='npm_[A-Za-z0-9]{36}'
+  local twilio_re='(^|[^A-Za-z0-9])SK[0-9a-fA-F]{32}([^A-Za-z0-9]|$)'
+  local mailgun_re='key-[0-9a-f]{32}'
+  # ── LEAD types — token-shaped but almost always public-by-design ─────────────
+  local google_key_re='AIza[0-9A-Za-z_-]{35}'   # browser/Maps/Firebase web key
+  local jwt_re='eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'  # client JWT (often anon)
   local endpoint_re='(/api/v[0-9]+/[A-Za-z0-9_/-]+|/graphql|/internal/[A-Za-z0-9_/-]+)'
 
+  # Redact a matched credential before it touches disk/ES — keep enough to audit,
+  # never the full secret.
+  _redact() {
+    local s="$1" n=${#1}
+    if (( n <= 10 )); then printf '%s' "${s:0:2}***"; else printf '%s***%s' "${s:0:6}" "${s: -4}"; fi
+  }
   _emit() {
-    local host="$1" js="$2" ftype="$3" mtype="$4" bonus="$5"
-    jq -nc --arg host "$host" --arg js "$js" --arg ft "$ftype" --arg mt "$mtype" --argjson bonus "$bonus" \
-      '{host:$host, js_file:$js, finding_type:$ft, match_type:$mt, bonus:$bonus,
+    local host="$1" js="$2" ftype="$3" mtype="$4" bonus="$5" sample="${6:-}"
+    jq -nc --arg host "$host" --arg js "$js" --arg ft "$ftype" --arg mt "$mtype" \
+           --argjson bonus "$bonus" --arg sample "$sample" \
+      '{host:$host, js_file:$js, finding_type:$ft, match_type:$mt, bonus:$bonus, sample:$sample,
         at:(now|strftime("%Y-%m-%dT%H:%M:%SZ"))}' >> "$findings_file"
   }
+  # Context-aware match: keep lines that contain the token, DROP lines that also
+  # contain an ignore/public-by-design marker, THEN extract the token. (Plain
+  # `grep -o | grep -v` checks only the extracted token, so line-context markers
+  # like apiKey / NEXT_PUBLIC_ never matched — they do now.)
+  _match_one() { grep -aE "$1" "$2" 2>/dev/null | grep -aviE "$ignore_re" | grep -aEo "$1" 2>/dev/null | head -1; }
   _scan_one() {
-    local host="$1" js_path="$2" js_url="$3" kind regex bonus hit
-    for spec in "aws_key|$aws_re|10" "google_key|$google_re|10" "private_key|$priv_key_re|10" "jwt|$jwt_re|10" "conn_string|$connstr_re|10"; do
-      kind="${spec%%|*}"; rest="${spec#*|}"; regex="${rest%|*}"; bonus="${rest##*|}"
-      hit="$(grep -aEo "$regex" "$js_path" 2>/dev/null | grep -aviE "$ignore_re" | head -1)"
-      [[ -n "$hit" ]] && _emit "$host" "$js_url" "secret" "$kind" "$bonus"
+    local host="$1" js_path="$2" js_url="$3" kind regex hit
+    # CONFIRMED secrets (bonus 10, mints js_secret_hit downstream)
+    for spec in "aws_key|$aws_re" "private_key|$priv_key_re" "conn_string|$connstr_re" \
+                "github_token|$github_re" "slack_token|$slack_re" "slack_webhook|$slackhook_re" \
+                "stripe_secret|$stripe_secret_re" "gitlab_pat|$gitlab_re" "sendgrid_key|$sendgrid_re" \
+                "npm_token|$npm_re" "twilio_key|$twilio_re" "mailgun_key|$mailgun_re"; do
+      kind="${spec%%|*}"; regex="${spec#*|}"
+      hit="$(_match_one "$regex" "$js_path")"
+      [[ -n "$hit" ]] && _emit "$host" "$js_url" "secret" "$kind" 10 "$(_redact "$hit")"
     done
-    if grep -aEo "$endpoint_re" "$js_path" 2>/dev/null | grep -aviE "$ignore_re" | head -1 >/dev/null; then
-      _emit "$host" "$js_url" "endpoint" "internal_endpoint" 5
+    # LEAD types (bonus 2, finding_type=secret_lead — NOT a confirmed secret)
+    for spec in "google_key|$google_key_re" "jwt|$jwt_re"; do
+      kind="${spec%%|*}"; regex="${spec#*|}"
+      hit="$(_match_one "$regex" "$js_path")"
+      [[ -n "$hit" ]] && _emit "$host" "$js_url" "secret_lead" "$kind" 2 "$(_redact "$hit")"
+    done
+    if [[ -n "$(_match_one "$endpoint_re" "$js_path")" ]]; then
+      _emit "$host" "$js_url" "endpoint" "internal_endpoint" 5 ""
     fi
   }
 
