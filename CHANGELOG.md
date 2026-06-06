@@ -110,6 +110,19 @@ detector:
   on the next scheduled fresh-modules cycle with the new ruleset). The 4 stale ES
   `js_secret_hit=true` (google_key) self-heal on the next true_fresh re-scan.
 
+### PHASE 4 - Fixed: XSS verify was reflection-only → now requires break-out (recon_params.sh)
+`recon-params verify xss` labelled `[XSS CONFIRMED]` on bare canary reflection
+(`grep -qi d0k_recon`) — so a value reflected inside a JSON string (e.g. Shopify
+`utm_campaign`, inert) was mislabelled exploitable. Now:
+- Inject a break-out payload `'"></script><d0kxss>` and CONFIRM only if the unique
+  tag `<d0kxss>` survives **UNENCODED** in the response (real executable HTML
+  injection).
+- Reflection where the angle brackets are entity-encoded (or the marker only appears
+  in a JSON/encoded context) → `status="reflected-not-exploitable"` (LEAD) — logged
+  but NOT counted as a confirmed hit and NOT labelled CONFIRMED.
+- `verify_xss.jsonl` now carries `status` + `confirmed` (bool). Validated: raw tag →
+  confirmed; encoded / JSON-string reflection → lead; no reflection → no hit.
+
 ## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
 
 ### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)
