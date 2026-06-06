@@ -64,6 +64,29 @@ for the portscan lane:
   atlas P1→P3). **P0 739 → 738.** Snapshot:
   `state/phase1_portscan_snapshot_*.json`.
 
+### PHASE 2 - Fixed: scope --pays leak was stale data, not a program-level field
+- **Finding (lanes are correct).** Audited every output lane — fetch (recon_ctl
+  cmd_fetch), takeovers, nuclei, screenshot, digest, restale, fresh_modules,
+  portscan, dast, params — ALL filter on `triage_pays`, the **per-target
+  authoritative** field (recon_scope_db.sh per-target `pays`, line ~154, → scope TSV
+  → scope_check → triage_pays). **No lane uses program-level pays.** The scope TSV is
+  correct (`*.bpost.be` handle "dummy" = pays=false, in-scope VDP).
+- **Root cause of the leak:** STALE `triage_pays=true` on docs triage never rewrote
+  (dropped before writeback — same persistence class as PHASE 0). `recon-fetch --pays`
+  returned develop.bpost.be because its ES `triage_pays` was stale (last written
+  before the bpost FP fix).
+- **Data resync (authoritative, snapshot first).** Re-checked all 8,946 stale-pays
+  (not-rewritten) hosts against the scope DB; **769 were authoritatively pays=false**
+  (incl 624 program="dummy"/bpost) → flipped to `triage_pays=false`,
+  `triage_payout_tier=none`. The other ~8,177 are legitimately paying (dropped but
+  in-scope) — left untouched. Snapshot: `state/phase2_pays_snapshot_*.jsonl`.
+  `develop.bpost.be` now pays=false; program=dummy & pays=true: 624 → 0.
+- **Recurrence fix (triage.sh `demote_dropped_docs`).** The demotion-writeback now
+  also refreshes `triage_pays` / `triage_in_scope` / `triage_out_of_scope` /
+  `triage_payout_tier` from the FRESH enriched verdict for every dropped doc (absent
+  from the enriched set ⇒ out_of_scope ⇒ pays=false), so a doc can no longer retain a
+  stale paying verdict after it drops out of scope/score. Primitive guard unchanged.
+
 ## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
 
 ### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)
