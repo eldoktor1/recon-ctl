@@ -1324,7 +1324,7 @@ update_es_scores() {
 # so unscored/P3 docs are left alone and the write volume stays bounded.
 # =============================================================================
 demote_dropped_docs() {
-  local raw="$1" scored="$2"
+  local raw="$1" enriched="$2" scored="$3"
   [[ -s "$raw" ]] || return 0
   local dropped; dropped="$(mktemp)"
   comm -23 \
@@ -1333,12 +1333,25 @@ demote_dropped_docs() {
     > "$dropped"
   local n; n="$(wc -l < "$dropped" | tr -d ' ')"
   [[ "$n" -eq 0 ]] && { rm -f "$dropped"; log "demote_dropped_docs: no stale-priority dropped docs"; return 0; }
+  # PHASE 2: also refresh scope fields from the FRESH enriched verdict so dropped
+  # docs cannot retain a stale triage_pays/in_scope (root cause of recon-fetch
+  # --pays leaking non-paying VDP hosts like develop.bpost.be). Phase-2-dropped
+  # docs are present in the enriched set (authoritative scope); docs ABSENT from it
+  # were dropped at scope enrichment (hard_excluded / out_of_scope) or the floor
+  # (low-score out-of-scope) — default to pays=false / out_of_scope for those.
+  local smap; smap="$(mktemp)"
+  jq -sc 'map({key:.host, value:{pays:(.pays//false), in_scope:(.in_scope//false),
+              oos:(.out_of_scope//false), tier:(.payout_tier//"none")}}) | from_entries' \
+     "$enriched" > "$smap" 2>/dev/null || echo '{}' > "$smap"
   local body; body="$(mktemp)"
-  jq -Rc --arg idx "$INDEX_NAME" '
-    {"update":{"_index":$idx,"_id":.}},
-    {"script":{"lang":"painless","source":
-      "if (ctx._source.portscan_critical != 1 && ctx._source.bypass_confirmed != true && ctx._source.takeover_confirmed != true) { ctx._source.triage_priority = \"P3\"; ctx._source.triage_stale_reset = true; }"}}
+  jq -Rc --arg idx "$INDEX_NAME" --slurpfile S "$smap" '
+    . as $h | (($S[0] // {})[$h] // {pays:false,in_scope:false,oos:true,tier:"none"}) as $s |
+    {"update":{"_index":$idx,"_id":$h}},
+    {"script":{"lang":"painless",
+      "params":{"pays":$s.pays,"in_scope":$s.in_scope,"oos":$s.oos,"tier":$s.tier},
+      "source":"if (ctx._source.portscan_critical != 1 && ctx._source.bypass_confirmed != true && ctx._source.takeover_confirmed != true) { ctx._source.triage_priority = \"P3\"; ctx._source.triage_stale_reset = true; ctx._source.triage_pays = params.pays; ctx._source.triage_in_scope = params.in_scope; ctx._source.triage_out_of_scope = params.oos; ctx._source.triage_payout_tier = params.tier; }"}}
   ' "$dropped" > "$body"
+  rm -f "$smap"
   local chunkdir; chunkdir="$(mktemp -d)"; split -l 20000 "$body" "$chunkdir/c_"
   shopt -s nullglob
   local ok=0 fail=0
@@ -1648,9 +1661,10 @@ main() {
   generate_report "$scored" "$REPORT_OUT"
   update_es_scores "$scored"
   # Persist demotions for fetched docs dropped before writeback (ignored / UUID /
-  # low-score / out-of-scope) so they don't retain stale P0/P1 from a prior run.
+  # low-score / out-of-scope) so they don't retain stale P0/P1 or stale triage_pays
+  # from a prior run. Refreshes scope fields from the enriched verdict.
   # Primitive-safe (portscan_critical / bypass_confirmed / takeover_confirmed kept).
-  demote_dropped_docs "$raw" "$scored"
+  demote_dropped_docs "$raw" "$enriched2" "$scored"
   run_ai_review_layer "$scored"
 
   local total p0 p1 p2 elite high kev
