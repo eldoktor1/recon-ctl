@@ -87,6 +87,29 @@ for the portscan lane:
   from the enriched set ⇒ out_of_scope ⇒ pays=false), so a doc can no longer retain a
   stale paying verdict after it drops out of scope/score. Primitive guard unchanged.
 
+### PHASE 3 - Fixed: JS secret detector re-scoped to CONFIRMED vs LEAD (recon_fresh_modules.sh)
+A token-shaped string is not a secret. Of the current JS findings, **17/17 "secret"
+hits were `google_key`** (Google AIza browser keys — public-by-design). Re-scoped the
+detector:
+- **CONFIRMED secret** (finding_type=`secret`, mints `js_secret_hit`): `aws_key` AKIA,
+  `private_key`, `conn_string` (db creds) — kept — PLUS added high-confidence
+  server-token prefixes: GitHub `ghp_/github_pat_`, Slack `xox*` + webhooks, Stripe
+  `sk_live_/rk_live_`, GitLab `glpat-`, SendGrid `SG.`, npm `npm_`, Twilio `SK…`,
+  Mailgun.
+- **LEAD** (finding_type=`secret_lead`, does NOT mint `js_secret_hit`): `google_key`
+  (AIza), `jwt` (client JWTs are usually anon/public).
+- **Public-by-design excluded** (context-aware — new `_match_one` keeps line context
+  so markers actually fire): Stripe `pk_`, `googleusercontent.com` OAuth client_id,
+  `apiKey`/`publishableKey`/`anon_key`, and `NEXT_PUBLIC_`/`VITE_`/`REACT_APP_`/
+  `VUE_APP_` env prefixes.
+- **(c)** findings now store a redacted `sample` (`first6***last4`) + `match_type` for
+  auditability (was: boolean only).
+- **Projected:** confirmed-secret findings from the current corpus **17 → 0** (all 17
+  `google_key` → leads); real high-confidence credentials caught going forward.
+- **NOT bulk-applied:** re-scanning the JS corpus is target-facing — deferred (it runs
+  on the next scheduled fresh-modules cycle with the new ruleset). The 4 stale ES
+  `js_secret_hit=true` (google_key) self-heal on the next true_fresh re-scan.
+
 ## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
 
 ### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)
