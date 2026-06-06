@@ -123,7 +123,19 @@ detector:
 - `verify_xss.jsonl` now carries `status` + `confirmed` (bool). Validated: raw tag →
   confirmed; encoded / JSON-string reflection → lead; no reflection → no hit.
 
-## v2.8.1 - 2026-05-24 - Bulletproof full-stop + VPN leak guard + triage feed ACL fix
+### PHASE 5 - Fixed: params candidate starvation — bias to param-surface hosts (recon_params.sh)
+`collect` ran every 30 min but indexed ~0 because the score-sorted in-scope pool was
+full of API/staging/device hosts with no GET-parameter surface. cmd_collect candidate
+selection now:
+- **Excludes no-GET-param-surface host shapes** (API/RPC: `api`/`apis`/`graphql`/
+  `grpc`/`gql`; brokers/IoT: `mqtt`/`push`/`device`/`iot`/`broker`; mail/DNS:
+  `smtp`/`imap`/`pop`/`mx`/`ns`/`dns`) — these have no archive param-URLs and burn
+  GAU quota. Conservative `^name[.-]` anchor (keeps e.g. `apidocs.`, `pushsgp.`).
+- **Biases toward proven archive coverage:** floats hosts whose `root_domain` already
+  appears in the params catalog (`recon_params`, 130 covered roots) to the front of
+  the candidate list (score order preserved within groups). New roots still get
+  scanned, just after proven ones. Validated: exclusion + reorder logic in isolation;
+  takes effect next collect cycle (no target-facing re-run tonight).
 
 ### Fixed — recon-stop now FULLY stops everything (recon_ctl.sh cmd_stop)
 - The kill logic no longer gates on the pidfile. The old code printed "Not

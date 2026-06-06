@@ -129,10 +129,33 @@ cmd_collect() {
   #   - cdn-*.* / assets.* / static.* — CDN edge nodes
   #   - *.api.* where the subdomain itself starts with an API path fragment
   # These consume GAU quota and always return 0; skipping them saves rate limit.
+  # PHASE 5: also drop host shapes with no GET-parameter web surface — API/RPC
+  # endpoints (POST/JSON, no GET params), device/IoT/message brokers, and mail/DNS
+  # records. They have no archive param-URLs, index 0, and burn GAU quota.
   grep -vE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.' \
        "$WORK/cand_div.tsv" \
-  | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' > "$WORK/cand.tsv"
+  | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' \
+  | grep -vE '^(api|apis|graphql|grpc|gql|mqtt|push|device|devices|iot|broker|smtp|imap|pop3?|mx[0-9]*|ns[0-9]+|dns)[.-]' \
+  > "$WORK/cand.tsv"
   rm -f "$WORK/cand_div.tsv"
+
+  # PHASE 5: bias toward roots with PROVEN archive/param coverage. A root already in
+  # the params catalog has GAU/wayback history that yields param-URLs; a brand-new
+  # in-scope host may have none. Float hosts under proven roots to the front (new
+  # roots still get scanned, just after) — turns "any fresh in-scope host" into
+  # "hosts likely to actually produce a candidate". root_domain is a keyword field
+  # in the catalog (no .keyword subfield); graceful no-op if catalog unavailable.
+  local covered="$WORK/covered_roots.set"; : > "$covered"
+  es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d '{
+    "size":0,"aggs":{"r":{"terms":{"field":"root_domain","size":5000}}}}' 2>/dev/null \
+    | jq -r '.aggregations.r.buckets[]?.key // empty' 2>/dev/null | sort -u > "$covered" || true
+  if [[ -s "$covered" ]]; then
+    # stable sort: proven-root hosts (key 0) before the rest (key 1), score order kept
+    awk -F'\t' 'NR==FNR{c[$1]=1;next}{print (($3 in c)?0:1)"\t"$0}' "$covered" "$WORK/cand.tsv" \
+      | sort -t$'\t' -k1,1 -s | cut -f2- > "$WORK/cand.sorted" 2>/dev/null \
+      && mv "$WORK/cand.sorted" "$WORK/cand.tsv"
+    log "candidate bias: $(wc -l < "$covered") proven-coverage root(s) floated to front"
+  fi
 
   local picked=0 bulk="$WORK/bulk.ndjson"; : > "$bulk"
   local total_urls=0
