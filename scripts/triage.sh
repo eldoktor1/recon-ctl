@@ -167,7 +167,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -236,10 +236,14 @@ score_raw() {
   log "Scoring $total records across $cores workers"
 
   local now; now="$(date -u +%s)"
+  # PHASE 1(c): a portscan-confirmed-open port is only trusted for the freshness
+  # TTL; past it the result is STALE → LEAD (re-verify before it can exempt a host
+  # from the pattern_only clamp). Default 7d, matches the portscanner cooldown.
+  local ps_ttl_secs="${PORTSCAN_CONFIRM_TTL_SECS:-604800}"
 
   local pids=()
   for _chunk in "$tmpdir"/chunk_*; do
-    jq -c --argjson NOW "$now" '
+    jq -c --argjson NOW "$now" --argjson PSTTL "$ps_ttl_secs" '
     def has_tech($p):     (.tech // []) | map(ascii_downcase) | any(test($p; "i"));
     def title_match($p):  (.title // "") | ascii_downcase | test($p; "i");
     def host_match($p):   (.host // "") | test($p; "i");
@@ -572,7 +576,14 @@ score_raw() {
     # host can carry .port=6379 while nmap shows 0/10 open. recon_portscan.sh writes
     # the confirmed-open set to portscan_open_ports[] (integers). Gate the exemption
     # on confirmed-open membership, not the bare number.
-    (((.portscan_open_ports // []) | index($hostport)) != null) as $port_confirmed_open |
+    # PHASE 1(c) — the confirmation must also be FRESH (portscan_at within PSTTL) and
+    # NOT flagged portscan_suspect (CDN-range / artifact scan). Stale or suspect →
+    # treat as unconfirmed (LEAD), so it cannot exempt the host from pattern_only.
+    ((.portscan_at // "") | (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // 0) as $ps_epoch |
+    ($ps_epoch > 0 and (($NOW - $ps_epoch) < $PSTTL)) as $ps_fresh |
+    ((.portscan_suspect // false) != true) as $ps_not_suspect |
+    ((((.portscan_open_ports // []) | index($hostport)) != null)
+      and $ps_fresh and $ps_not_suspect) as $port_confirmed_open |
     ($port_is_critical and $port_confirmed_open) as $has_critical_port |
     ((($strengths | any(. == "confirmed")) or $has_critical_port) | not) as $pattern_only |
 

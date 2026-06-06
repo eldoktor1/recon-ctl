@@ -179,6 +179,44 @@ PORTSCAN_MAX_RUNTIME="${PORTSCAN_MAX_RUNTIME:-1800}" # hard cap: 30 min
 
 es_curl() { curl -sS -m30 "${ES_AUTH[@]}" "$@"; }
 
+# ── PHASE 1: CDN-range guard + artifact cap ──────────────────────────────────
+# A connect-scan against a CDN edge "succeeds" on every port — the edge ACKs the
+# SYN regardless of any backend service — so naabu "opens" behind a CDN are
+# phantom (observed: sandbox-api.fireblocks.io, 47 "open" ports incl Docker/
+# Redis/Kafka, all Cloudflare). We already skip cdn_name-tagged hosts at
+# targeting and filter shared edges by IP-dedup + httpx -cdn, but a single-host
+# CDN alias whose cdn_name was never set slips through. Hard guard at EMIT: never
+# emit portscan_critical for a CDN-range IP, and treat a flood of "critical"
+# opens on one host as a scan artifact. Suspect hosts are recorded
+# portscan_suspect=true with empty portscan_open_ports so triage never scores
+# their phantom ports as confirmed-open.
+PORTSCAN_CRIT_ARTIFACT_MAX="${PORTSCAN_CRIT_ARTIFACT_MAX:-6}"  # >N critical "opens" on one host = artifact
+CDN_CIDRS=(
+  # Cloudflare
+  173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
+  108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17
+  162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+  # Fastly
+  151.101.0.0/16 199.232.0.0/16 23.235.32.0/20 43.249.72.0/22 103.244.50.0/24
+  104.156.80.0/20 146.75.0.0/16 167.82.0.0/17 185.31.16.0/22 199.27.72.0/21
+  # Akamai (major blocks)
+  23.32.0.0/11 23.192.0.0/11 104.64.0.0/10 184.24.0.0/13 2.16.0.0/13
+  95.100.0.0/15 96.16.0.0/15 88.221.0.0/16 92.122.0.0/15
+)
+_ip2int() { local IFS=. a b c d; read -r a b c d <<<"$1"; [[ -n "${d:-}" ]] || { echo 0; return; }; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+ip_in_cdn() {
+  local ip="$1" cidr base bits ipi basei mask
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  ipi="$(_ip2int "$ip")"
+  for cidr in "${CDN_CIDRS[@]}"; do
+    base="${cidr%/*}"; bits="${cidr#*/}"
+    basei="$(_ip2int "$base")"
+    mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+    (( (ipi & mask) == (basei & mask) )) && return 0
+  done
+  return 1
+}
+
 # discord_alert: uses discord_hook + discord_post from recon_net.sh.
 # Reads webhook from ~/.recon_discord_ports (per-channel pattern).
 # Rate-limit aware (429 retry), 5-attempt delivery guarantee.
@@ -400,15 +438,36 @@ for host in "${!HOST_PORTS[@]}"; do
   # Build sorted unique port array
   mapfile -t port_arr < <(printf '%s' "$ports_str" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un)
   is_critical="${HOST_CRITICAL[$host]:-0}"
-  [[ "$is_critical" == "1" ]] && critical_hosts=$((critical_hosts + 1))
   tier="${HOST_TIER[$host]:-althttp}"
+
+  # ── PHASE 1 guards: CDN-range IP + critical-port artifact cap ──────────────
+  # Either condition means the "opens" are phantom (CDN edge ACK / scan flood),
+  # so we suppress portscan_critical, withhold the score bonus, and mark the host
+  # portscan_suspect. portscan_open_ports is written empty (audit copy kept in
+  # portscan_suspect_ports) so triage's has_critical_port never trusts them.
+  port_suspect=0; suspect_reason=""
+  host_ip="${HOST_IP[$host]:-}"
+  crit_open=0
+  for _p in "${port_arr[@]}"; do [[ "$CRITICAL_SET" == *" $_p "* ]] && crit_open=$((crit_open + 1)); done
+  if [[ -n "$host_ip" ]] && ip_in_cdn "$host_ip"; then
+    port_suspect=1; suspect_reason="cdn-range-ip:$host_ip"
+    log "  PHASE1 CDN-guard: $host ($host_ip in CDN range) — edge ACKs all ports, suppressing portscan_critical"
+  elif (( crit_open > PORTSCAN_CRIT_ARTIFACT_MAX )); then
+    port_suspect=1; suspect_reason="artifact:${crit_open}-critical-ports"
+    log "  PHASE1 artifact-cap: $host has $crit_open critical ports 'open' (>$PORTSCAN_CRIT_ARTIFACT_MAX) — scan artifact, suppressing"
+  fi
+  if [[ "$port_suspect" == "1" ]]; then
+    is_critical=0; tier="suspect"
+  fi
+  [[ "$is_critical" == "1" ]] && critical_hosts=$((critical_hosts + 1))
 
   log "  $host — open ports: ${port_arr[*]} [tier=$tier]"
 
-  # Score bonus: critical=+12, admin=+6, althttp=+3
+  # Score bonus: critical=+12, admin=+6, althttp=+3, suspect=0
   score_bonus=3
   [[ "$tier" == "admin" ]] && score_bonus=6
   [[ "$tier" == "critical" ]] && score_bonus=12
+  [[ "$tier" == "suspect" ]] && score_bonus=0
 
   # Build port signal array for triage_signals
   port_sigs="$(printf '%s\n' "${port_arr[@]}" | jq -Rs 'split("\n") | map(select(. != "") | "port:" + .) | . + ["portscan:open"]')"
@@ -416,19 +475,30 @@ for host in "${!HOST_PORTS[@]}"; do
   # Build ES open ports array
   ports_json="$(printf '%s\n' "${port_arr[@]}" | jq -Rs 'split("\n") | map(select(. != "") | tonumber)')"
 
-  # Painless script: update portscan fields + append port signals to triage_signals + boost score
+  # Painless script: update portscan fields + append port signals to triage_signals + boost score.
+  # PHASE 1: suspect hosts (CDN-range / artifact) get portscan_critical=0, empty
+  # portscan_open_ports (so triage never trusts the phantom opens), an audit copy in
+  # portscan_suspect_ports, and NO score bump / NO P0 promotion.
   painless="
     ctx._source.portscan_at = params.now;
-    ctx._source.portscan_open_ports = params.ports;
-    ctx._source.portscan_critical = params.critical;
-    if (ctx._source.triage_signals == null) ctx._source.triage_signals = new ArrayList();
-    for (sig in params.port_sigs) {
-      if (!ctx._source.triage_signals.contains(sig)) ctx._source.triage_signals.add(sig);
+    ctx._source.portscan_suspect = (params.suspect == 1);
+    if (params.suspect == 1) {
+      ctx._source.portscan_open_ports = new ArrayList();
+      ctx._source.portscan_critical = 0;
+      ctx._source.portscan_suspect_ports = params.ports;
+      ctx._source.portscan_suspect_reason = params.reason;
+    } else {
+      ctx._source.portscan_open_ports = params.ports;
+      ctx._source.portscan_critical = params.critical;
+      if (ctx._source.triage_signals == null) ctx._source.triage_signals = new ArrayList();
+      for (sig in params.port_sigs) {
+        if (!ctx._source.triage_signals.contains(sig)) ctx._source.triage_signals.add(sig);
+      }
+      if (ctx._source.triage_score != null) ctx._source.triage_score += params.bonus;
+      // Promote priority if score now qualifies
+      if (ctx._source.triage_score >= 15) ctx._source.triage_priority = 'P0';
+      else if (ctx._source.triage_score >= 8) ctx._source.triage_priority = 'P1';
     }
-    if (ctx._source.triage_score != null) ctx._source.triage_score += params.bonus;
-    // Promote priority if score now qualifies
-    if (ctx._source.triage_score >= 15) ctx._source.triage_priority = 'P0';
-    else if (ctx._source.triage_score >= 8) ctx._source.triage_priority = 'P1';
   "
 
   update_body="$(jq -nc \
@@ -437,9 +507,11 @@ for host in "${!HOST_PORTS[@]}"; do
     --argjson critical "${is_critical}" \
     --argjson port_sigs "$port_sigs" \
     --argjson bonus "$score_bonus" \
+    --argjson suspect "$port_suspect" \
+    --arg reason "$suspect_reason" \
     --arg script "$painless" '{
       script: {lang:"painless", source:$script,
-        params:{now:$now, ports:$ports, critical:$critical, port_sigs:$port_sigs, bonus:$bonus}}
+        params:{now:$now, ports:$ports, critical:$critical, port_sigs:$port_sigs, bonus:$bonus, suspect:$suspect, reason:$reason}}
     }')"
 
   update_result="$(es_curl -H 'Content-Type: application/json' \
