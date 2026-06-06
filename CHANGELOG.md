@@ -107,8 +107,12 @@ detector:
 - **Projected:** confirmed-secret findings from the current corpus **17 → 0** (all 17
   `google_key` → leads); real high-confidence credentials caught going forward.
 - **NOT bulk-applied:** re-scanning the JS corpus is target-facing — deferred (it runs
-  on the next scheduled fresh-modules cycle with the new ruleset). The 4 stale ES
-  `js_secret_hit=true` (google_key) self-heal on the next true_fresh re-scan.
+  on the next scheduled fresh-modules cycle with the new ruleset).
+- **Live-verified + backfill (2026-06-06):** post-commit scans confirmed 0 google_key/jwt
+  written as `secret` and the new `sample` field present. `findings.jsonl` is append-only,
+  so 17 pre-commit google_key(11)/jwt(6) `secret` lines persisted and kept
+  `js_secret_hit=5` alive — downgraded those to `secret_lead` and cleared the 5 stale ES
+  flags (`js_secret_hit` 5→0). Snapshot: `state/phase3_findings_snapshot_*.jsonl`.
 
 ### PHASE 4 - Fixed: XSS verify was reflection-only → now requires break-out (recon_params.sh)
 `recon-params verify xss` labelled `[XSS CONFIRMED]` on bare canary reflection
