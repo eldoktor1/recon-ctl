@@ -215,7 +215,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_review|ai_analyze|ai_monitor|ai_idor|jsintel|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_review|ai_analyze|ai_monitor|ai_idor|jsintel|nday|ghleaks|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
