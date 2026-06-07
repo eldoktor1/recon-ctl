@@ -1,5 +1,26 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.5.0 - 2026-06-07 - Anti-burn rate limiting + Claude MONITOR role (unattended-ready)
+
+Hardening so active verification can run unattended without getting the egress IP banned,
+plus Claude's third role — oversight. Claude now spans the whole pipeline: ANALYZE (aim the
+net) → VERIFY + safe probe (confirm) → MONITOR (oversee).
+
+- **Anti-burn rate limiting** (`recon_safe_probe.sh`) — the article's politeness rule, in
+  code: min-gap + jitter between probes, per-host and global rolling-window caps, a host
+  COOLDOWN on a 429/403/503 (back off the moment a target pushes back), and a global
+  CIRCUIT-BREAKER that pauses ALL probing after repeated blocks. All `PROBE_*` tunable.
+  Verified: per-host cap, min-gap timing, cooldown-on-403, global breaker all fire.
+- **Claude MONITOR** (`recon_ai_monitor.sh`, hourly daemon loop) — read-only reasoning over
+  LOCAL telemetry (burn signals, verdict precision, failures/halts, daemon errors, VPN);
+  emits a skeptical health + burn_risk + guidance card to #ops and `recon-ai monitor`,
+  persisted to `~/recon/state/ai_monitor_latest.json`. Issues NO target traffic. Primary
+  job: catch "getting burned" early. Registered in the daemon; added to stop LOOP_PAT.
+- Full pre-flight audit passed: python+bash compile/syntax; invariant that the VERIFY agent
+  never gets Bash (only Read/empty tools); probe guard battery (metadata/POST/file/
+  out-of-scope/vpn_down all refused) re-verified post-rewrite; vpn_down fail-closed in every
+  target-facing loop; no secrets in git.
+
 ## v3.4.0 - 2026-06-07 - Active verification: Claude runs safe tests (harness-mediated)
 
 VERIFY can now ACTIVELY TEST a finding, not just reason over stored evidence — "Claude can
