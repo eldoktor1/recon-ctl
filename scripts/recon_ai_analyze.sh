@@ -98,7 +98,7 @@ resp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null)" || { warn "ES que
 assets="$(printf '%s' "$resp" | jq -c '[.hits.hits[]._source]' 2>/dev/null)"
 n="$(printf '%s' "$assets" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no un-analysed in-scope assets due this cycle"; exit 0; }
-log "analysing $n in-scope asset(s) with Claude ($CLAUDE_ANALYZE_MODEL, Max headless), chunk=$ANALYZE_CHUNK"
+log "🧠 ─── CLAUDE ANALYZE ─── $n in-scope asset(s) · model=$CLAUDE_ANALYZE_MODEL (Max, no API) · chunk=$ANALYZE_CHUNK ───"
 
 analyzed=0; worth=0; gated=0; leads=0
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -193,10 +193,12 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
       if [[ -n "$gc" ]]; then
         doc="$(printf '%s' "$doc" | jq -c --arg gc "$gc" \
                 '. + {triage_gate_state:"candidate", triage_gate_class:$gc, triage_gate_attempts:0}')"
-        gated=$((gated+1))
+        gated=$((gated+1)); route="⚙️ →gate:$gc"
       else
-        leads=$((leads+1))   # sqli/ssrf/idor/logic -> operator lead only (recon-ai analysis)
+        leads=$((leads+1)); route="📋 →lead(human)"   # sqli/ssrf/idor/logic -> operator lead only
       fi
+      log "   🎯 worth $host · int=$iv · $cls · $route"
+      log "        ↳ 💬 $why"
     fi
     bulk+="$(jq -nc --arg id "$host" --arg idx "$INDEX_NAME" '{update:{_id:$id,_index:$idx}}')"$'\n'
     bulk+="$(jq -nc --argjson d "$doc" '{doc:$d}')"$'\n'
@@ -205,7 +207,7 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
   if [[ -n "$bulk" ]]; then
     es "$ES_URL/_bulk" --data-binary "$bulk" >/dev/null 2>&1 || warn "chunk $k: ES bulk writeback failed"
   fi
-  log "chunk $((k+1))/$ci: analysed=$m worth-so-far=$worth gated=$gated leads=$leads"
+  log "   · chunk $((k+1))/$ci done ($m assets) · running: 🎯$worth worth ⚙️$gated gate 📋$leads lead"
 done
 
-log "ai-analyze done — analysed=$analyzed worth=$worth gate-candidates=$gated operator-leads=$leads"
+log "🧠 analyze done · 🎯 $worth worth · ⚙️ $gated gate-candidates · 📋 $leads operator-leads  (of $analyzed analysed)"

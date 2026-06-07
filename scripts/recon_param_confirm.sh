@@ -61,7 +61,7 @@ for cls in $PC_CLASSES; do
   mapfile -t urls < <(printf '%s' "$resp" | jq -r '.hits.hits[]._source.url // empty' 2>/dev/null \
                       | awk 'NF && !seen[$0]++' | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$PC_BATCH")
   [[ "${#urls[@]}" -gt 0 ]] || { log "$cls: no fresh candidates"; continue; }
-  log "$cls: confirming ${#urls[@]} candidate param-URL(s)"
+  log "🧪 ─── PARAM CONFIRM [$cls] ─── ${#urls[@]} candidate param-URL(s) · differential probe ───"
   for url in "${urls[@]}"; do
     [[ -z "$url" ]] && continue
     [[ -f "$STATE_DIR/vpn_down" ]] && break
@@ -78,9 +78,9 @@ for cls in $PC_CLASSES; do
     es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --arg c "$cls" --argjson e "${ev:-{}}" \
         '{doc:{triage_gate_state:"confirmed", triage_gate_class:$c, triage_gate_evidence:$e}}')" >/dev/null 2>&1 || true
     confirmed_total=$((confirmed_total+1))
-    log "  CONFIRMED $cls: $host  ($(printf '%s' "$out" | jq -r '.param // "?"'))"
+    log "   💥 ${cls} CONFIRMED · $host · param=$(printf '%s' "$out" | jq -r '.param // "?"') → SQLite → verify"
   done
 done
 
 tail -n 8000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
-log "param-confirm done — tested=$tested_total confirmed=$confirmed_total"
+log "🧪 param-confirm done · 💥 $confirmed_total confirmed / $tested_total tested"

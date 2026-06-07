@@ -57,7 +57,7 @@ timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK" 
 pending="$(V3_DB="$V3_DB" python3 "$STATE_PY" ai-pending "$AI_REVIEW_BATCH" 2>/dev/null)"
 n="$(printf '%s' "$pending" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no confirmed findings pending validation"; exit 0; }
-log "validating $n confirmed finding(s) with Claude ($CLAUDE_MODEL, Max headless)"
+log "🧠 ─── CLAUDE VERIFY ─── $n confirmed finding(s) · model=$CLAUDE_MODEL (Max, no API) ───"
 
 _prompt() {  # finding-json + kb-context -> adversarial validation prompt
   local f="$1" kb="$2"
@@ -142,8 +142,10 @@ while IFS= read -r f; do
         '{content:("**"+$t+"**\n`"+$h+"`  ["+$vc+"]  conf="+$c+"  ("+$m+")\n"+$r+"\n→ APPROVE / DISMISS / INVESTIGATE — human-gated, never auto-submitted")}')" >/dev/null 2>&1 || true
     fi
   fi
-  log "  $host [$fid] -> $v (conf=$c, $model_used) $r"
+  case "$v" in real) vi="🟢 REAL " ;; fp) vi="🔴 FP   " ;; needs-human) vi="🟡 HUMAN" ;; *) vi="·   ?  " ;; esac
+  log "   $vi $host · conf=$c · $model_used"
+  log "        ↳ 💬 $r"
   reviewed=$((reviewed+1)); [[ "$v" == real ]] && real=$((real+1)); [[ "$v" == fp ]] && fp=$((fp+1)); [[ "$v" == needs-human ]] && human=$((human+1))
 done < <(printf '%s' "$pending" | jq -c '.[]' 2>/dev/null)
 
-log "ai-review done — reviewed=$reviewed real=$real fp=$fp needs-human=$human escalated=$escalated"
+log "🧠 verify done · 🟢 $real real · 🔴 $fp fp · 🟡 $human human · ↑ $escalated escalated  (of $reviewed)"
