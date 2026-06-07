@@ -58,6 +58,18 @@ discord_hook() {
   done
 }
 
+# Universal CONFIRMATION bridge → v3 SQLite findings.db so the Claude VERIFY layer
+# (recon_ai_review.sh) adversarially FP-checks EVERY confirmed finding, from EVERY lane
+# (gate, xss, param, takeover, bypass, portscan) — nothing reaches the human un-verified.
+# Args: host url program signal_class vuln_class score confidence evidence_json
+# Best-effort + non-fatal; lanes keep their own fast pings (e.g. #takeovers) regardless.
+db_confirm() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local _sp="${STATE_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../v3/state.py}"
+  [[ -f "$_sp" ]] || return 0
+  V3_DB="${V3_DB:-$HOME/recon/v3/findings.db}" python3 "$_sp" record-confirmed "$@" >/dev/null 2>&1 || true
+}
+
 # -----------------------------------------------------------------------------
 # Browser-like HTTP helpers (v2.5)
 # random_user_agent: prints one UA from $UA_FILE (one per line).

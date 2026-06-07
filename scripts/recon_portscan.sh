@@ -518,6 +518,15 @@ for host in "${!HOST_PORTS[@]}"; do
     -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
     -d "$update_body" 2>/dev/null)"
 
+  # Everything gets verified: a CONFIRMED-open critical port (not a CDN/artifact suspect)
+  # routes to Claude VERIFY too — it adversarially kills the documented portscan FPs
+  # (CDN-fronted ACKs, >6-port scan artifacts) before they reach #review.
+  if [[ "${port_suspect:-0}" -eq 0 && "${is_critical:-0}" -gt 0 ]]; then
+    db_confirm "$host" "https://$host" "" "portscan" "critical-port" "15" "0.85" \
+      "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" \
+          '{probe:"portscan-confirmed-open", open_ports:$p, critical:$c}' 2>/dev/null)"
+  fi
+
   if ! printf '%s' "$update_result" | grep -q '"result"'; then
     warn "ES update failed for $host: $update_result"
   fi

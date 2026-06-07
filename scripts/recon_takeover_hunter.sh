@@ -478,6 +478,14 @@ es_tag_takeover() {
     -d "$payload" >/dev/null 2>&1 || true
 
   log "  ES tagged: $host ($svc) → takeover_confirmed=true"
+
+  # Route to Claude VERIFY too (everything gets verified). The #takeovers fast-ping
+  # is unchanged (first-blood speed); this adds the adversarial FP check (e.g. dangling
+  # CNAME to a LIVE ELB) → reaches #review only when Claude agrees it's real.
+  local _cf=0.9; case "$confidence" in *CRITICAL*) _cf=0.95 ;; *MEDIUM*) _cf=0.8 ;; esac
+  db_confirm "$host" "https://$host" "" "takeover" "takeover" "15" "$_cf" \
+    "$(jq -nc --arg s "$svc" --arg c "$cname" --arg cf "$confidence" \
+        '{probe:"takeover-multistage", service:$s, cname:$c, confidence:$cf}' 2>/dev/null)"
 }
 
 # =============================================================================
