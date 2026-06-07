@@ -38,14 +38,22 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 NETRC="${NETRC:-$HOME/.recon_es_netrc}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
-CLAUDE_ANALYZE_MODEL="${CLAUDE_ANALYZE_MODEL:-haiku}"   # bulk/cheap; match model to task
+CLAUDE_ANALYZE_MODEL="${CLAUDE_ANALYZE_MODEL:-haiku}"          # bulk/cheap default
+CLAUDE_ANALYZE_MODEL_HI="${CLAUDE_ANALYZE_MODEL_HI:-sonnet}"  # high-value assets get the stronger model
+ANALYZE_HI_SCORE="${ANALYZE_HI_SCORE:-60}"                    # a chunk whose top triage_score >= this -> HI model
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-120}"
 ANALYZE_BATCH="${ANALYZE_BATCH:-30}"        # assets per cycle (quota-bounded)
 ANALYZE_CHUNK="${ANALYZE_CHUNK:-10}"        # assets per Claude call
 ANALYZE_TTL="${ANALYZE_TTL:-14d}"           # re-analyse cadence (ES date math)
 KB_CONTEXT="${KB_CONTEXT:-3}"               # prior lessons injected per asset
 
+# schema-validated structured output (CLI -> .structured_output; no text scraping)
+# NOTE: --json-schema root MUST be an object (the API wraps it as a tool input_schema);
+# a top-level array 400s. So the per-asset verdicts live under an "assets" array.
+ANALYZE_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"assets":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"host":{"type":"string"},"worth":{"type":"boolean"},"interest":{"type":"number","minimum":0,"maximum":1},"vuln_class":{"type":"string"},"reason":{"type":"string"}},"required":["host","worth","interest","vuln_class","reason"]}}},"required":["assets"]}'
+
 es() { curl -fsS -m 30 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
+_ge() { awk "BEGIN{exit !(($1)>=($2))}"; }   # float >= (exit 0 if $1>=$2)
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/ai_analyze.lock"; flock -n 9 || { warn "ai-analyze already running"; exit 0; }
@@ -98,7 +106,7 @@ resp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null)" || { warn "ES que
 assets="$(printf '%s' "$resp" | jq -c '[.hits.hits[]._source]' 2>/dev/null)"
 n="$(printf '%s' "$assets" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no un-analysed in-scope assets due this cycle"; exit 0; }
-log "🧠 ─── CLAUDE ANALYZE ─── $n in-scope asset(s) · model=$CLAUDE_ANALYZE_MODEL (Max, no API) · chunk=$ANALYZE_CHUNK ───"
+log "🧠 ─── CLAUDE ANALYZE ─── $n in-scope asset(s) · model=$CLAUDE_ANALYZE_MODEL→$CLAUDE_ANALYZE_MODEL_HI@score≥$ANALYZE_HI_SCORE (Max, no API) · chunk=$ANALYZE_CHUNK ───"
 
 analyzed=0; worth=0; gated=0; leads=0
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -110,6 +118,9 @@ for ((k=0; k<ci; k++)); do
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
   chunk="$(printf '%s' "$chunks" | jq -c ".[$k]")"
   m="$(printf '%s' "$chunk" | jq 'length')"
+  # model tiering: a chunk holding a high-value asset is judged by the stronger model
+  cmax="$(printf '%s' "$chunk" | jq '[.[].triage_score // 0]|max' 2>/dev/null || echo 0)"
+  if _ge "${cmax:-0}" "$ANALYZE_HI_SCORE"; then mdl="$CLAUDE_ANALYZE_MODEL_HI"; else mdl="$CLAUDE_ANALYZE_MODEL"; fi
 
   # build the asset list + per-asset KB context for the prompt
   asset_lines=""; kb_lines=""
@@ -151,15 +162,18 @@ ${kb_lines:-  (none yet)}
 ASSETS:
 $asset_lines
 
-Output ONLY a JSON array, one object per asset IN THE SAME ORDER, no prose/markdown:
-[{"host":"...","worth":true,"interest":0.0,"vuln_class":"...","reason":"one sentence"}]
+Output ONLY a JSON object {"assets":[ ... ]} with one element per asset IN THE SAME
+ORDER, no prose/markdown:
+{"assets":[{"host":"...","worth":true,"interest":0.0,"vuln_class":"...","reason":"one sentence"}]}
 EOF
 )"
 
-  out="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$CLAUDE_ANALYZE_MODEL" --output-format json </dev/null 2>/dev/null \
-         | jq -r '.result // empty' 2>/dev/null)"
-  # robust: parse the first JSON array out of Claude's text (handles fences / stray prose / newlines)
-  arr="$(printf '%s' "$out" | python3 -c 'import sys,json,re
+  out="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$mdl" --tools "" \
+         --no-session-persistence --json-schema "$ANALYZE_SCHEMA" --output-format json </dev/null 2>/dev/null)"
+  # schema-validated structured output (no scraping); fall back to text-array parse on a miss
+  arr="$(printf '%s' "$out" | jq -c '.structured_output.assets // empty' 2>/dev/null)"
+  if [[ -z "$arr" || "$arr" == "null" ]]; then
+    arr="$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null | python3 -c 'import sys,json,re
 t=sys.stdin.read().strip()
 t=re.sub(r"^```[a-zA-Z]*","",t).strip().strip("`").strip()
 v=None
@@ -170,6 +184,7 @@ except Exception:
         try: v=json.loads(m.group(0))
         except Exception: v=None
 print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
+  fi
   vc="$(printf '%s' "$arr" | jq 'length' 2>/dev/null || echo 0)"
   [[ "${vc:-0}" -gt 0 ]] || { warn "chunk $k: no parseable verdicts — skipping"; continue; }
 
@@ -207,7 +222,7 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
   if [[ -n "$bulk" ]]; then
     es "$ES_URL/_bulk" --data-binary "$bulk" >/dev/null 2>&1 || warn "chunk $k: ES bulk writeback failed"
   fi
-  log "   · chunk $((k+1))/$ci done ($m assets) · running: 🎯$worth worth ⚙️$gated gate 📋$leads lead"
+  log "   · chunk $((k+1))/$ci done ($m assets · $mdl) · running: 🎯$worth worth ⚙️$gated gate 📋$leads lead"
 done
 
 log "🧠 analyze done · 🎯 $worth worth · ⚙️ $gated gate-candidates · 📋 $leads operator-leads  (of $analyzed analysed)"
