@@ -505,6 +505,15 @@ AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >/dev/null 2>&1 || true; }
 
+# ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
+# Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
+# "detection != exploitation" for the XSS class. TARGET-FACING -> d0k (Playwright
+# cache in $HOME) and VPN-gated (the loop pauses on vpn_down). Confirmed -> SQLite
+# -> Claude verify -> #review. Unauthenticated, marker-only, non-destructive.
+XSS_CONFIRM_SCRIPT="${XSS_CONFIRM_SCRIPT:-$(script_path recon_xss_confirm.sh)}"
+XSS_CONFIRM_INTERVAL="${XSS_CONFIRM_INTERVAL:-3600}"
+run_xss_confirm() { [[ -f "$XSS_CONFIRM_SCRIPT" ]] && bash "$XSS_CONFIRM_SCRIPT" >/dev/null 2>&1 || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -629,6 +638,7 @@ run_discord_bot() {
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
+  supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
