@@ -3,6 +3,27 @@
 Reference for every session. Established through a full session of manual
 verification. Keep it tight; update it when a principle changes.
 
+## THE MOTTO: be UNIQUE, or get duplicated (v3.7)
+The operator is part-time (evenings) vs full-time hunters. Running what everyone runs —
+`subfinder | httpx | nuclei-defaults` on saturated programs — finds what everyone finds =
+**duplicates = 0 reward** (proven: our only submission was a real P2 marked dup). Research
+of top earners / XBOW / AI hunters says the edge is: **go where the crowd doesn't, use
+Claude's *understanding* where commodity tools are blind, validate with a real PoC, be
+first to fresh surface.** Every new lane must answer "how is this not what everyone runs?"
+The UNIQUE pillars (all additive — nothing that works was removed):
+- **JS-intel** (`recon_jsintel.sh`) — mine each host's JS for the HIDDEN API surface +
+  trufflehog `--only-verified` LIVE secrets (kills the 53%-FP token-shaped noise).
+- **IDOR/BAC money pillar** (`recon_ai_idor.sh`) — Claude reasons over that surface →
+  ranked broken-access-control/IDOR worklist with the 2-account test (the most-rewarded
+  class; reasoning only, human exploits with their own accounts).
+- **n-day racing** (`recon_nday.sh`) — Claude version-reasons KEV/CVE matches to KILL the
+  tech-class FP and surface only genuine in-range candidates, in the race window.
+- **GitHub leaks** (`recon_ghleaks.sh`) — code-search → trufflehog-verify live leaked
+  secrets (off-web surface most ignore).
+- **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
+  test + verified findings to submit. The output that fits a 9-5.
+Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
+
 ## Core principle: CONFIRMED vs LEAD
 Every signal is exactly one of:
 - **CONFIRMED** — an exploitable primitive was directly observed.

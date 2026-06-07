@@ -1,5 +1,31 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.7.0 - 2026-06-07 - Be UNIQUE: differentiated pillars (JS-intel, IDOR, n-day, GH-leaks, briefing)
+
+Hard pivot after an honest reckoning: the pipeline was a commodity dupe-factory (default
+nuclei on saturated programs) and its only submission was a dup. Researched how the top
+earners / XBOW / AI hunters actually win and rebuilt around the edge — go where the crowd
+doesn't, use Claude's understanding where tools are blind, be first. ADDITIVE: every
+existing working lane (takeover, injection confirmers, the Claude brain, discovery,
+js-scanner, …) kept; five unique pillars added.
+
+- **recon_jsintel.sh** — mine each host's JavaScript for the HIDDEN API surface (jsluice,
+  filtered) + verify LIVE secrets (trufflehog --only-verified; fixes our 53%-FP token noise).
+  Proven: 244 clean endpoints incl. admin actions from admin.indeedflex.com's JS.
+- **recon_ai_idor.sh** — the money pillar: Claude reasons over that surface → ranked
+  BAC/IDOR worklist with the exact two-account test. Proven: 10 ranked leads incl. critical
+  priv-esc on /admin/agency_shift_workers/bulk_update. (Reasoning only; human exploits.)
+- **recon_nday.sh** — n-day racing without the KEV false-positive: Claude version-reasons
+  CVE matches, dropping tech-class FPs (proven: killed 3/3), surfacing only in-range candidates.
+- **recon_ghleaks.sh** — GitHub-leak hunting: code-search → trufflehog-verify live secrets +
+  GitHub subdomain harvest. Token-gated.
+- **recon_briefing.sh** — the 6:30pm "TONIGHT" card: IDOR leads to test + validated findings
+  to submit (pulls real findings from the brain). Proven compile.
+- Fixes en route: IFS space-split bug that silently zeroed the param-confirm + DAST injection
+  lanes; gate nuclei -c concurrency so probes finish instead of timing out at 63%.
+- All wired as daemon loops (38 total, +5), recon-ctl stop pattern updated, CLAUDE.md motto.
+
+
 ## v3.6.0 - 2026-06-07 - Claude becomes the BRAIN: hard gate + consensus panel + authored reports
 
 Claude was a bypassable filter at the edges. Now it owns the decisive path — the verdict,
