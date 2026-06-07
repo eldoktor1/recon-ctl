@@ -1,5 +1,56 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.2.0 - 2026-06-07 - Claude analysis layer, wide reliable multi-class net, clean ES
+
+Two Claude layers + a precise per-class confirmation net, all FP-gated. "Bigger net,
+more fish — without drowning in noise." Built with the pipeline maintenance-locked.
+
+**Claude as the reliability layer (both on Max, headless, no API key/spend):**
+- NEW `scripts/recon_ai_analyze.sh` — ANALYSIS agent (Haiku, bulk/cheap): reads in-scope+
+  paying assets (prioritised true-fresh→score, quota-bounded, TTL'd), decides worth /
+  interest / vuln-class, writes `claude_*` to ES, and flags evidence-gate candidates.
+  Conscious surface selection (not blanket scanning); feeds the gate → verify.
+- `recon_ai_review.sh` — VERIFY agent now: injects KB context (RAG-lite), escalates
+  ambiguous `needs-human` to opus, mirrors the verdict to ES (`claude_verdict/confidence/
+  reason/reviewed_at/verify_model`), records every outcome to the knowledge base, and
+  posts the human-decision card to **#review** on `real`/`needs-human` (fp silent).
+- `v3/state.py` — `knowledge_base` table + `kb_record`/`kb_lookup` (keyword RAG-lite, no
+  embedding dep); `umask 0o002` so the cross-user gate(reconrun)/agents(d0k) SQLite
+  writes stop hitting "readonly database".
+- `triage.sh` — Claude prioritisation bonus alongside true_fresh (`real` +8 & clamp-
+  exempt, `fp` −12 suppress, `worth` interest-scaled). Validated on live data.
+
+**Wide reliable multi-class confirmation (each SAFE: unauth, non-destructive):**
+- XSS — browser marker EXECUTION (`tools/xss_confirm_worker.py`, Playwright); offline-validated.
+- SSTI / open-redirect / SQLi — HTTP differential (`tools/param_confirm_worker.py`:
+  `{{a*b}}`→product / `Location`→canary / error-diff on `'` vs `''`, no data harvest);
+  driven by `recon_param_confirm.sh` over the params catalog. Offline-validated.
+- GraphQL / Swagger-OpenAPI — nuclei detection in the evidence gate.
+- SSRF / XXE — gate OOB probe via interactsh (projectdiscovery); callback = definitive.
+- IDOR / LFI / RCE — operator-LEAD only (hard line). Claude routes each class
+  (`map_gate_class`); pattern-match = LEAD, primitive firing = CONFIRMED; all flow
+  through Claude verify (the adversarial FP filter) → #review.
+
+**Params net reliability** — was covering 0.05% (178/342k hosts), erratic:
+- `recon_params.sh` per-host crawl parallelised (`PARAM_PARALLEL=4`), hosts/cycle 10→30,
+  pool 400→1200, `waybackurls` gau fallback; per-host rate-limits + jitter preserved.
+  ~480→~3600 host/day ceiling — feeds the confirmers instead of starving them.
+
+**Clean ES (production)** — `recon_alive` reindexed into clean `recon_alive_v3` (alias-
+  swapped; original kept 7d as `recon_alive_old`): dropped 26 dead fields (11 Ollama
+  `ai_*` + 13 legacy orphans + 2 stray), retyped 3, 722460 docs verified. NEW
+  `scripts/recon_es_reindex.sh` (gated, count-verified). Bootstrap/validate templates +
+  `verify_mapping` updated to `claude_*`; index ops are alias-aware.
+
+**Discord v3** — verdict-driven, 9 channels → 4 (`#review`/`#takeovers`/`#ops`/`#digest`);
+  shared webhook dir; `observability.py` posts a compact daily `#digest`.
+
+**Ops/cleanup** — `recon-ctl maintenance on|off` lock (fail-closed start guard);
+  `ai-analyze`/`xss-confirm`/`param-confirm` daemon loops (d0k, VPN-gated where target-
+  facing); `cmd_stop` LOOP_PAT updated. Purged dead Ollama dashboard columns from
+  `recon_ctl` (cmd_top/fresh/view/leads) + removed unreachable `cmd_firstblood`; added
+  `recon-ai analysis`. Live integration of target-facing confirmers pending go-live.
+
 ## v3.1.0 - 2026-06-07 - Claude-Max validation agent becomes the AI layer; Ollama retired
 
 The AI layer is now **Claude on the Max plan, headless (`claude -p`), no API key/spend**
