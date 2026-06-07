@@ -494,7 +494,7 @@ run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 
 # Runs as d0k (NOT run_scanner) because Claude Code auth is per-user (~/.claude).
 AI_REVIEW_SCRIPT="${AI_REVIEW_SCRIPT:-$(script_path recon_ai_review.sh)}"
 AI_REVIEW_INTERVAL="${AI_REVIEW_INTERVAL:-1800}"
-run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >/dev/null 2>&1 || true; }
+run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- Claude-Max ANALYSIS agent (recon_ai_analyze.sh) ------------------------
 # Headless Claude (Haiku — bulk/cheap, match-model-to-task) reads in-scope assets,
@@ -503,7 +503,7 @@ run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >/dev
 # Runs as d0k (Claude auth per-user). Not target-facing (reasons over stored data).
 AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
-run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >/dev/null 2>&1 || true; }
+run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -512,7 +512,7 @@ run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >/
 # -> Claude verify -> #review. Unauthenticated, marker-only, non-destructive.
 XSS_CONFIRM_SCRIPT="${XSS_CONFIRM_SCRIPT:-$(script_path recon_xss_confirm.sh)}"
 XSS_CONFIRM_INTERVAL="${XSS_CONFIRM_INTERVAL:-3600}"
-run_xss_confirm() { [[ -f "$XSS_CONFIRM_SCRIPT" ]] && bash "$XSS_CONFIRM_SCRIPT" >/dev/null 2>&1 || true; }
+run_xss_confirm() { [[ -f "$XSS_CONFIRM_SCRIPT" ]] && bash "$XSS_CONFIRM_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- Param differential confirm (recon_param_confirm.sh) --------------------
 # SAFE differential confirmation for SSTI / open-redirect / SQLi across the params
@@ -520,7 +520,7 @@ run_xss_confirm() { [[ -f "$XSS_CONFIRM_SCRIPT" ]] && bash "$XSS_CONFIRM_SCRIPT"
 # Confirmed -> SQLite -> Claude verify -> #review. Widens the reliable net w/o exploitation.
 PARAM_CONFIRM_SCRIPT="${PARAM_CONFIRM_SCRIPT:-$(script_path recon_param_confirm.sh)}"
 PARAM_CONFIRM_INTERVAL="${PARAM_CONFIRM_INTERVAL:-3600}"
-run_param_confirm() { [[ -f "$PARAM_CONFIRM_SCRIPT" ]] && bash "$PARAM_CONFIRM_SCRIPT" >/dev/null 2>&1 || true; }
+run_param_confirm() { [[ -f "$PARAM_CONFIRM_SCRIPT" ]] && bash "$PARAM_CONFIRM_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through

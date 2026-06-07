@@ -55,7 +55,7 @@ touch "$SEEN"
 mapfile -t urls < <(tac "$LEADS" 2>/dev/null | jq -r '.url // empty' 2>/dev/null \
                     | awk 'NF && !seen[$0]++' | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$XSS_BATCH")
 [[ "${#urls[@]}" -gt 0 ]] || { log "no fresh reflected-xss leads (all tested)"; exit 0; }
-log "execution-confirming ${#urls[@]} reflected-xss lead(s) via headless Chromium"
+log "🧪 ─── XSS CONFIRM ─── ${#urls[@]} reflected lead(s) · headless Chromium marker-exec ───"
 
 confirmed=0; tested=0
 for url in "${urls[@]}"; do
@@ -77,9 +77,9 @@ for url in "${urls[@]}"; do
   es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --argjson e "${ev:-{}}" \
       '{doc:{triage_gate_state:"confirmed", triage_gate_class:"xss", triage_gate_evidence:$e}}')" >/dev/null 2>&1 || true
   confirmed=$((confirmed+1))
-  log "  CONFIRMED XSS exec: $host  ($(printf '%s' "$out" | jq -r '.param // "?"'))"
+  log "   💥 XSS CONFIRMED (executes) · $host · param=$(printf '%s' "$out" | jq -r '.param // "?"') → SQLite → verify"
 done
 
 # keep the seen-file bounded
 tail -n 5000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
-log "xss-confirm done — tested=$tested confirmed=$confirmed"
+log "🧪 xss-confirm done · 💥 $confirmed confirmed / $tested tested"
