@@ -1,5 +1,33 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.4.0 - 2026-06-07 - Active verification: Claude runs safe tests (harness-mediated)
+
+VERIFY can now ACTIVELY TEST a finding, not just reason over stored evidence — "Claude can
+run any safe test it wants to verify" — without ever giving the model execution capability.
+
+- **Harness-mediated safe probing.** When the evidence can't settle a finding, Claude sets
+  `verdict="need-probe"` and lists `probe_requests` (url + GET/HEAD/OPTIONS) in its
+  schema-validated output. The TRUSTED harness — not Claude — runs each through the new
+  `recon_safe_probe.sh`, appends the real responses, and re-judges. Bounded by `PROBE_ROUNDS`
+  (2) and `PROBE_BUDGET` (6) per finding.
+- **Why harness-mediated (security finding).** Adversarial testing showed scoped-Bash does
+  NOT confine the model: `--permission-mode dontAsk` auto-approves "benign" commands (echo,
+  id) regardless of `--allowedTools`, so a prompt-injected agent with Bash could run
+  `cat ~/.recon_es_pass`. Therefore Claude gets NO shell — only `Read` (the screenshot,
+  proven path-confined by `--add-dir`). The model only *requests*; the harness executes.
+- **Safe by construction** (`tools/safe_probe_worker.py` + `scripts/recon_safe_probe.sh`):
+  unauthenticated, GET/HEAD/OPTIONS only, no credentials, no redirect-follow, SSRF/metadata
+  guard (refuses any host resolving to private/loopback/169.254/reserved/multicast), live
+  scope+pays gate at probe time, per-finding budget (anti-runaway), polite jitter, full
+  audit log, vpn_down fail-closed, Mullvad-only egress. Unauthenticated ONLY — authenticated
+  testing stays human-in-the-loop.
+- Verified end-to-end on a real in-scope host: a finding claiming an unauth admin panel at
+  /admin/ → Claude requested 3 probes → harness GET/HEAD'd them → real 404 (IIS default) →
+  FP 0.98 citing the probe results. Guard battery all green (metadata/internal/POST/file:///
+  out-of-scope/over-budget/vpn_down all refused).
+- Doctrine (CLAUDE.md) updated: autonomous active verification is allowed, but ONLY as safe
+  unauthenticated non-destructive probes via the vetted harness; the model never executes.
+
 ## v3.3.0 - 2026-06-07 - Claude at full capability: multimodal, schema-locked, measured
 
 Built with the pipeline maintenance-locked. The Claude layer was using ~half its
