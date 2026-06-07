@@ -57,7 +57,8 @@ GATE_COOLDOWN_SECS="${GATE_COOLDOWN_SECS:-10800}"   # 3h between attempts
 GATE_TTL_SECS="${GATE_TTL_SECS:-432000}"            # 5d, then lead-exhausted
 NUCLEI_ETAGS="${NUCLEI_ETAGS:-intrusive,dos,fuzz,fuzzing,brute-force,bruteforce,sqli,xss,rce,oast}"
 NUCLEI_RL="${NUCLEI_RL:-120}"   # balanced safe-max (aggregate template rate; per-host bursts bounded)
-PROBE_TIMEOUT="${PROBE_TIMEOUT:-90}"
+NUCLEI_C="${NUCLEI_C:-50}"      # template concurrency — without this a 2300-template probe times out before finishing (matches missed)
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-150}"   # headroom for the probe to COMPLETE (was 90 -> killed mid-run at ~63%)
 
 mkdir -p "$V3_DIR" "$STATE_DIR"
 exec 9>"$STATE_DIR/evidence_gate.lock"; flock -n 9 || { warn "evidence gate already running"; exit 0; }
@@ -158,7 +159,7 @@ nuclei_probe() {  # url  tag-set
   [[ -n "$NUCLEI_BIN" ]] || { warn "nuclei missing"; return 1; }
   local out; out="$(timeout "$PROBE_TIMEOUT" "$NUCLEI_BIN" -u "$url" \
       -tags "$tags" -etags "$NUCLEI_ETAGS" -severity info,low,medium,high,critical \
-      -rl "$NUCLEI_RL" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
+      -rl "$NUCLEI_RL" -c "$NUCLEI_C" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
   [[ -z "$out" ]] && return 1
   printf '%s' "$out" | jq -c '{probe:"nuclei", template:(."template-id"//"?"),
       severity:(.info.severity//"?"), matched_at:(."matched-at"//.host//""), name:(.info.name//"")}' 2>/dev/null
@@ -186,7 +187,7 @@ oob_probe() {  # url  tag-set
   [[ -n "$NUCLEI_BIN" ]] || { warn "nuclei missing"; return 1; }
   local out; out="$(timeout "$PROBE_TIMEOUT" "$NUCLEI_BIN" -u "$url" \
       -tags "$tags" -etags "dos,brute-force,bruteforce" -severity medium,high,critical \
-      -rl "$NUCLEI_RL" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
+      -rl "$NUCLEI_RL" -c "$NUCLEI_C" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
   [[ -z "$out" ]] && return 1
   printf '%s' "$out" | jq -c '{probe:"nuclei-oob", template:(."template-id"//"?"),
       severity:(.info.severity//"?"), matched_at:(."matched-at"//.host//""), name:(.info.name//"")}' 2>/dev/null
