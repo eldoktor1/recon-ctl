@@ -87,6 +87,7 @@ def collect(conn, day: str) -> dict:
         "failures_active": fails,
         "state_distribution": state_dist,
         "review_queue_awaiting_submit": review_queue,
+        "ai_accuracy": S.ai_accuracy(conn),
     }
 
 
@@ -128,6 +129,21 @@ def render(d: dict) -> str:
         L.append(f"    - {s['host']} [{s['program']}] {s['vuln_class']}")
     L.append("\n## State distribution")
     L.append("  " + json.dumps(d["state_distribution"]))
+    ai = d.get("ai_accuracy") or {}
+    if ai.get("reviewed_total"):
+        L.append("\n## 🧠 Claude accuracy (self-audit)")
+        vd = ai.get("verdict_distribution", {})
+        vd_line = " · ".join(f"{k} {v['count']} (avg conf {v['avg_conf']})" for k, v in vd.items())
+        L.append(f"- {ai['reviewed_total']} findings reviewed · " + (vd_line or "no verdicts yet"))
+        rd = ai.get("real_disposition", {})
+        prec = rd.get("precision_when_decided")
+        prec_s = f"{prec:.0%}" if isinstance(prec, (int, float)) else "n/a (no human decisions yet)"
+        L.append(f"- 'real' precision (human-decided): **{prec_s}** — accepted "
+                 f"{rd.get('accepted_submitted',0)} · rejected {rd.get('rejected_dismissed',0)} · "
+                 f"pending {rd.get('pending_human',0)}")
+        L.append(f"- big-model escalations: {ai.get('escalations',0)}  ·  AI-learned FP signatures: "
+                 f"{ai.get('fp_signatures_from_ai',0)}  ·  KB lessons: {ai.get('kb_lessons',0)} "
+                 f"(retrieved {ai.get('kb_retrievals',0)}×)")
     if d["dismiss_reasons"]:
         L.append("\n## Dismissals (why)")
         for r in d["dismiss_reasons"][:20]:
@@ -153,11 +169,20 @@ def _discord_digest(d: dict) -> None:
     if not hook:
         return
     a, fp = d["activity"], d["fp_skipped"]
+    ai = d.get("ai_accuracy") or {}
+    rd = ai.get("real_disposition", {})
+    prec = rd.get("precision_when_decided")
+    ai_line = ""
+    if ai.get("reviewed_total"):
+        prec_s = f"{prec:.0%}" if isinstance(prec, (int, float)) else "n/a"
+        ai_line = (f"\n\U0001F9E0 Claude: {ai['reviewed_total']} reviewed · 'real' precision {prec_s} "
+                   f"· {ai.get('escalations',0)} escalations")
     msg = (f"\U0001F4CA **v3 digest {d['day']}**\n"
            f"confirmed {a['confirmed']} · reported {a['reported']} · dismissed {a['dismissed']} "
            f"· lead-exhausted {a['lead_exhausted']}\n"
            f"review queue: {len(d['review_queue_awaiting_submit'])} awaiting submit\n"
            f"FP suppressed today: {fp['suppressed_today_sigs']} · LLM spend ${d['api_spend_usd']}"
+           + ai_line
            + (f"\n\U0001F6D1 HALTED: {d['halted_now']}" if d["halted_now"] else ""))
     try:
         req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
