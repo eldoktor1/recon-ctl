@@ -34,6 +34,12 @@ LEADS="${XSS_LEADS:-$BASE_DIR/params/verify_xss.jsonl}"
 SEEN="${XSS_SEEN:-$STATE_DIR/xss_confirm_seen.txt}"
 XSS_BATCH="${XSS_BATCH:-15}"
 es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
+# Live scope guard (authoritative at probe time): a host is "game" only if it is
+# CURRENTLY in-scope + paying + not out-of-scope — never trust stale catalog scope.
+in_scope_now() {
+  [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" 2>/dev/null | jq -r \
+     '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+}
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/xss_confirm.lock"; flock -n 9 || { warn "already running"; exit 0; }
@@ -55,13 +61,14 @@ confirmed=0; tested=0
 for url in "${urls[@]}"; do
   [[ -z "$url" ]] && continue
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
+  host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
+  in_scope_now "$host" || { printf '%s\n' "$url" >> "$SEEN"; continue; }   # live scope guard
   out="$(timeout 90 "$SHOT_VENV_PY" "$WORKER" "$url" 2>/dev/null)"
   printf '%s\n' "$url" >> "$SEEN"     # cooldown: don't retest this URL next cycle
   tested=$((tested+1))
   [[ -z "$out" ]] && continue
   executed="$(printf '%s' "$out" | jq -r '.executed // false' 2>/dev/null)"
   [[ "$executed" == "true" ]] || continue
-  host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
   prog="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '.triage_program // ""' 2>/dev/null)"
   ev="$(printf '%s' "$out" | jq -c '{probe:"browser-xss", context:.context, param:.param, payload:.payload, poc_url:.poc_url, matched_at:.url}' 2>/dev/null)"
   # CONFIRMED execution -> SQLite state machine (-> Claude verify -> #review). conf 0.9.
