@@ -38,6 +38,7 @@ class Finding:
     dup_status: str = "unknown"   # likely-dup | no-known-dup | unknown
     dup_detail: str = ""
     revalidated_at: str = ""
+    authored: dict = field(default_factory=dict)   # Claude-authored report (severity/cvss/impact/poc/dedup)
 
     def cvss(self):
         return CVSS.get(self.vuln_class, DEFAULT_CVSS)
@@ -45,17 +46,28 @@ class Finding:
 
 def _common(f: Finding) -> dict:
     sev, score, vector = f.cvss()
-    title = f.title or f"{f.vuln_class.upper()} on {f.host}"
     matched = f.evidence.get("matched_at") or f.url or f.host
     probe = f.evidence.get("probe", "?")
     tmpl = f.evidence.get("template") or f.evidence.get("status") or "-"
-    steps = f.poc_steps or [
+    default_steps = [
         f"GET {matched}",
         f"Observe the confirmed indicator ({probe}: {tmpl}) returned without authentication.",
         "The exposure is the finding — no further exploitation was performed (read-only PoC).",
     ]
+    default_impact = (f"Unauthenticated exposure of `{f.vuln_class}` surface on {f.host}. "
+                      "PoC is read-only confirmation; no data was accessed or modified.")
+    # Claude-authored content takes precedence (honest severity + real PoC); template is the fallback.
+    a = f.authored or {}
+    title = a.get("title") or f.title or f"{f.vuln_class.upper()} on {f.host}"
+    sev = a.get("severity") or sev
+    score = a.get("cvss_score") if a.get("cvss_score") is not None else score
+    vector = a.get("cvss_vector") or vector
+    steps = a.get("poc_steps") or f.poc_steps or default_steps
+    impact = a.get("impact") or default_impact
+    dedup = a.get("dedup_assessment") or ""
     return {"title": title, "sev": sev, "score": score, "vector": vector,
-            "matched": matched, "probe": probe, "tmpl": tmpl, "steps": steps}
+            "matched": matched, "probe": probe, "tmpl": tmpl, "steps": steps,
+            "impact": impact, "dedup": dedup, "authored": bool(a)}
 
 
 def render_hackerone(f: Finding) -> str:
@@ -76,13 +88,13 @@ def render_hackerone(f: Finding) -> str:
 - Evidence (redacted): `{f.evidence.get('response','(see attached)')}`
 
 ## Impact
-Unauthenticated exposure of `{f.vuln_class}` surface. PoC is read-only confirmation; no data was accessed or modified.
+{c['impact']}
 
 ## Scope
 {f.scope_confirmation or 'In scope (confirmed via recon-scope at confirmation time).'}
 
 ---
-_dup pre-check: {f.dup_status} — {f.dup_detail}_  ·  _confirmed_at: {f.confirmed_at}  ·  revalidated: {f.revalidated_at or 'n/a'}_
+_dup pre-check: {f.dup_status} — {f.dup_detail}{(' · Claude: ' + c['dedup']) if c['dedup'] else ''}_  ·  _confirmed_at: {f.confirmed_at}  ·  revalidated: {f.revalidated_at or 'n/a'}_
 """
 
 
@@ -101,7 +113,7 @@ def render_bugcrowd(f: Finding) -> str:
 **Confirmation:** {c['probe']} — {c['tmpl']}
 **Evidence (redacted):** {f.evidence.get('response','(attached)')}
 
-**Impact:** Unauthenticated {f.vuln_class} exposure on {f.host}. Read-only PoC; no data accessed/modified.
+**Impact:** {c['impact']}
 
 **Scope:** {f.scope_confirmation or 'In scope (recon-scope confirmed).'}
 
@@ -127,7 +139,7 @@ Confirmation: **{c['probe']}** — `{c['tmpl']}`
 Evidence (redacted): {f.evidence.get('response','(attached)')}
 
 ## Impact
-{f.vuln_class} surface reachable without authentication. Exposure-confirmation only; no exploitation.
+{c['impact']}
 
 ## Scope
 {f.scope_confirmation or 'In scope (recon-scope confirmed).'}

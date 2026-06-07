@@ -122,6 +122,13 @@ def _build_finding(row, asset) -> F.Finding:
             ev = json.loads(row["evidence"])
         except Exception:
             ev = {"response": str(row["evidence"])}
+    authored = {}
+    rep = row["ai_report"] if "ai_report" in row.keys() else None
+    if rep:
+        try:
+            authored = json.loads(rep)
+        except Exception:
+            authored = {}
     return F.Finding(
         host=row["host"],
         url=row["url"] or asset.get("url") or f"https://{row['host']}",
@@ -130,6 +137,7 @@ def _build_finding(row, asset) -> F.Finding:
         vuln_class=row["vuln_class"] or "info-disclosure",
         signal_class=row["signal_class"] or "",
         evidence=ev,
+        authored=authored,
         confirmed_at=row["state_changed_at"],
         scope_confirmation=(f"Program: {row['program'] or asset.get('triage_program','?')} · "
                             f"in_scope={asset.get('triage_in_scope','?')} · pays={asset.get('triage_pays','?')}"),

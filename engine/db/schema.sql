@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS findings (
     ai_confidence   REAL,                          -- Claude's 0.0-1.0 relevancy/exploitability confidence
     ai_reason       TEXT,                          -- Claude's one-line justification (adversarial)
     ai_reviewed_at  TEXT,
+    ai_report       TEXT,                          -- JSON: Claude-authored report (title/severity/cvss/impact/poc/dedup) for 'real' findings
     fp_signature    TEXT NOT NULL,                 -- stable signature for FP/dup matching
     evidence        TEXT,                          -- JSON: probe, template, matched_at, redacted response
     attempts        INTEGER NOT NULL DEFAULT 0,

@@ -74,6 +74,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE findings DROP COLUMN tier")
         except sqlite3.OperationalError:
             pass  # older sqlite without DROP COLUMN — leave it (harmless, unread)
+    # ai_report: Claude-authored report packet for 'real' findings (added v3.6)
+    if "ai_report" not in cols:
+        try:
+            conn.execute("ALTER TABLE findings ADD COLUMN ai_report TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+
+def set_ai_report(conn, finding_id: int, report_json: str) -> None:
+    """Store Claude's authored report packet (JSON) for a confirmed-real finding."""
+    try:
+        json.loads(report_json)  # validate
+    except Exception:
+        return
+    with conn:
+        conn.execute("UPDATE findings SET ai_report=?, updated_at=? WHERE id=?",
+                     (report_json, _utc(), finding_id))
 
 
 def fp_signature(host: str, signal_class: str | None, vuln_class: str | None) -> str:
@@ -489,6 +506,9 @@ def _main(argv):
                                    limit=int(a[3]) if len(a) > 3 else 5)))
     elif cmd == "ai-accuracy":       # ai-accuracy -> JSON self-audit of the Claude layer
         print(json.dumps(ai_accuracy(conn), indent=2))
+    elif cmd == "set-report":        # set-report <id> <json>  (Claude-authored report packet)
+        set_ai_report(conn, int(a[0]), a[1] if len(a) > 1 else "{}")
+        print("report-set")
     else:
         print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed|"
               "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy}", file=sys.stderr); return 2
