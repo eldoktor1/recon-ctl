@@ -1117,16 +1117,16 @@ _ai_table() {
   local where="$1" n="${2:-50}"
   local B=$'\033[1m' R=$'\033[0m' G=$'\033[0;32m' Y=$'\033[1;33m' RD=$'\033[0;31m'
   local rows
-  rows="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(tier,'-'), COALESCE(vuln_class,'-'), state, COALESCE(ai_reason,'') FROM findings WHERE $where ORDER BY (ai_verdict='real') DESC, ai_confidence DESC, state_changed_at DESC LIMIT $n;")"
+  rows="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(vuln_class,'-'), state, COALESCE(ai_reason,'') FROM findings WHERE $where ORDER BY (ai_verdict='real') DESC, ai_confidence DESC, state_changed_at DESC LIMIT $n;")"
   if [[ -z "$rows" ]]; then echo "  (no matching findings)"; return; fi
-  printf "${B}%-12s %-5s %-36s %-9s %-9s %s${R}\n" "VERDICT" "CONF" "HOST" "TIER" "STATE" "CLASS"
+  printf "${B}%-12s %-5s %-40s %-9s %s${R}\n" "VERDICT" "CONF" "HOST" "STATE" "CLASS"
   printf '%s\n' "$(printf '─%.0s' {1..150})"
-  printf '%s\n' "$rows" | while IFS=$'\t' read -r host verdict conf tier cls state reason; do
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r host verdict conf cls state reason; do
     local col="$R"
     case "$verdict" in
       real) col="$G" ;; fp) col="$RD" ;; needs-human) col="$Y" ;;
     esac
-    printf "${col}%-12s${R} %-5s %-36s %-9s %-9s %s\n" "$verdict" "$conf" "${host:0:36}" "${tier:0:9}" "${state:0:9}" "${cls:0:30}"
+    printf "${col}%-12s${R} %-5s %-40s %-9s %s\n" "$verdict" "$conf" "${host:0:40}" "${state:0:9}" "${cls:0:30}"
   done
 }
 
@@ -1206,23 +1206,37 @@ cmd_ai() {
       printf "  showing: %s  |  total Claude-worth leads in ES: %s\n" "$an_n" "$an_total"
       ;;
 
+    # ---- accuracy: Claude layer self-audit (is it actually working?) ----
+    accuracy|audit)
+      hdr "Claude accuracy — self-audit (human disposition of 'real' verdicts)"
+      local sp="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
+      [[ -f "$DB" ]] || { echo "  db not found ($DB — evidence gate has not run yet)"; return 0; }
+      V3_DB="$DB" python3 "$sp" ai-accuracy 2>/dev/null | jq -r '
+        "  reviewed total: \(.reviewed_total)",
+        "  verdicts: " + ([.verdict_distribution|to_entries[]|"\(.key)=\(.value.count)(conf \(.value.avg_conf))"]|join("  ")),
+        "  real-verdict precision (human-decided): " + (if .real_disposition.precision_when_decided==null then "n/a (no human decisions yet)" else ((.real_disposition.precision_when_decided*100|floor|tostring)+"%") end),
+        "    accepted=\(.real_disposition.accepted_submitted)  rejected=\(.real_disposition.rejected_dismissed)  pending-human=\(.real_disposition.pending_human)",
+        "  escalations=\(.escalations)  AI-learned-FP-sigs=\(.fp_signatures_from_ai)  KB-lessons=\(.kb_lessons) (used \(.kb_retrievals)x)"
+      ' 2>/dev/null || echo "  (no data yet — Claude validation layer has not produced verdicts)"
+      ;;
+
     # ---- detail <host>: full verdict + evidence from SQLite ----
     detail|show|inspect)
       local target="${1:-}"
       [[ -z "$target" ]] && { echo "Usage: recon-ai detail <host>"; return 1; }
       local esc="${target//\'/\'\'}"
       local row
-      row="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(ai_reason,'(none)'), state, COALESCE(tier,'?'), COALESCE(vuln_class,'?'), COALESCE(signal_class,'?'), COALESCE(program,'?'), COALESCE(url,host), printf('%.2f',COALESCE(confidence,0)), COALESCE(ai_reviewed_at,'never'), COALESCE(evidence,'') FROM findings WHERE host LIKE '%$esc%' ORDER BY state_changed_at DESC LIMIT 1;")"
+      row="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(ai_reason,'(none)'), state, COALESCE(vuln_class,'?'), COALESCE(signal_class,'?'), COALESCE(program,'?'), COALESCE(url,host), printf('%.2f',COALESCE(confidence,0)), COALESCE(ai_reviewed_at,'never'), COALESCE(evidence,'') FROM findings WHERE host LIKE '%$esc%' ORDER BY state_changed_at DESC LIMIT 1;")"
       if [[ -z "$row" ]]; then echo "  No finding for host: $target"; return 1; fi
       hdr "AI detail — $target"
-      local host verdict conf reason state tier cls sig prog url dconf reviewed evidence
-      IFS=$'\t' read -r host verdict conf reason state tier cls sig prog url dconf reviewed evidence <<<"$row"
+      local host verdict conf reason state cls sig prog url dconf reviewed evidence
+      IFS=$'\t' read -r host verdict conf reason state cls sig prog url dconf reviewed evidence <<<"$row"
       printf "  Verdict:     %s   (Claude confidence %s)\n" "$verdict" "$conf"
       printf "  Reason:      %s\n" "$reason"
       printf "  Reviewed:    %s\n\n" "$reviewed"
       printf "  State:       %s\n" "$state"
       printf "  Vuln class:  %s   (signal: %s)\n" "$cls" "$sig"
-      printf "  Tier:        %s   gate-confidence: %s\n" "$tier" "$dconf"
+      printf "  Gate-confidence: %s\n" "$dconf"
       printf "  Program:     %s\n" "$prog"
       printf "  URL:         %s\n" "$url"
       printf "  Evidence:    %s\n" "${evidence:0:300}"
@@ -1237,6 +1251,7 @@ cmd_ai() {
       echo "  fp                  auto-dismissed false positives"
       echo "  top [N]             all findings in verdict order"
       echo "  analysis            Claude-analysis leads worth verifying (from ES)"
+      echo "  accuracy            self-audit: 'real'-verdict precision + verdict mix"
       echo "  detail <host>       full verdict + evidence for one host"
       ;;
   esac
