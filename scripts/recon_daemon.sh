@@ -505,6 +505,14 @@ AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# ---- Claude-Max MONITOR / GUIDANCE pass (recon_ai_monitor.sh) ----------------
+# Claude's oversight role: reads LOCAL telemetry (burn signals, verdict precision,
+# failures/halts, daemon errors, VPN) and emits a health + guidance assessment to #ops.
+# Read-only reasoning, NO target traffic. Runs as d0k. Watches for getting rate-limited/banned.
+AI_MONITOR_SCRIPT="${AI_MONITOR_SCRIPT:-$(script_path recon_ai_monitor.sh)}"
+AI_MONITOR_INTERVAL="${AI_MONITOR_INTERVAL:-3600}"
+run_ai_monitor() { [[ -f "$AI_MONITOR_SCRIPT" ]] && bash "$AI_MONITOR_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
 # "detection != exploitation" for the XSS class. TARGET-FACING -> d0k (Playwright
@@ -649,6 +657,7 @@ run_discord_bot() {
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
   supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
+  supervise_loop "ai-monitor"     "AI_MONITOR_INTERVAL"    run_ai_monitor     &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
