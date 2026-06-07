@@ -424,12 +424,10 @@ SCOPE_DB_INTERVAL=${SCOPE_DB_INTERVAL:-86400}
 CVE_KEV_INTERVAL=${CVE_KEV_INTERVAL:-3600}
 CVE_NVD_INTERVAL=${CVE_NVD_INTERVAL:-86400}
 VULN_FEED_INTERVAL=${VULN_FEED_INTERVAL:-3600}
-NUCLEI_INTERVAL=${NUCLEI_INTERVAL:-21600}
 
 V21_SCOPE_DB="${V21_SCOPE_DB:-$(script_path recon_scope_db.sh)}"
 V21_CVE_INTEL="${V21_CVE_INTEL:-$(script_path recon_cve_intel.sh)}"
 V21_VULN_FEED="${V21_VULN_FEED:-$(script_path recon_vuln_feed.sh)}"
-V21_NUCLEI="${V21_NUCLEI:-$(script_path recon_nuclei.sh)}"
 V21_KILL="$HOME/recon/state/kill"
 
 # V2.1 sub-loop wrappers — each respects killswitch
@@ -439,20 +437,6 @@ run_scope_db()   { v21_killed scope  && return 0; bash "$V21_SCOPE_DB"; }
 run_cve_kev()    { v21_killed cve    && return 0; bash "$V21_CVE_INTEL" kev; }
 run_cve_nvd()    { v21_killed cve    && return 0; bash "$V21_CVE_INTEL" nvd; }
 run_vuln_feed()  { v21_killed vuln_feed && return 0; run_scanner bash "$V21_VULN_FEED" all; }
-run_nuclei_v21() {
-  v21_killed nuclei && return 0
-  # Resource gate before nuclei (heaviest module)
-  local ram_pct disk_gb
-  ram_pct="$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')"
-  disk_gb="$(df -BG "$HOME" | awk 'NR==2 {gsub("G",""); print $4}')"
-  if [[ "${ram_pct:-0}" -gt 90 ]]; then
-    log "[nuclei-v21] SKIP (RAM ${ram_pct}%)"; return 0
-  fi
-  if [[ "${disk_gb:-100}" -lt 5 ]]; then
-    log "[nuclei-v21] SKIP (disk ${disk_gb}GB)"; return 0
-  fi
-  run_scanner bash "$V21_NUCLEI"
-}
 
 # ---- True-Fresh engine (CT logs + crt.sh) ---------------------------------
 # Passive feeds — runs as d0k, not reconrun (no scanning, no target traffic).
@@ -462,15 +446,11 @@ run_true_fresh() { bash "$TRUE_FRESH_SCRIPT"; }
 
 # ---- Bounty / deep / active / JS scan loops (v2.5) ------------------------
 # All four are dispatched from a single script: recon_fresh_modules.sh <mode>.
-BOUNTY_SCAN_INTERVAL="${BOUNTY_SCAN_INTERVAL:-1800}"
-DEEP_SCAN_INTERVAL="${DEEP_SCAN_INTERVAL:-86400}"
 ACTIVE_CHECKS_INTERVAL="${ACTIVE_CHECKS_INTERVAL:-600}"
 JS_SCAN_INTERVAL="${JS_SCAN_INTERVAL:-1800}"
 
 FRESH_MODULES_SCRIPT="${FRESH_MODULES_SCRIPT:-$(script_path recon_fresh_modules.sh)}"
 
-run_smart_scan()    { v21_killed nuclei && return 0; [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" smart-scan     || true; }
-run_deep_scan()     { v21_killed nuclei && return 0; [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" deep-scan      || true; }
 run_active_checks() { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" active-checks || true; }
 run_js_scanner()    { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRESH_MODULES_SCRIPT" js-scan       || true; }
 
@@ -481,10 +461,6 @@ run_js_scanner()    { [[ -f "$FRESH_MODULES_SCRIPT" ]] && run_scanner bash "$FRE
 CLOUDRECON_SCRIPT="${CLOUDRECON_SCRIPT:-$(script_path recon_cloudrecon.sh)}"
 CLOUDRECON_INTERVAL="${CLOUDRECON_INTERVAL:-3600}"
 run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT" ]] && run_scanner bash "$CLOUDRECON_SCRIPT" || true; }
-
-DAST_SCRIPT="${DAST_SCRIPT:-$(script_path recon_dast.sh)}"
-DAST_INTERVAL="${DAST_INTERVAL:-1800}"
-run_dast() { v21_killed dast && return 0; [[ -f "$DAST_SCRIPT" ]] && run_scanner bash "$DAST_SCRIPT" || true; }
 
 # sus_params targeting catalog (recon_params.sh collect): crawls in-scope-paying
 # hosts fresh-first, gf-classifies params, builds the recon_params ES index +
@@ -600,19 +576,6 @@ RESTALE_SCRIPT="${RESTALE_SCRIPT:-$(script_path recon_restale.sh)}"
 RESTALE_INTERVAL="${RESTALE_INTERVAL:-28800}"    # 8h
 run_restale() { [[ -f "$RESTALE_SCRIPT" ]] && bash "$RESTALE_SCRIPT" || true; }
 
-# ---- Daily Discord digest (recon_digest.sh) ----------------------------------
-# Posts a 24h activity summary to #health. Read-only ES queries, not target-
-# facing, no killswitch — runs as d0k.
-DIGEST_SCRIPT="${DIGEST_SCRIPT:-$(script_path recon_digest.sh)}"
-DIGEST_INTERVAL="${DIGEST_INTERVAL:-86400}"      # 24h
-run_digest() { [[ -f "$DIGEST_SCRIPT" ]] && bash "$DIGEST_SCRIPT" || true; }
-
-# ---- Nuclei exposure scan (recon_nuclei.sh exposure subcommand) --------------
-# Target-facing; uses the existing nuclei script with its `exposure` mode.
-# Killswitch v2_exposure separate from v2_nuclei so it can be paused alone.
-EXPOSURE_INTERVAL="${EXPOSURE_INTERVAL:-28800}"  # 8h
-run_exposure() { v21_killed exposure && return 0; [[ -f "$V21_NUCLEI" ]] && run_scanner bash "$V21_NUCLEI" exposure || true; }
-
 # ---- Playwright screenshot module (recon_screenshot.sh) ----------------------
 # Target-facing (Chromium issues TCP+TLS to every host), but runs as d0k —
 # Playwright cache + browser deps live in $HOME and shuffling through sudo
@@ -701,17 +664,11 @@ run_discord_bot() {
   supervise_loop "cve-kev"   "CVE_KEV_INTERVAL"  run_cve_kev    &
   supervise_loop "cve-nvd"   "CVE_NVD_INTERVAL"  run_cve_nvd    &
   supervise_loop "vuln-feed" "VULN_FEED_INTERVAL" run_vuln_feed &
-  # v3 consolidation: broad nuclei/dast/exposure auto-scans RETIRED — the evidence
-  # gate now owns confirmation (candidate-targeted, confidence-scored) instead of
-  # blasting all P0/P1 and dumping to Discord side-channels. Still runnable on demand
-  # via recon_ctl (scan-now / dast / etc.).
-  # supervise_loop "nuclei-v21"     "NUCLEI_INTERVAL"        run_nuclei_v21     &
-  # supervise_loop "bounty-scan"    "BOUNTY_SCAN_INTERVAL"   run_smart_scan     &
-  # supervise_loop "deep-scan"      "DEEP_SCAN_INTERVAL"     run_deep_scan      &
+  # v3: broad nuclei / dast / exposure / digest auto-scans RETIRED (the evidence gate +
+  # the unique pillars own confirmation now); those remain runnable on demand via recon_ctl.
   supervise_loop "active-checks"  "ACTIVE_CHECKS_INTERVAL" run_active_checks  &
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
-  # supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &  # RETIRED -> evidence gate (xss via params-verify + nuclei)
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
@@ -729,8 +686,6 @@ run_discord_bot() {
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
-  # supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &  # RETIRED -> v3 observability digest
-  # supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &  # RETIRED -> evidence gate (content-leak/unauth probes)
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
 
     # Long-running — supervised with simple restart loops
