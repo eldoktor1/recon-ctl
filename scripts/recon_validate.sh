@@ -43,8 +43,8 @@ fi
 ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 
 # httpx tuning (set by daemon based on mode)
-HTTPX_THREADS="${HTTPX_THREADS:-15}"
-HTTPX_RATE="${HTTPX_RATE:-15}"
+HTTPX_THREADS="${HTTPX_THREADS:-40}"     # balanced safe-max: aggregate prober concurrency (per-host = 1 req)
+HTTPX_RATE="${HTTPX_RATE:-30}"           # req/s aggregate across the host batch (gentle through 1 Mullvad IP)
 HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
 HTTPX_MAX_RUNTIME="${HTTPX_MAX_RUNTIME:-900}"   # 15 min hard cap (browse)
 

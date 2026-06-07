@@ -106,6 +106,41 @@ prepare_scanner_dirs() {
   " 2>/dev/null || true
 }
 
+# ---- Global EGRESS GOVERNOR --------------------------------------------------
+# Hard-cap concurrent target-facing scanners through the single Mullvad exit IP, so
+# the aggregate egress can never spike no matter which loops align. Generous default
+# (6) makes it a pure BACKSTOP: only the pathological "everything fires at once" case
+# ever waits, and the wait is SOFT (after EGRESS_WAIT it proceeds — per-tool rate caps
+# still bound egress), so steady-state throughput is never degraded.
+EGRESS_SEM_DIR="${EGRESS_SEM_DIR:-$STATE_DIR/egress_sem}"
+EGRESS_MAX="${EGRESS_MAX_SCANNERS:-6}"
+EGRESS_WAIT="${EGRESS_WAIT:-900}"            # max wait for a slot, then proceed (soft cap)
+EGRESS_SLOT_TTL="${EGRESS_SLOT_TTL:-2700}"  # reap a slot whose holder died/overran (45m)
+_egress_reap() {
+  local f now t; now="$(date +%s)"
+  for f in "$EGRESS_SEM_DIR"/slot.*; do
+    [[ -e "$f" ]] || continue
+    t="$(awk '{print $1}' "$f" 2>/dev/null)"
+    [[ -n "$t" && "$((now - t))" -lt "$EGRESS_SLOT_TTL" ]] || rm -f "$f" 2>/dev/null
+  done
+}
+_egress_acquire() {   # prints the claimed slot path (or empty after soft-timeout)
+  local label="${1:-scanner}" i deadline
+  mkdir -p "$EGRESS_SEM_DIR" 2>/dev/null
+  deadline="$(( $(date +%s) + EGRESS_WAIT ))"
+  while :; do
+    for ((i=1; i<=EGRESS_MAX; i++)); do
+      if ( set -o noclobber; printf '%s %s\n' "$(date +%s)" "$label" > "$EGRESS_SEM_DIR/slot.$i" ) 2>/dev/null; then
+        printf '%s' "$EGRESS_SEM_DIR/slot.$i"; return 0
+      fi
+    done
+    _egress_reap
+    [[ "$(date +%s)" -ge "$deadline" ]] && return 0   # soft cap: proceed ungoverned
+    sleep "$(awk 'BEGIN{srand(); print 1+rand()*3}')"
+  done
+}
+_egress_release() { [[ -n "${1:-}" ]] && rm -f "$1" 2>/dev/null || true; }
+
 run_scanner() {
   # Hard VPN gate: never launch a target-facing scanner while egress is not on
   # Mullvad. recon_vpnguard maintains $STATE_DIR/vpn_down.
@@ -113,13 +148,14 @@ run_scanner() {
     log "[run_scanner] BLOCKED — VPN down, refusing to launch: $*"
     return 0
   fi
+  local _eslot; _eslot="$(_egress_acquire "${2##*/}")"   # global egress backstop (soft cap)
   local env_args=(
     HOME="$HOME"
     BASE_DIR="$BASE_DIR"
     ES_URL="${ES_URL:-http://127.0.0.1:9200}"
     INDEX_NAME="${INDEX_NAME:-recon_alive}"
-    HTTPX_THREADS="${HTTPX_THREADS:-15}"
-    HTTPX_RATE="${HTTPX_RATE:-15}"
+    HTTPX_THREADS="${HTTPX_THREADS:-40}"     # balanced safe-max (aggregate; per-host stays 1 req)
+    HTTPX_RATE="${HTTPX_RATE:-30}"
     HTTPX_TIMEOUT="${HTTPX_TIMEOUT:-10}"
     HTTPX_MAX_RUNTIME="${HTTPX_MAX_RUNTIME:-900}"
     BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-2}"
@@ -131,11 +167,14 @@ run_scanner() {
     AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"
     PATH="$PATH"
   )
+  local rc
   if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
-    env "${env_args[@]}" "$@"
+    env "${env_args[@]}" "$@"; rc=$?
   else
-    sudo -n -u "$SCANNER_USER" env "${env_args[@]}" "$@"
+    sudo -n -u "$SCANNER_USER" env "${env_args[@]}" "$@"; rc=$?
   fi
+  _egress_release "$_eslot"
+  return $rc
 }
 
 prepare_scanner_dirs

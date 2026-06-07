@@ -51,12 +51,12 @@ GATE_PROMOTE_CONF="${GATE_PROMOTE_CONF:-0.70}"
 GATE_IMMEDIATE_CONF="${GATE_IMMEDIATE_CONF:-0.85}"
 
 # Gate policy (decisions: N=5, 3h cooldown, 5d TTL)
-GATE_BATCH="${GATE_BATCH:-30}"                 # candidates per cycle (interim volume cap; per-program ceiling is Phase D)
+GATE_BATCH="${GATE_BATCH:-50}"                 # balanced safe-max (per-program ceiling is Phase D)
 GATE_MAX_ATTEMPTS="${GATE_MAX_ATTEMPTS:-5}"
 GATE_COOLDOWN_SECS="${GATE_COOLDOWN_SECS:-10800}"   # 3h between attempts
 GATE_TTL_SECS="${GATE_TTL_SECS:-432000}"            # 5d, then lead-exhausted
 NUCLEI_ETAGS="${NUCLEI_ETAGS:-intrusive,dos,fuzz,fuzzing,brute-force,bruteforce,sqli,xss,rce,oast}"
-NUCLEI_RL="${NUCLEI_RL:-50}"
+NUCLEI_RL="${NUCLEI_RL:-120}"   # balanced safe-max (aggregate template rate; per-host bursts bounded)
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-90}"
 
 mkdir -p "$V3_DIR" "$STATE_DIR"

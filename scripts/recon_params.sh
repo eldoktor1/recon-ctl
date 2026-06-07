@@ -58,7 +58,7 @@ fi
 # and raise hosts/cycle — per-host rate limits (KATANA_RL, gau jitter) are unchanged so we
 # buy throughput without becoming aggressive (the article's ban cautionary tale).
 PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-30}"
-PARAM_PARALLEL="${PARAM_PARALLEL:-4}"           # concurrent per-host crawls
+PARAM_PARALLEL="${PARAM_PARALLEL:-8}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited)
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
 PARAMS_ZERO_COOLDOWN_HOURS="${PARAMS_ZERO_COOLDOWN_HOURS:-6}"
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-1200}"
