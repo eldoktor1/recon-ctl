@@ -28,9 +28,10 @@ EDGES = {
     "discovered":     {"scored", "dismissed"},
     "scored":         {"verifying", "lead_exhausted", "dismissed"},
     "verifying":      {"confirmed", "scored", "lead_exhausted", "dismissed"},
-    "confirmed":      {"reported", "dismissed", "scored"},  # scored = freshness re-validation bounce-back
-    "reported":       {"submitted", "dismissed", "confirmed"},  # confirmed = bounce-back on re-validation fail
-    "lead_exhausted": {"scored", "dismissed"},                  # re-open on a new signal
+    "confirmed":      {"reported", "staged", "dismissed", "scored"},  # staged = financial PoC-staging; scored = freshness bounce
+    "staged":         {"reported", "dismissed", "scored"},            # human triggers staged PoC -> reported
+    "reported":       {"submitted", "dismissed", "confirmed"},        # confirmed = bounce-back on re-validation fail
+    "lead_exhausted": {"scored", "dismissed"},                        # re-open on a new signal
     "submitted":      set(),
     "dismissed":      {"scored"},
 }
