@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+findings.db
+findings.db-wal
+findings.db-shm
+reports/
+digests/
+reporter_queue.jsonl
+staged_pocs.jsonl
