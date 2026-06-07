@@ -104,6 +104,9 @@ targets, rate-limited, Mullvad-only — and returns the real responses for your 
 verdict. Use it e.g. to GET the matched URL and see if the sensitive surface is genuinely
 reachable unauthenticated vs. a login wall / 404 / marketing page. Do NOT request a probe
 if the screenshot + evidence already settle it; when you have enough, return real/fp/needs-human.
+If a probe RESULT is a refusal (ok=false: rate-limited / host-cooldown / global-pause /
+out-of-scope / budget), do NOT repeat it — judge from what you already have, or return
+needs-human. Be economical: request only the few probes that would actually change the verdict.
 "
   fi
   [[ -n "$probe_results" ]] && results_block="PROBE RESULTS (real responses from the safe harness — base your verdict on these):
