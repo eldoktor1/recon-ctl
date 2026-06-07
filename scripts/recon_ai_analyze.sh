@@ -62,12 +62,19 @@ timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK" 
 # Returns a gate class for auto-probeable findings, or "" for classes that must stay
 # human-in-the-loop (the hard line: never autonomously exploit sqli/ssrf/idor/auth).
 map_gate_class() {
+  # Host-level nuclei-probeable classes -> a gate class (the evidence gate probes them,
+  # SSRF/XXE via interactsh OOB). Param-level classes (xss/ssti/redirect/sqli) return ""
+  # — they are confirmed by the catalog-driven confirmers (xss-confirm / param-confirm),
+  # not the gate. idor/lfi/rce-exploit return "" too: operator-lead only (hard line).
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    *rce*|*version*|*cve*|*deserial*)              echo "version" ;;
+    *graphql*|*gql*)                               echo "graphql" ;;
+    *swagger*|*openapi*|*apidoc*|*api-doc*)         echo "swagger" ;;
+    *ssrf*)                                         echo "ssrf" ;;
+    *xxe*|*xml*ent*)                               echo "xxe" ;;
+    *version*|*cve*|*deserial*)                     echo "version" ;;
     *panel*|*dashboard*|*admin*|*login*|*unauth*)  echo "unauth-surface" ;;
-    *exposure*|*disclos*|*leak*|*backup*|*config*|*listing*|*info*) echo "content-leak" ;;
-    *xss*)                                          echo "xss" ;;   # browser-confirm step owns this
-    *)                                              echo "" ;;       # sqli/ssrf/idor/logic -> operator lead only
+    *exposure*|*disclos*|*leak*|*backup*|*config*|*listing*|*info*|*api*) echo "content-leak" ;;
+    *)                                             echo "" ;;   # xss/ssti/redirect/sqli -> catalog confirmers; idor/lfi/rce -> operator lead
   esac
 }
 

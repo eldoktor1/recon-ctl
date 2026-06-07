@@ -514,6 +514,14 @@ XSS_CONFIRM_SCRIPT="${XSS_CONFIRM_SCRIPT:-$(script_path recon_xss_confirm.sh)}"
 XSS_CONFIRM_INTERVAL="${XSS_CONFIRM_INTERVAL:-3600}"
 run_xss_confirm() { [[ -f "$XSS_CONFIRM_SCRIPT" ]] && bash "$XSS_CONFIRM_SCRIPT" >/dev/null 2>&1 || true; }
 
+# ---- Param differential confirm (recon_param_confirm.sh) --------------------
+# SAFE differential confirmation for SSTI / open-redirect / SQLi across the params
+# catalog ({{7*7}}->49, redirect->canary, error-diff). TARGET-FACING -> d0k, VPN-gated.
+# Confirmed -> SQLite -> Claude verify -> #review. Widens the reliable net w/o exploitation.
+PARAM_CONFIRM_SCRIPT="${PARAM_CONFIRM_SCRIPT:-$(script_path recon_param_confirm.sh)}"
+PARAM_CONFIRM_INTERVAL="${PARAM_CONFIRM_INTERVAL:-3600}"
+run_param_confirm() { [[ -f "$PARAM_CONFIRM_SCRIPT" ]] && bash "$PARAM_CONFIRM_SCRIPT" >/dev/null 2>&1 || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -639,6 +647,7 @@ run_discord_bot() {
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
+  supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
   supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
