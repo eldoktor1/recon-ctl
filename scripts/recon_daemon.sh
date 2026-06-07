@@ -347,7 +347,10 @@ auto_cleanup() {
       local _before; _before="$(wc -l < "$ALIVE_HOSTS" 2>/dev/null | tr -d ' ')"
       sort -u "$_alive_tmp" -o "$_alive_tmp"
       mv "$_alive_tmp" "$ALIVE_HOSTS"
-      command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$ALIVE_HOSTS" 2>/dev/null || true
+      # reconrun (recon_validate.sh) also touches/appends this file every cycle —
+      # grant rw, not r, or the next validate gets "touch: Permission denied" and
+      # the scanner can no longer update the alive-host list after a daemon rebuild.
+      command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:rw "$ALIVE_HOSTS" 2>/dev/null || true
       local _after; _after="$(wc -l < "$ALIVE_HOSTS" | tr -d ' ')"
       date -u +%s > "$_prune_marker"
       log "auto_cleanup: alive_hosts rebuilt $_before → $_after lines (30d window, $INDEX_NAME)"
