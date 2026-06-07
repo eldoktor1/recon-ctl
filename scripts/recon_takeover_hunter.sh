@@ -164,6 +164,27 @@ cname_is_aws_elb() {
   return 1
 }
 
+# ---- 99%-FP-free takeover gating (can-i-take-over-xyz authoritative) ----------
+# Services marked "Not vulnerable" on can-i-take-over-xyz REQUIRE DNS/file ownership
+# verification before any custom domain is served — so a dangling CNAME + provider error
+# page is NEVER claimable by an outsider. These are the FP factory (Fastly/Firebase/
+# CloudFront/Akamai/...) and must never mint a takeover finding.
+TKO_NOTVULN="${TKO_NOTVULN:-fastly firebase aws_cloudfront acquia freshdesk hubspot feedpress fly_io desk_com statuspage gcp_appengine zendesk akamai sendgrid mailchimp dreamhost kinsta instapage keycdn squarespace gcs google_sites gitlab azure_trafficmanager intercom}"
+# Services whose HTTP error fingerprint is itself authoritative-unclaimed (the resource
+# name is provably free WITHOUT needing NXDOMAIN): S3 "NoSuchBucket", Beanstalk. For
+# everyone else, confirmation REQUIRES NXDOMAIN on the CNAME target.
+TKO_HTTP_AUTH="${TKO_HTTP_AUTH:-aws_s3 aws_elasticbeanstalk}"
+svc_in_list() { local s="$1" l="$2" x; for x in $l; do [[ "$s" == "$x" ]] && return 0; done; return 1; }
+# provider's OWN namespace = unclaimable by an outsider (github.github.io is GitHub's own
+# org pages; *.map.fastly.net is Fastly's service-map; live *.cloudfront.net 404s at root).
+cname_provider_own() {
+  local c="${1%.}"
+  [[ "$c" == "github.github.io" ]] && return 0
+  [[ "$c" =~ \.map\.fastly\.net$ ]] && return 0
+  [[ "$c" =~ \.cloudfront\.net$ ]] && return 0
+  return 1
+}
+
 # Fix 7: check HackerOne disclosed reports for this host
 check_already_disclosed() {
   local host="$1"
@@ -549,6 +570,18 @@ probe_host() {
   local svc="${FP_SVC[$idx]}"
   local diff="${FP_DIFF[$idx]}"
 
+  # ---- 99%-FP-free GATE A: claimability (can-i-take-over-xyz) ----
+  # Not-vulnerable services (ownership-verified) + the provider's own namespace are NEVER
+  # claimable by an outsider — they are the dominant FP source. Drop them outright.
+  if svc_in_list "$svc" "$TKO_NOTVULN"; then
+    log "SKIP $host → $svc via $cname (NOT vulnerable per can-i-take-over-xyz — requires ownership verification)"
+    return 0
+  fi
+  if cname_provider_own "$cname"; then
+    log "SKIP $host → $svc via $cname (CNAME target is the provider's OWN namespace — unclaimable)"
+    return 0
+  fi
+
   # Skip impossible ones unless explicit override — they pollute notifications
   [[ "$diff" == "impossible" ]] && {
     log "Skipping $host → $svc (impossible difficulty)"
@@ -623,6 +656,17 @@ probe_host() {
   local stages_str="s1:$stage1 s2:$stage2 s3:$stage3 s4:$stage4 s5:$stage5"
   local confidence
   confidence="$(classify_confidence "$total_stages" "$diff")"
+
+  # ---- 99%-FP-free GATE B: NXDOMAIN required to CONFIRM ----
+  # A real takeover means the backing resource is GONE -> the CNAME target NXDOMAINs ->
+  # the name is free to register. The classic FPs (Fastly/Firebase/live-CloudFront/an app
+  # that merely 404s) all RESOLVE, so they fail this gate -> downgraded to LEAD (never a
+  # confirmed P0). Exception: services whose HTTP error fingerprint is itself authoritative-
+  # unclaimed (S3 "NoSuchBucket" / Beanstalk), which prove a free name without NXDOMAIN.
+  if [[ "$nx_state" != "nxdomain" ]] && ! svc_in_list "$svc" "$TKO_HTTP_AUTH"; then
+    log "  → $host ($svc): CNAME target RESOLVES (no NXDOMAIN) — downgrade to MEDIUM/WATCH, not a confirmed takeover"
+    confidence="MEDIUM"   # -> WATCH file: re-checked each cycle; promotes only if it later NXDOMAINs
+  fi
 
   # Build notes about what fired
   local notes=""
