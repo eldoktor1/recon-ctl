@@ -31,19 +31,30 @@ kills FPs). Confirm primitive per class:
   is exploitation). Claude detects + prioritises; a human confirms. Never auto-probed.
 Any confirmed catch still passes the Claude VERIFY adversarial filter before it reaches #review.
 
-## Claude at full capability (v3.3): multimodal, schema-locked, measured
-VERIFY is no longer a one-line text classifier — it's a **multimodal investigator** that
-still only REASONS (never issues a request at a target). Per finding it gets the asset
-SCREENSHOT as primary evidence (a cors-misconfig on a marketing homepage looks nothing
-like a real exposed panel — vision kills those FPs) plus ES asset context, Read-scoped to
-a throwaway per-finding dir (`--tools Read --add-dir`, never the filesystem). Output is
-**schema-validated** (`--json-schema` → `.structured_output`; no regex scraping; unparseable
-⇒ safe `needs-human`). It **escalates to the big model on genuine ambiguity OR a low-confidence
-real/fp** (a confidently-wrong verdict is the real risk). ANALYZE tiers model by asset value
-(haiku bulk → sonnet for high triage_score). And we **measure** it: `state.py ai-accuracy` /
-`recon-ai accuracy` reports the human-decided precision of `real` verdicts (accepted vs
-dismissed) — the only ground truth. Never pass `--bare` (it forces API-key auth and bypasses
-the Max OAuth login).
+## Claude at full capability (v3.4): multimodal, active-verifying, schema-locked, measured
+VERIFY is a **multimodal investigator that can actively test** — but it never *executes*
+anything itself. Per finding it gets the asset SCREENSHOT as primary evidence (a
+cors-misconfig on a marketing homepage looks nothing like a real exposed panel — vision
+kills those FPs) plus ES asset context, Read-scoped to a throwaway per-finding dir
+(`--tools Read --add-dir`, path-confined — verified it cannot read outside the dir).
+
+**Active verification (harness-mediated, safe by construction).** When the evidence can't
+settle it, Claude sets `verdict="need-probe"` and lists `probe_requests` (url + GET/HEAD/
+OPTIONS) in its schema output. The TRUSTED harness — not Claude — runs each through
+`recon_safe_probe.sh`, appends the real responses, and re-judges (bounded by `PROBE_ROUNDS`
+/ `PROBE_BUDGET`). Claude has **no Bash/exec** — scoped-Bash is NOT confining (`dontAsk`
+auto-approves benign commands, so a prompt-injected agent could run anything), therefore the
+model only ever requests; the harness mediates every packet. The probe is safe regardless of
+args: unauthenticated, GET/HEAD/OPTIONS only, no creds, no redirect-follow, SSRF/metadata
+guard (refuses private/loopback/169.254/reserved), live scope+pays gate, rate-limited,
+Mullvad-only, audited. **Unauthenticated only** — authenticated testing stays human-in-the-loop.
+
+Output is **schema-validated** (`--json-schema` → `.structured_output`; no regex scraping;
+unparseable ⇒ safe `needs-human`). It **escalates to the big model on genuine ambiguity OR a
+low-confidence real/fp**. ANALYZE tiers model by asset value (haiku bulk → sonnet for high
+triage_score). And we **measure** it: `state.py ai-accuracy` / `recon-ai accuracy` reports the
+human-decided precision of `real` verdicts (accepted vs dismissed) — the only ground truth.
+Never pass `--bare` (forces API-key auth, bypasses the Max OAuth login).
 
 ## Documented false-positive patterns (never score as CONFIRMED)
 - **KEV tech-class match without a confirmed in-range version** (Spring actuator,
@@ -88,10 +99,15 @@ the Max OAuth login).
   console, file-read CVEs); attempt to bypass a login to get IN.
 - IDOR/BOLA testing uses TWO accounts the researcher owns — never guessed/enumerated
   third-party IDs.
+- Autonomous active verification is ALLOWED but only as **SAFE, UNAUTHENTICATED,
+  non-destructive** probes via the vetted primitives / `recon_safe_probe.sh` (GET/HEAD/
+  OPTIONS, no creds, no redirect-follow, no internal/metadata, scope+pays-gated,
+  rate-limited, Mullvad-only, audited). The Claude VERIFY agent may *request* such probes;
+  a trusted harness runs them — the model never executes anything itself (it gets no shell).
 - Authenticated live-target testing stays human-in-the-loop. The pipeline / any agent
-  must NOT autonomously issue authenticated requests against live bug-bounty targets.
+  must NOT autonomously issue **authenticated** requests against live bug-bounty targets.
 - Never touch nftables/iptables/VPN config. Mullvad is sole egress; `vpn_down` pauses
-  all scanning.
+  all scanning (and all probing — fail-closed).
 
 ## Operational notes
 - WSL: use heredoc form for execution; never `bash -c "..."` (var/escaping breaks).
