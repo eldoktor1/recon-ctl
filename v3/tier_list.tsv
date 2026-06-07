@@ -1,0 +1,615 @@
+# v3 financial-tier classification (GATE 0) — load-bearing, human-maintained.
+# DEFAULT: any program NOT listed here, OR listed with tier=FINANCIAL, OR reviewed_by=unreviewed
+#          is treated as FINANCIAL/REGULATED (autonomous DETECTION + PoC-STAGING only).
+# A program becomes GENERAL (full autonomous active testing) ONLY via explicit human review:
+#   set tier=GENERAL AND reviewed_by=<name> AND reviewed_at=<date>. Err HARD toward financial.
+# columns: program<TAB>tier<TAB>reviewed_by<TAB>reviewed_at<TAB>seed_class<TAB>notes
+ Comcast Xfinity Vulnerability Disclosure Program	FINANCIAL	unreviewed	-	needs-review	-
+11f3b580-8ce4-4fcf-b750-4eb2f7c28bef	FINANCIAL	unreviewed	-	needs-review	-
+1password_ctf	FINANCIAL	unreviewed	-	needs-review	-
+1win_com	FINANCIAL	unreviewed	-	needs-review	-
+20 Minuten	FINANCIAL	unreviewed	-	needs-review	-
+20050f10-e3a0-4d3e-8a62-7ae28c3b4ad0	FINANCIAL	unreviewed	-	needs-review	-
+23andme_bbp	FINANCIAL	unreviewed	-	needs-review	-
+2b2a4224-4ab6-4140-a834-89750ac77ad9	FINANCIAL	unreviewed	-	needs-review	-
+3d783032-0f77-4585-9ac2-0da29e180ed1	FINANCIAL	unreviewed	-	needs-review	-
+64c97139-be64-4daf-a5ed-b1da79489ac1	FINANCIAL	unreviewed	-	needs-review	-
+719923b7-a527-4e28-ac8d-3950f182f051	FINANCIAL	unreviewed	-	needs-review	-
+8x8-bounty	FINANCIAL	unreviewed	-	needs-review	-
+955a3f33-3ca7-42b1-acf5-84da28d4c08c	FINANCIAL	unreviewed	-	needs-review	-
+9855f947-9f1f-41b9-80cb-dcdac1e88c0b	FINANCIAL	unreviewed	-	needs-review	-
+Acorns Grow, Inc.	FINANCIAL	unreviewed	-	likely-financial	-
+Afterpay Bug Bounty Program	FINANCIAL	unreviewed	-	likely-financial	-
+Aiven Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Arlo Cash Rewards	FINANCIAL	unreviewed	-	needs-review	-
+Asana	FINANCIAL	unreviewed	-	needs-review	-
+Atlassian	FINANCIAL	unreviewed	-	needs-review	-
+Aurory Managed Bug Bounty Engagement (Public)	FINANCIAL	unreviewed	-	needs-review	-
+Auth0 by Okta	FINANCIAL	unreviewed	-	needs-review	-
+Backblaze	FINANCIAL	unreviewed	-	needs-review	-
+Binance	FINANCIAL	unreviewed	-	likely-financial	-
+BitGo Managed Public Bug Bounty Engagement 	FINANCIAL	unreviewed	-	needs-review	-
+Bitdefender	FINANCIAL	unreviewed	-	needs-review	-
+Bitpanda Ongoing Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Bitso Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Blockchain.com Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	likely-financial	-
+Bolt Technology OÜ	FINANCIAL	unreviewed	-	needs-review	-
+Bugcrowd	FINANCIAL	unreviewed	-	needs-review	-
+Bullish Exchange	FINANCIAL	unreviewed	-	likely-financial	-
+Canva	FINANCIAL	unreviewed	-	needs-review	-
+Cash App	FINANCIAL	unreviewed	-	needs-review	-
+Centers for Medicare & Medicaid Services - Public Bug Bounty Program 2026	FINANCIAL	unreviewed	-	needs-review	-
+Certinia (formerly FinancialForce)	FINANCIAL	unreviewed	-	likely-financial	-
+Chime Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Chipotle Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Cisco Meraki	FINANCIAL	unreviewed	-	needs-review	-
+Cisco ThousandEyes Vulnerability Hunting aka Bug Bounty 	FINANCIAL	unreviewed	-	needs-review	-
+City of Vienna Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+ClassDojo	FINANCIAL	unreviewed	-	needs-review	-
+ClickHouse	FINANCIAL	unreviewed	-	needs-review	-
+Cloudinary	FINANCIAL	unreviewed	-	needs-review	-
+Code.org	FINANCIAL	unreviewed	-	needs-review	-
+CoinDesk Data - Data API 	FINANCIAL	unreviewed	-	likely-financial	-
+Comcast Xfinity Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Consensus by CoinDesk	FINANCIAL	unreviewed	-	likely-financial	-
+Council on Foreign Relations	FINANCIAL	unreviewed	-	needs-review	-
+EPAM Systems Managed Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Electroneum Legacy Blockchain: EOL	FINANCIAL	unreviewed	-	likely-financial	-
+Electroneum Smart Chain (ETN-SC) — EVM-Compatible Blockchain	FINANCIAL	unreviewed	-	likely-financial	-
+Electroneum Wallet: Gateway to the ETN Cryptocurrency	FINANCIAL	unreviewed	-	likely-financial	-
+Elementor: Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Entain Game Logic Flaws Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Entain Public Managed Bug Bounty Engagement 2024	FINANCIAL	unreviewed	-	needs-review	-
+Etsy	FINANCIAL	unreviewed	-	needs-review	-
+Felix Health Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Fireblocks Web Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	likely-financial	-
+Fivetran	FINANCIAL	unreviewed	-	needs-review	-
+Flourish	FINANCIAL	unreviewed	-	needs-review	-
+Gearset: Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Glean Technologies Public Engagement	FINANCIAL	unreviewed	-	needs-review	-
+HPE Networking Product Public Program	FINANCIAL	unreviewed	-	needs-review	-
+HostGator LATAM Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Ibotta	FINANCIAL	unreviewed	-	needs-review	-
+Immutable Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Imperva - Thales Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Indeed	FINANCIAL	unreviewed	-	needs-review	-
+Infinite Athlete	FINANCIAL	unreviewed	-	needs-review	-
+Intercom	FINANCIAL	unreviewed	-	needs-review	-
+Internet Brands Public	FINANCIAL	unreviewed	-	needs-review	-
+Jora	FINANCIAL	unreviewed	-	needs-review	-
+Just Eat Takeaway.com	FINANCIAL	unreviewed	-	needs-review	-
+Kaleido	FINANCIAL	unreviewed	-	needs-review	-
+Keeper Security Public Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Kohl's	FINANCIAL	unreviewed	-	needs-review	-
+KuCoin Managed Bug Bounty Program	FINANCIAL	unreviewed	-	likely-financial	-
+LastPass	FINANCIAL	unreviewed	-	needs-review	-
+Latitude Financial Services Bug Bounty 	FINANCIAL	unreviewed	-	likely-financial	-
+Lightspeed Hospitality	FINANCIAL	unreviewed	-	needs-review	-
+Lightspeed Retail	FINANCIAL	unreviewed	-	needs-review	-
+Lime	FINANCIAL	unreviewed	-	needs-review	-
+Linktree	FINANCIAL	unreviewed	-	needs-review	-
+Luno Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+MGM China Holdings Limited Managed Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Magic Labs Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Majid Al Futtaim Entertainment	FINANCIAL	unreviewed	-	needs-review	-
+Majid Al Futtaim Lifestyle	FINANCIAL	unreviewed	-	needs-review	-
+Majid Al Futtaim Loyalty Program (Share Rewards)	FINANCIAL	unreviewed	-	needs-review	-
+Majid Al Futtaim Properties	FINANCIAL	unreviewed	-	needs-review	-
+Majid Al Futtaim Retail	FINANCIAL	unreviewed	-	needs-review	-
+Mastercard Public Bug Bounty 	FINANCIAL	unreviewed	-	likely-financial	-
+Mattermost Public Bug Bounty Engagement 	FINANCIAL	unreviewed	-	needs-review	-
+Monash University Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Moneytree KK	FINANCIAL	unreviewed	-	likely-financial	-
+MyFitnessPal Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+NEOGOV Public Assets	FINANCIAL	unreviewed	-	needs-review	-
+Navan	FINANCIAL	unreviewed	-	needs-review	-
+New Blue Website (NBW) - VWFS Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+New Relic Public Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Northwestern Mutual - Public Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Nubank Brasil Managed Bug Bounty Program	FINANCIAL	unreviewed	-	likely-financial	-
+Octopus	FINANCIAL	unreviewed	-	needs-review	-
+OpenAI	FINANCIAL	unreviewed	-	needs-review	-
+OpenSea Managed Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+Opera Public Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Opsgenie	FINANCIAL	unreviewed	-	needs-review	-
+Optimizely	FINANCIAL	unreviewed	-	needs-review	-
+Optus Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Origin Energy	FINANCIAL	unreviewed	-	needs-review	-
+Pantheon	FINANCIAL	unreviewed	-	needs-review	-
+Pexels	FINANCIAL	unreviewed	-	needs-review	-
+Pinterest	FINANCIAL	unreviewed	-	needs-review	-
+Pixabay	FINANCIAL	unreviewed	-	needs-review	-
+PlanetHoster Bug Bounty 	FINANCIAL	unreviewed	-	needs-review	-
+Plusgrade Loyalty Public Program	FINANCIAL	unreviewed	-	needs-review	-
+Prosus	FINANCIAL	unreviewed	-	needs-review	-
+QuintoAndar Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Quizlet	FINANCIAL	unreviewed	-	needs-review	-
+REA Group | realestate.com.au, realcommercial.com.au, property.com.au	FINANCIAL	unreviewed	-	needs-review	-
+Rapyd	FINANCIAL	unreviewed	-	needs-review	-
+Recorded Future Public Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Refined	FINANCIAL	unreviewed	-	needs-review	-
+SEEK 	FINANCIAL	unreviewed	-	needs-review	-
+Sendbird	FINANCIAL	unreviewed	-	needs-review	-
+SimpliSafe Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Skroutz Public Managed Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Skyscanner	FINANCIAL	unreviewed	-	needs-review	-
+SnapNames Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Sophos	FINANCIAL	unreviewed	-	needs-review	-
+SoundCloud	FINANCIAL	unreviewed	-	needs-review	-
+Square	FINANCIAL	unreviewed	-	needs-review	-
+Statuspage	FINANCIAL	unreviewed	-	needs-review	-
+T-Mobile	FINANCIAL	unreviewed	-	needs-review	-
+TIDAL	FINANCIAL	unreviewed	-	needs-review	-
+TRM Labs Public Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Tamedia	FINANCIAL	unreviewed	-	needs-review	-
+Tesla	FINANCIAL	unreviewed	-	needs-review	-
+The Hut Group: Public Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+The Trade Desk	FINANCIAL	unreviewed	-	likely-financial	-
+TheFork Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Trello	FINANCIAL	unreviewed	-	needs-review	-
+Tripadvisor 	FINANCIAL	unreviewed	-	needs-review	-
+Tyler Technologies Data & Insights – Tyler Data Platform, powered by Socrata	FINANCIAL	unreviewed	-	needs-review	-
+USAA	FINANCIAL	unreviewed	-	needs-review	-
+Ultra Mobile Public Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Ultra Mobile Public ECOMM 2025 Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Ultra Mobile Retailer Portal Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+Under Armour Corporate	FINANCIAL	unreviewed	-	needs-review	-
+Under Armour Product Security	FINANCIAL	unreviewed	-	needs-review	-
+Unity Technologies	FINANCIAL	unreviewed	-	needs-review	-
+Upwork	FINANCIAL	unreviewed	-	needs-review	-
+Verisign Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Viator	FINANCIAL	unreviewed	-	needs-review	-
+Volkswagen 	FINANCIAL	unreviewed	-	needs-review	-
+Wise (ex-TransferWise)	FINANCIAL	unreviewed	-	needs-review	-
+Wyze Bug Bounty	FINANCIAL	unreviewed	-	needs-review	-
+Xfinity Home & xFi	FINANCIAL	unreviewed	-	needs-review	-
+YNAB	FINANCIAL	unreviewed	-	needs-review	-
+a25fbd69-4564-46c3-a8fa-e902a586ca89	FINANCIAL	unreviewed	-	needs-review	-
+abb	FINANCIAL	unreviewed	-	needs-review	-
+abercrombie_fitch	FINANCIAL	unreviewed	-	needs-review	-
+abn_amro_vdp	FINANCIAL	unreviewed	-	needs-review	-
+aboitizpower_corporation	FINANCIAL	unreviewed	-	needs-review	-
+acronis	FINANCIAL	unreviewed	-	needs-review	-
+adevinta_vdp	FINANCIAL	unreviewed	-	needs-review	-
+adobe	FINANCIAL	unreviewed	-	needs-review	-
+aeromexico_vdp	FINANCIAL	unreviewed	-	needs-review	-
+aig	FINANCIAL	unreviewed	-	needs-review	-
+airbnb	FINANCIAL	unreviewed	-	needs-review	-
+airtable	FINANCIAL	unreviewed	-	needs-review	-
+alasco-gmbh-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+algemeendagblad	FINANCIAL	unreviewed	-	needs-review	-
+alibaba_vdp	FINANCIAL	unreviewed	-	needs-review	-
+allegion	FINANCIAL	unreviewed	-	needs-review	-
+allegrobugbounty	FINANCIAL	unreviewed	-	needs-review	-
+alohi	FINANCIAL	unreviewed	-	needs-review	-
+alsco	FINANCIAL	unreviewed	-	needs-review	-
+alshaya	FINANCIAL	unreviewed	-	needs-review	-
+amazonvrp	FINANCIAL	unreviewed	-	needs-review	-
+amazonvrp-devices	FINANCIAL	unreviewed	-	needs-review	-
+anduril_industries	FINANCIAL	unreviewed	-	needs-review	-
+ant-group-security-response-center-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+anthropic	FINANCIAL	unreviewed	-	needs-review	-
+aon	FINANCIAL	unreviewed	-	needs-review	-
+apnic	FINANCIAL	unreviewed	-	needs-review	-
+arkanenetwork	FINANCIAL	unreviewed	-	needs-review	-
+arkose_labs	FINANCIAL	unreviewed	-	needs-review	-
+atg-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+atollsvdp	FINANCIAL	unreviewed	-	needs-review	-
+audible	FINANCIAL	unreviewed	-	needs-review	-
+automattic	FINANCIAL	unreviewed	-	needs-review	-
+avalara	FINANCIAL	unreviewed	-	needs-review	-
+aven_response	FINANCIAL	unreviewed	-	needs-review	-
+aws_vdp	FINANCIAL	unreviewed	-	needs-review	-
+banco_plata	FINANCIAL	unreviewed	-	needs-review	-
+basecamp	FINANCIAL	unreviewed	-	needs-review	-
+bcny	FINANCIAL	unreviewed	-	needs-review	-
+bill_vdp	FINANCIAL	unreviewed	-	needs-review	-
+bitmex	FINANCIAL	unreviewed	-	needs-review	-
+bitwarden	FINANCIAL	unreviewed	-	needs-review	-
+blackrock	FINANCIAL	unreviewed	-	needs-review	-
+blend-labs	FINANCIAL	unreviewed	-	needs-review	-
+bmwgroup	FINANCIAL	unreviewed	-	needs-review	-
+bookbeat	FINANCIAL	unreviewed	-	needs-review	-
+bookingcom	FINANCIAL	unreviewed	-	needs-review	-
+boozt	FINANCIAL	unreviewed	-	needs-review	-
+braze_inc	FINANCIAL	unreviewed	-	needs-review	-
+brightspeed	FINANCIAL	unreviewed	-	needs-review	-
+british_airways_vdp	FINANCIAL	unreviewed	-	needs-review	-
+bug-bounty-program-blablacar	FINANCIAL	unreviewed	-	needs-review	-
+bug-bounty-sncf-connect-1	FINANCIAL	unreviewed	-	needs-review	-
+buhlergroupvdp	FINANCIAL	unreviewed	-	needs-review	-
+bumba_bbp	FINANCIAL	unreviewed	-	needs-review	-
+bumble	FINANCIAL	unreviewed	-	needs-review	-
+bybit_fintech	FINANCIAL	unreviewed	-	likely-financial	-
+bykea	FINANCIAL	unreviewed	-	needs-review	-
+capital-one	FINANCIAL	unreviewed	-	likely-financial	-
+capitalcom	FINANCIAL	unreviewed	-	likely-financial	-
+cbre	FINANCIAL	unreviewed	-	needs-review	-
+cfc7f4ed-5602-4f4a-b60e-86a02f228c34	FINANCIAL	unreviewed	-	needs-review	-
+cff743df-3c9f-4fd7-a6f2-38595eaad188	FINANCIAL	unreviewed	-	needs-review	-
+chainlink	FINANCIAL	unreviewed	-	needs-review	-
+chaturbate	FINANCIAL	unreviewed	-	needs-review	-
+chia_network	FINANCIAL	unreviewed	-	needs-review	-
+circle-bbp	FINANCIAL	unreviewed	-	needs-review	-
+clarivate	FINANCIAL	unreviewed	-	needs-review	-
+clear	FINANCIAL	unreviewed	-	needs-review	-
+cloudflare	FINANCIAL	unreviewed	-	needs-review	-
+cloudways	FINANCIAL	unreviewed	-	needs-review	-
+cmcom	FINANCIAL	unreviewed	-	needs-review	-
+cognition	FINANCIAL	unreviewed	-	needs-review	-
+coinbase	FINANCIAL	unreviewed	-	likely-financial	-
+coindcx-bug-bounty-program	FINANCIAL	unreviewed	-	likely-financial	-
+coinhako	FINANCIAL	unreviewed	-	likely-financial	-
+coinspot	FINANCIAL	unreviewed	-	likely-financial	-
+contentsquare-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+costco	FINANCIAL	unreviewed	-	needs-review	-
+coupang_tw	FINANCIAL	unreviewed	-	needs-review	-
+creditkarma	FINANCIAL	unreviewed	-	needs-review	-
+crowdstrike	FINANCIAL	unreviewed	-	needs-review	-
+crypto	FINANCIAL	unreviewed	-	likely-financial	-
+cryptobox-bug-bounty	FINANCIAL	unreviewed	-	likely-financial	-
+cs_money	FINANCIAL	unreviewed	-	likely-financial	-
+csg-public	FINANCIAL	unreviewed	-	needs-review	-
+cyberghost-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+cybermalveillance-gouv-fr-sensibilization-prevention-and-support-in-terms-of-cybersecurity	FINANCIAL	unreviewed	-	needs-review	-
+cybersecuritycoalition	FINANCIAL	unreviewed	-	needs-review	-
+dailymotion-public-bug-bounty	FINANCIAL	unreviewed	-	needs-review	-
+dailypay_vdp	FINANCIAL	unreviewed	-	likely-financial	-
+daimler_truck	FINANCIAL	unreviewed	-	needs-review	-
+databricks	FINANCIAL	unreviewed	-	needs-review	-
+datacamp	FINANCIAL	unreviewed	-	needs-review	-
+datadome-bot-bounty	FINANCIAL	unreviewed	-	needs-review	-
+datadome-bug-bounty	FINANCIAL	unreviewed	-	needs-review	-
+demorgen	FINANCIAL	unreviewed	-	needs-review	-
+deribit	FINANCIAL	unreviewed	-	needs-review	-
+deriv	FINANCIAL	unreviewed	-	needs-review	-
+devolkskrant	FINANCIAL	unreviewed	-	needs-review	-
+dhlvdp	FINANCIAL	unreviewed	-	needs-review	-
+dib-vdp	FINANCIAL	unreviewed	-	needs-review	-
+digi-vdp	FINANCIAL	unreviewed	-	needs-review	-
+digitalocean	FINANCIAL	unreviewed	-	needs-review	-
+discourse	FINANCIAL	unreviewed	-	needs-review	-
+disney	FINANCIAL	unreviewed	-	needs-review	-
+doordash	FINANCIAL	unreviewed	-	needs-review	-
+doppler	FINANCIAL	unreviewed	-	needs-review	-
+dossier-medical-partage-program	FINANCIAL	unreviewed	-	needs-review	-
+dpgmedia	FINANCIAL	unreviewed	-	needs-review	-
+dropbox	FINANCIAL	unreviewed	-	needs-review	-
+duckduckgo	FINANCIAL	unreviewed	-	needs-review	-
+dummy	FINANCIAL	unreviewed	-	needs-review	-
+dynamic_labs	FINANCIAL	unreviewed	-	needs-review	-
+dynatrace	FINANCIAL	unreviewed	-	needs-review	-
+dyson	FINANCIAL	unreviewed	-	needs-review	-
+eToro Managed Bug Bounty Engagement	FINANCIAL	unreviewed	-	needs-review	-
+early_warning	FINANCIAL	unreviewed	-	needs-review	-
+eazyBI	FINANCIAL	unreviewed	-	needs-review	-
+eero	FINANCIAL	unreviewed	-	needs-review	-
+ehealthhub&meta-hubvznkul	FINANCIAL	unreviewed	-	needs-review	-
+elastic	FINANCIAL	unreviewed	-	needs-review	-
+emoney-advisor	FINANCIAL	unreviewed	-	likely-financial	-
+enjin	FINANCIAL	unreviewed	-	needs-review	-
+epicgames	FINANCIAL	unreviewed	-	needs-review	-
+equifax	FINANCIAL	unreviewed	-	needs-review	-
+estee-lauder	FINANCIAL	unreviewed	-	needs-review	-
+eternal	FINANCIAL	unreviewed	-	needs-review	-
+eurid	FINANCIAL	unreviewed	-	needs-review	-
+evernote	FINANCIAL	unreviewed	-	needs-review	-
+exactvulnerabilitydisclosureprogram	FINANCIAL	unreviewed	-	needs-review	-
+excoscalebugbounty	FINANCIAL	unreviewed	-	needs-review	-
+exness	FINANCIAL	unreviewed	-	needs-review	-
+exodus	FINANCIAL	unreviewed	-	needs-review	-
+expediagroup	FINANCIAL	unreviewed	-	needs-review	-
+expediagroup_bbp	FINANCIAL	unreviewed	-	needs-review	-
+expressvpn-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+ezviz-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+f2e89926-609b-4e5d-9224-9c8a4fff2190	FINANCIAL	unreviewed	-	needs-review	-
+fanduel	FINANCIAL	unreviewed	-	needs-review	-
+fanduel-vdp	FINANCIAL	unreviewed	-	needs-review	-
+faraday_inc	FINANCIAL	unreviewed	-	needs-review	-
+fastly-vdp	FINANCIAL	unreviewed	-	needs-review	-
+fdj-united-online-betting-gaming-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+ferrero	FINANCIAL	unreviewed	-	needs-review	-
+fertitta_entertainment	FINANCIAL	unreviewed	-	needs-review	-
+fetlife	FINANCIAL	unreviewed	-	needs-review	-
+fidelity	FINANCIAL	unreviewed	-	needs-review	-
+fifth_third_bank_vdp	FINANCIAL	unreviewed	-	likely-financial	-
+figma	FINANCIAL	unreviewed	-	needs-review	-
+files	FINANCIAL	unreviewed	-	needs-review	-
+fing	FINANCIAL	unreviewed	-	needs-review	-
+finra	FINANCIAL	unreviewed	-	needs-review	-
+fiserv	FINANCIAL	unreviewed	-	needs-review	-
+flickr	FINANCIAL	unreviewed	-	needs-review	-
+flipkart	FINANCIAL	unreviewed	-	needs-review	-
+floqast	FINANCIAL	unreviewed	-	needs-review	-
+flutteruki	FINANCIAL	unreviewed	-	needs-review	-
+ford	FINANCIAL	unreviewed	-	needs-review	-
+forescout_technologies	FINANCIAL	unreviewed	-	needs-review	-
+freshworks	FINANCIAL	unreviewed	-	needs-review	-
+frontegg	FINANCIAL	unreviewed	-	needs-review	-
+fronthq	FINANCIAL	unreviewed	-	needs-review	-
+getyourguide_vdp	FINANCIAL	unreviewed	-	needs-review	-
+github	FINANCIAL	unreviewed	-	needs-review	-
+gitlab	FINANCIAL	unreviewed	-	needs-review	-
+global-payments	FINANCIAL	unreviewed	-	likely-financial	-
+gocardless_bbp	FINANCIAL	unreviewed	-	likely-financial	-
+gojek-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+goldmansachs	FINANCIAL	unreviewed	-	needs-review	-
+goodrx	FINANCIAL	unreviewed	-	needs-review	-
+goto-financial-public-bounty-program	FINANCIAL	unreviewed	-	likely-financial	-
+grab	FINANCIAL	unreviewed	-	needs-review	-
+greenhouse	FINANCIAL	unreviewed	-	needs-review	-
+grindr	FINANCIAL	unreviewed	-	needs-review	-
+grw-trading-fze-bug-bounty-program	FINANCIAL	unreviewed	-	likely-financial	-
+gymshark	FINANCIAL	unreviewed	-	needs-review	-
+harman-international-public-bug-bounty	FINANCIAL	unreviewed	-	needs-review	-
+harman-international-web-applications	FINANCIAL	unreviewed	-	needs-review	-
+henkel_vdp	FINANCIAL	unreviewed	-	needs-review	-
+heretechnologies	FINANCIAL	unreviewed	-	needs-review	-
+hetlaatstenieuws	FINANCIAL	unreviewed	-	needs-review	-
+hetparool	FINANCIAL	unreviewed	-	needs-review	-
+hilton	FINANCIAL	unreviewed	-	needs-review	-
+hostinger	FINANCIAL	unreviewed	-	needs-review	-
+hotmartvdp	FINANCIAL	unreviewed	-	needs-review	-
+hpe_vdp	FINANCIAL	unreviewed	-	needs-review	-
+hubspot	FINANCIAL	unreviewed	-	needs-review	-
+huisvesting	FINANCIAL	unreviewed	-	needs-review	-
+humo	FINANCIAL	unreviewed	-	needs-review	-
+hyatt	FINANCIAL	unreviewed	-	needs-review	-
+hypr-corp	FINANCIAL	unreviewed	-	needs-review	-
+iFood: Bug Bounty Program	FINANCIAL	unreviewed	-	needs-review	-
+iRobot	FINANCIAL	unreviewed	-	needs-review	-
+iciparisxl	FINANCIAL	unreviewed	-	needs-review	-
+imou-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+indrive	FINANCIAL	unreviewed	-	needs-review	-
+infomaniak-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+innovapost	FINANCIAL	unreviewed	-	needs-review	-
+insightly	FINANCIAL	unreviewed	-	needs-review	-
+inspectorio	FINANCIAL	unreviewed	-	needs-review	-
+instacart	FINANCIAL	unreviewed	-	needs-review	-
+insulet_corporation	FINANCIAL	unreviewed	-	needs-review	-
+interco_vdp	FINANCIAL	unreviewed	-	needs-review	-
+intergamma	FINANCIAL	unreviewed	-	needs-review	-
+intigriti	FINANCIAL	unreviewed	-	needs-review	-
+ion	FINANCIAL	unreviewed	-	needs-review	-
+itau_unibanco	FINANCIAL	unreviewed	-	needs-review	-
+jetblue	FINANCIAL	unreviewed	-	needs-review	-
+john-deere	FINANCIAL	unreviewed	-	needs-review	-
+judgeme	FINANCIAL	unreviewed	-	needs-review	-
+kaseya	FINANCIAL	unreviewed	-	needs-review	-
+kayak	FINANCIAL	unreviewed	-	needs-review	-
+khealth	FINANCIAL	unreviewed	-	needs-review	-
+kiwicom	FINANCIAL	unreviewed	-	needs-review	-
+kkr_vdp	FINANCIAL	unreviewed	-	needs-review	-
+klarna	FINANCIAL	unreviewed	-	needs-review	-
+komoju-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+kong	FINANCIAL	unreviewed	-	needs-review	-
+krisp	FINANCIAL	unreviewed	-	needs-review	-
+kruidvat	FINANCIAL	unreviewed	-	needs-review	-
+kubernetes	FINANCIAL	unreviewed	-	needs-review	-
+lansweeper1	FINANCIAL	unreviewed	-	needs-review	-
+lark_technologies	FINANCIAL	unreviewed	-	needs-review	-
+latamairlines	FINANCIAL	unreviewed	-	needs-review	-
+libelle	FINANCIAL	unreviewed	-	needs-review	-
+liferay-vdp	FINANCIAL	unreviewed	-	needs-review	-
+lightspark_bbp	FINANCIAL	unreviewed	-	needs-review	-
+linkedin	FINANCIAL	unreviewed	-	needs-review	-
+logitech	FINANCIAL	unreviewed	-	needs-review	-
+lovable-vdp	FINANCIAL	unreviewed	-	needs-review	-
+lpl_financial-vdp	FINANCIAL	unreviewed	-	likely-financial	-
+lululemon	FINANCIAL	unreviewed	-	needs-review	-
+lyst	FINANCIAL	unreviewed	-	needs-review	-
+magic-eden	FINANCIAL	unreviewed	-	needs-review	-
+malwarebytes	FINANCIAL	unreviewed	-	needs-review	-
+mapbox	FINANCIAL	unreviewed	-	needs-review	-
+mariadb	FINANCIAL	unreviewed	-	needs-review	-
+marionnaud	FINANCIAL	unreviewed	-	needs-review	-
+marriott	FINANCIAL	unreviewed	-	needs-review	-
+mars	FINANCIAL	unreviewed	-	needs-review	-
+matomo	FINANCIAL	unreviewed	-	needs-review	-
+maya-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+mcgrawhill	FINANCIAL	unreviewed	-	needs-review	-
+mediamarktsaturn-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+meesho_bbp	FINANCIAL	unreviewed	-	needs-review	-
+memento-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+mercadolibre	FINANCIAL	unreviewed	-	needs-review	-
+mergify	FINANCIAL	unreviewed	-	needs-review	-
+metamask	FINANCIAL	unreviewed	-	needs-review	-
+mintel	FINANCIAL	unreviewed	-	needs-review	-
+mobilevikings	FINANCIAL	unreviewed	-	needs-review	-
+mod_supply_chain_vdp	FINANCIAL	unreviewed	-	needs-review	-
+modern_treasury	FINANCIAL	unreviewed	-	needs-review	-
+mon-espace-sante-mes	FINANCIAL	unreviewed	-	needs-review	-
+mondelez	FINANCIAL	unreviewed	-	needs-review	-
+moneybird	FINANCIAL	unreviewed	-	likely-financial	-
+moneybox-bug-bounty	FINANCIAL	unreviewed	-	likely-financial	-
+mongodb	FINANCIAL	unreviewed	-	needs-review	-
+monzopublicbugbountyprogram	FINANCIAL	unreviewed	-	needs-review	-
+moonpay	FINANCIAL	unreviewed	-	likely-financial	-
+moov	FINANCIAL	unreviewed	-	needs-review	-
+mozilla	FINANCIAL	unreviewed	-	needs-review	-
+mpesa	FINANCIAL	unreviewed	-	needs-review	-
+mtn_group	FINANCIAL	unreviewed	-	needs-review	-
+myndr	FINANCIAL	unreviewed	-	needs-review	-
+nba-public	FINANCIAL	unreviewed	-	needs-review	-
+neon_bbp	FINANCIAL	unreviewed	-	needs-review	-
+netflix	FINANCIAL	unreviewed	-	needs-review	-
+netlify	FINANCIAL	unreviewed	-	needs-review	-
+newegg	FINANCIAL	unreviewed	-	needs-review	-
+nextcloud	FINANCIAL	unreviewed	-	needs-review	-
+nexuzhealth	FINANCIAL	unreviewed	-	needs-review	-
+ninjakiwigames	FINANCIAL	unreviewed	-	needs-review	-
+nmt	FINANCIAL	unreviewed	-	needs-review	-
+nordsecurity	FINANCIAL	unreviewed	-	needs-review	-
+notion	FINANCIAL	unreviewed	-	needs-review	-
+nutanix	FINANCIAL	unreviewed	-	needs-review	-
+oanda	FINANCIAL	unreviewed	-	needs-review	-
+ohiosecretaryofstate	FINANCIAL	unreviewed	-	needs-review	-
+okg	FINANCIAL	unreviewed	-	needs-review	-
+on	FINANCIAL	unreviewed	-	needs-review	-
+onedoc-sa-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+onlineinschrijvingenbetalingstoepassing	FINANCIAL	unreviewed	-	needs-review	-
+ooredoo-qpsc-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+oportun_vdp	FINANCIAL	unreviewed	-	needs-review	-
+oppo_bbp	FINANCIAL	unreviewed	-	needs-review	-
+orbiavdp	FINANCIAL	unreviewed	-	needs-review	-
+otto-de-bug-bounty	FINANCIAL	unreviewed	-	needs-review	-
+outscale	FINANCIAL	unreviewed	-	needs-review	-
+ovh	FINANCIAL	unreviewed	-	needs-review	-
+paddle-com-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+pagerduty	FINANCIAL	unreviewed	-	needs-review	-
+particle-health-vdp	FINANCIAL	unreviewed	-	needs-review	-
+payoneer	FINANCIAL	unreviewed	-	likely-financial	-
+paypal	FINANCIAL	unreviewed	-	likely-financial	-
+paystack-vdp	FINANCIAL	unreviewed	-	likely-financial	-
+peloton	FINANCIAL	unreviewed	-	needs-review	-
+peoplecert	FINANCIAL	unreviewed	-	needs-review	-
+pepsico_vdp	FINANCIAL	unreviewed	-	needs-review	-
+personio	FINANCIAL	unreviewed	-	needs-review	-
+picsart	FINANCIAL	unreviewed	-	needs-review	-
+pine-labs-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+pingidentity	FINANCIAL	unreviewed	-	needs-review	-
+pixiv	FINANCIAL	unreviewed	-	needs-review	-
+plaid	FINANCIAL	unreviewed	-	needs-review	-
+playstation	FINANCIAL	unreviewed	-	needs-review	-
+playtika	FINANCIAL	unreviewed	-	needs-review	-
+polygon-technology	FINANCIAL	unreviewed	-	needs-review	-
+pornbox	FINANCIAL	unreviewed	-	needs-review	-
+portofantwerp	FINANCIAL	unreviewed	-	needs-review	-
+portswigger	FINANCIAL	unreviewed	-	needs-review	-
+priceline	FINANCIAL	unreviewed	-	needs-review	-
+private-internet-access-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+privatebankdelen	FINANCIAL	unreviewed	-	likely-financial	-
+privy-bbp	FINANCIAL	unreviewed	-	needs-review	-
+programmes-de-primes-aux-bogues-du-gouvernement-du-quebec-cgcd	FINANCIAL	unreviewed	-	needs-review	-
+qinetiq	FINANCIAL	unreviewed	-	needs-review	-
+qualifiedresponsibledisclosureprogram	FINANCIAL	unreviewed	-	needs-review	-
+quora	FINANCIAL	unreviewed	-	needs-review	-
+qwant	FINANCIAL	unreviewed	-	needs-review	-
+razorpay	FINANCIAL	unreviewed	-	likely-financial	-
+reddit	FINANCIAL	unreviewed	-	needs-review	-
+redis-vdp	FINANCIAL	unreviewed	-	needs-review	-
+redox_bbp	FINANCIAL	unreviewed	-	needs-review	-
+regions_financial	FINANCIAL	unreviewed	-	likely-financial	-
+rei_bbp	FINANCIAL	unreviewed	-	needs-review	-
+remitly	FINANCIAL	unreviewed	-	likely-financial	-
+resmed	FINANCIAL	unreviewed	-	needs-review	-
+responsiblevulnerabilitydisclosureprogram	FINANCIAL	unreviewed	-	needs-review	-
+ridewithvia	FINANCIAL	unreviewed	-	needs-review	-
+ring	FINANCIAL	unreviewed	-	needs-review	-
+ripencc	FINANCIAL	unreviewed	-	needs-review	-
+ripio	FINANCIAL	unreviewed	-	needs-review	-
+rivianbugbounty	FINANCIAL	unreviewed	-	needs-review	-
+robinhood	FINANCIAL	unreviewed	-	needs-review	-
+robinhood_markets	FINANCIAL	unreviewed	-	needs-review	-
+roblox	FINANCIAL	unreviewed	-	needs-review	-
+rockstargames	FINANCIAL	unreviewed	-	needs-review	-
+s-pankki	FINANCIAL	unreviewed	-	needs-review	-
+salt-mobile-sa-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+sante-publique-france-bugbounty-public-program	FINANCIAL	unreviewed	-	needs-review	-
+sbbglobal	FINANCIAL	unreviewed	-	needs-review	-
+security	FINANCIAL	unreviewed	-	needs-review	-
+semrush	FINANCIAL	unreviewed	-	needs-review	-
+sheer_bbp	FINANCIAL	unreviewed	-	needs-review	-
+shein	FINANCIAL	unreviewed	-	needs-review	-
+shopify	FINANCIAL	unreviewed	-	needs-review	-
+shutterfly_vdp	FINANCIAL	unreviewed	-	needs-review	-
+singlestore	FINANCIAL	unreviewed	-	needs-review	-
+six-group	FINANCIAL	unreviewed	-	needs-review	-
+slack	FINANCIAL	unreviewed	-	needs-review	-
+smtp2go	FINANCIAL	unreviewed	-	needs-review	-
+snapchat	FINANCIAL	unreviewed	-	needs-review	-
+socialdeal	FINANCIAL	unreviewed	-	needs-review	-
+sogexia	FINANCIAL	unreviewed	-	needs-review	-
+sorare	FINANCIAL	unreviewed	-	needs-review	-
+spotify	FINANCIAL	unreviewed	-	needs-review	-
+stagingdoteverydotorg	FINANCIAL	unreviewed	-	needs-review	-
+starbucks	FINANCIAL	unreviewed	-	needs-review	-
+starbucks_china	FINANCIAL	unreviewed	-	needs-review	-
+starbucks_japan	FINANCIAL	unreviewed	-	needs-review	-
+starling_bank	FINANCIAL	unreviewed	-	likely-financial	-
+storebrand-rd	FINANCIAL	unreviewed	-	needs-review	-
+stripchat	FINANCIAL	unreviewed	-	needs-review	-
+stripe	FINANCIAL	unreviewed	-	needs-review	-
+stripo	FINANCIAL	unreviewed	-	needs-review	-
+superbet	FINANCIAL	unreviewed	-	needs-review	-
+superdrug	FINANCIAL	unreviewed	-	needs-review	-
+superhuman	FINANCIAL	unreviewed	-	needs-review	-
+swapcard	FINANCIAL	unreviewed	-	likely-financial	-
+swiss-post	FINANCIAL	unreviewed	-	needs-review	-
+syfe_bbp	FINANCIAL	unreviewed	-	needs-review	-
+tbs-sct	FINANCIAL	unreviewed	-	needs-review	-
+tchap-public	FINANCIAL	unreviewed	-	needs-review	-
+teamviewer-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+temu	FINANCIAL	unreviewed	-	needs-review	-
+theperfumeshop	FINANCIAL	unreviewed	-	needs-review	-
+thuringer-aufbaubank-bug-bounty-program	FINANCIAL	unreviewed	-	likely-financial	-
+tiktok	FINANCIAL	unreviewed	-	needs-review	-
+tinder	FINANCIAL	unreviewed	-	needs-review	-
+toastvdp	FINANCIAL	unreviewed	-	needs-review	-
+tomorrowland	FINANCIAL	unreviewed	-	needs-review	-
+tomtom	FINANCIAL	unreviewed	-	needs-review	-
+toolsforhumanity	FINANCIAL	unreviewed	-	needs-review	-
+top_echelon_software	FINANCIAL	unreviewed	-	needs-review	-
+toyota	FINANCIAL	unreviewed	-	needs-review	-
+transunion	FINANCIAL	unreviewed	-	needs-review	-
+trendyol	FINANCIAL	unreviewed	-	needs-review	-
+trip_com	FINANCIAL	unreviewed	-	needs-review	-
+trouw	FINANCIAL	unreviewed	-	needs-review	-
+truecaller	FINANCIAL	unreviewed	-	needs-review	-
+tucows_vdp	FINANCIAL	unreviewed	-	needs-review	-
+twilio	FINANCIAL	unreviewed	-	needs-review	-
+uber	FINANCIAL	unreviewed	-	needs-review	-
+udemy	FINANCIAL	unreviewed	-	needs-review	-
+ui	FINANCIAL	unreviewed	-	needs-review	-
+unico_idtech	FINANCIAL	unreviewed	-	needs-review	-
+unitigroup	FINANCIAL	unreviewed	-	needs-review	-
+upholdcom	FINANCIAL	unreviewed	-	likely-financial	-
+urbancompany	FINANCIAL	unreviewed	-	needs-review	-
+us-department-of-state	FINANCIAL	unreviewed	-	needs-review	-
+usps	FINANCIAL	unreviewed	-	needs-review	-
+uzleuven	FINANCIAL	unreviewed	-	needs-review	-
+valve	FINANCIAL	unreviewed	-	needs-review	-
+varonis	FINANCIAL	unreviewed	-	needs-review	-
+vectra_ai_vdp	FINANCIAL	unreviewed	-	needs-review	-
+vendasta	FINANCIAL	unreviewed	-	needs-review	-
+verily_life_sciences	FINANCIAL	unreviewed	-	needs-review	-
+vfs-global-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+vidaxl-services-open-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+vimeo	FINANCIAL	unreviewed	-	needs-review	-
+vincisa-public-program	FINANCIAL	unreviewed	-	needs-review	-
+visa	FINANCIAL	unreviewed	-	needs-review	-
+visma	FINANCIAL	unreviewed	-	needs-review	-
+vodafone	FINANCIAL	unreviewed	-	needs-review	-
+vodafone_oman	FINANCIAL	unreviewed	-	needs-review	-
+voiscooters	FINANCIAL	unreviewed	-	needs-review	-
+vrtnv	FINANCIAL	unreviewed	-	needs-review	-
+vtmgo	FINANCIAL	unreviewed	-	needs-review	-
+wallet_on_telegram	FINANCIAL	unreviewed	-	likely-financial	-
+water-link	FINANCIAL	unreviewed	-	needs-review	-
+watsons	FINANCIAL	unreviewed	-	needs-review	-
+wealthsimple	FINANCIAL	unreviewed	-	needs-review	-
+website	FINANCIAL	unreviewed	-	needs-review	-
+wellhive	FINANCIAL	unreviewed	-	needs-review	-
+wellsfargo-bbp	FINANCIAL	unreviewed	-	needs-review	-
+whatnot	FINANCIAL	unreviewed	-	needs-review	-
+whoop_bug_bounty	FINANCIAL	unreviewed	-	needs-review	-
+wickr	FINANCIAL	unreviewed	-	needs-review	-
+wisdomtree	FINANCIAL	unreviewed	-	needs-review	-
+withings-public-program	FINANCIAL	unreviewed	-	needs-review	-
+wolt	FINANCIAL	unreviewed	-	needs-review	-
+wonder-vdp	FINANCIAL	unreviewed	-	needs-review	-
+wordpress	FINANCIAL	unreviewed	-	needs-review	-
+wpengine	FINANCIAL	unreviewed	-	needs-review	-
+wpenginebugbounty	FINANCIAL	unreviewed	-	needs-review	-
+x	FINANCIAL	unreviewed	-	needs-review	-
+xelians-blackbox-program	FINANCIAL	unreviewed	-	needs-review	-
+xiaomi	FINANCIAL	unreviewed	-	needs-review	-
+xvideos	FINANCIAL	unreviewed	-	needs-review	-
+yahoobugbounty	FINANCIAL	unreviewed	-	needs-review	-
+yelp	FINANCIAL	unreviewed	-	needs-review	-
+yes-we-hack	FINANCIAL	unreviewed	-	needs-review	-
+yoti	FINANCIAL	unreviewed	-	needs-review	-
+zebra_vdp	FINANCIAL	unreviewed	-	needs-review	-
+zecible-public-bug-bounty-program	FINANCIAL	unreviewed	-	needs-review	-
+zooplus	FINANCIAL	unreviewed	-	needs-review	-
+zurich-insurance	FINANCIAL	unreviewed	-	needs-review	-
