@@ -567,6 +567,14 @@ run_ai_idor() { [[ -f "$AI_IDOR_SCRIPT" ]] && bash "$AI_IDOR_SCRIPT" >>"$LOG_FIL
 BRIEFING_SCRIPT="${BRIEFING_SCRIPT:-$(script_path recon_briefing.sh)}"
 BRIEFING_INTERVAL="${BRIEFING_INTERVAL:-3600}"
 run_briefing() { [[ -f "$BRIEFING_SCRIPT" ]] && bash "$BRIEFING_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_nday — n-day racing: Claude version-reasons KEV/CVE matches (kills the KEV FP) -> worklist.
+NDAY_SCRIPT="${NDAY_SCRIPT:-$(script_path recon_nday.sh)}"
+NDAY_INTERVAL="${NDAY_INTERVAL:-7200}"
+run_nday() { [[ -f "$NDAY_SCRIPT" ]] && bash "$NDAY_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_ghleaks — GitHub-leak pillar: code-search + trufflehog verify (live secrets), token-gated.
+GHLEAKS_SCRIPT="${GHLEAKS_SCRIPT:-$(script_path recon_ghleaks.sh)}"
+GHLEAKS_INTERVAL="${GHLEAKS_INTERVAL:-10800}"
+run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -715,6 +723,8 @@ run_discord_bot() {
   supervise_loop "ai-monitor"     "AI_MONITOR_INTERVAL"    run_ai_monitor     &
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
   supervise_loop "ai-idor"        "AI_IDOR_INTERVAL"       run_ai_idor        &
+  supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
+  supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
