@@ -28,8 +28,7 @@ EDGES = {
     "discovered":     {"scored", "dismissed"},
     "scored":         {"verifying", "lead_exhausted", "dismissed"},
     "verifying":      {"confirmed", "scored", "lead_exhausted", "dismissed"},
-    "confirmed":      {"reported", "staged", "dismissed", "scored"},  # staged = financial PoC-staging; scored = freshness bounce
-    "staged":         {"reported", "dismissed", "scored"},            # human triggers staged PoC -> reported
+    "confirmed":      {"reported", "dismissed", "scored"},            # scored = freshness bounce
     "reported":       {"submitted", "dismissed", "confirmed"},        # confirmed = bounce-back on re-validation fail
     "lead_exhausted": {"scored", "dismissed"},                        # re-open on a new signal
     "submitted":      set(),
@@ -61,6 +60,20 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     with open(SCHEMA, "r", encoding="utf-8") as fh:
         conn.executescript(fh.read())
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent in-place migrations for DBs created before a schema change.
+    Runs natively (inside WSL) on every daemon cycle — safe to call repeatedly."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(findings)")}
+    # Gate-0 financial-tier classifier was removed (scope is the only gate); drop the
+    # vestigial column from pre-existing DBs. DROP COLUMN is sqlite >= 3.35.
+    if "tier" in cols:
+        try:
+            conn.execute("ALTER TABLE findings DROP COLUMN tier")
+        except sqlite3.OperationalError:
+            pass  # older sqlite without DROP COLUMN — leave it (harmless, unread)
 
 
 def fp_signature(host: str, signal_class: str | None, vuln_class: str | None) -> str:
@@ -77,7 +90,7 @@ def _audit(conn, finding_id, event, frm=None, to=None, detail=None):
 
 
 # ---- findings ---------------------------------------------------------------
-def upsert_finding(conn, host, *, url=None, program=None, tier="FINANCIAL",
+def upsert_finding(conn, host, *, url=None, program=None,
                    signal_class=None, vuln_class=None, score=0, priority=None,
                    state="scored", ttl_at=None) -> int:
     """Insert or refresh a finding. Returns finding id. Does NOT regress state of
@@ -90,10 +103,10 @@ def upsert_finding(conn, host, *, url=None, program=None, tier="FINANCIAL",
         row = conn.execute("SELECT id,state FROM findings WHERE dedup_key=?", (dedup,)).fetchone()
         if row is None:
             cur = conn.execute(
-                """INSERT INTO findings(dedup_key,host,url,program,tier,signal_class,vuln_class,
+                """INSERT INTO findings(dedup_key,host,url,program,signal_class,vuln_class,
                    state,score,priority,fp_signature,created_at,updated_at,state_changed_at,ttl_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (dedup, host, url, program, tier, signal_class, vuln_class, state,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (dedup, host, url, program, signal_class, vuln_class, state,
                  score, priority, sig, now, now, now, ttl_at),
             )
             fid = cur.lastrowid
@@ -101,8 +114,8 @@ def upsert_finding(conn, host, *, url=None, program=None, tier="FINANCIAL",
             return fid
         conn.execute(
             """UPDATE findings SET url=COALESCE(?,url), program=COALESCE(?,program),
-               tier=?, score=?, priority=?, updated_at=? WHERE id=?""",
-            (url, program, tier, score, priority, now, row["id"]),
+               score=?, priority=?, updated_at=? WHERE id=?""",
+            (url, program, score, priority, now, row["id"]),
         )
         return row["id"]
 
@@ -271,10 +284,7 @@ def review_tier_for(confidence: float) -> str:
 def record_confirmed(conn, host, *, url=None, program=None, signal_class=None,
                      vuln_class=None, score=0, evidence=None, confidence=0.0) -> int:
     """Authoritative gate write: a probe fired → finding is CONFIRMED. Upserts and
-    forces state=confirmed (the gate already verified non-intrusively). Tier comes
-    from Gate 0. Idempotent on dedup_key."""
-    import tier as _tier
-    tier = _tier.classify(program)
+    forces state=confirmed (the gate already verified non-intrusively). Idempotent on dedup_key."""
     dedup = f"{(host or '').lower()}|{signal_class or ''}|{vuln_class or ''}"
     sig = fp_signature(host, signal_class, vuln_class)
     ev = evidence if isinstance(evidence, str) else json.dumps(evidence or {})
@@ -283,24 +293,24 @@ def record_confirmed(conn, host, *, url=None, program=None, signal_class=None,
     with conn:
         conn.execute("BEGIN")
         cur = conn.execute(
-            """INSERT INTO findings(dedup_key,host,url,program,tier,signal_class,vuln_class,
+            """INSERT INTO findings(dedup_key,host,url,program,signal_class,vuln_class,
                state,score,confidence,review_tier,fp_signature,evidence,created_at,updated_at,state_changed_at,verifying_since)
-               VALUES(?,?,?,?,?,?,?, 'confirmed',?,?,?,?,?,?,?,?,NULL)
+               VALUES(?,?,?,?,?,?, 'confirmed',?,?,?,?,?,?,?,?,NULL)
                ON CONFLICT(dedup_key) DO UPDATE SET state='confirmed', url=COALESCE(excluded.url,url),
-                 program=excluded.program, tier=excluded.tier, score=excluded.score,
+                 program=excluded.program, score=excluded.score,
                  confidence=excluded.confidence, review_tier=excluded.review_tier,
                  evidence=excluded.evidence, updated_at=excluded.updated_at,
                  state_changed_at=excluded.state_changed_at, verifying_since=NULL""",
-            (dedup, host, url, program, tier, signal_class, vuln_class, score, confidence, rt, sig, ev, now, now, now))
+            (dedup, host, url, program, signal_class, vuln_class, score, confidence, rt, sig, ev, now, now, now))
         fid = conn.execute("SELECT id FROM findings WHERE dedup_key=?", (dedup,)).fetchone()["id"]
-        _audit(conn, fid, "promote", None, "confirmed", f"confidence={confidence} tier={tier} review={rt}")
+        _audit(conn, fid, "promote", None, "confirmed", f"confidence={confidence} review={rt}")
     return fid
 
 
 def ai_pending(conn, limit: int = 20) -> list:
     """Confirmed findings not yet judged by the Claude validation agent."""
     rows = conn.execute(
-        "SELECT id,host,url,program,tier,signal_class,vuln_class,score,confidence,evidence "
+        "SELECT id,host,url,program,signal_class,vuln_class,score,confidence,evidence "
         "FROM findings WHERE state='confirmed' AND ai_verdict IS NULL ORDER BY confidence DESC LIMIT ?",
         (limit,)).fetchall()
     return [dict(r) for r in rows]

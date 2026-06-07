@@ -28,7 +28,6 @@ class Finding:
     url: str = ""
     program: str = ""
     platform: str = ""           # hackerone | bugcrowd | intigriti | (other)
-    tier: str = "FINANCIAL"
     vuln_class: str = "info-disclosure"
     signal_class: str = ""
     title: str = ""
