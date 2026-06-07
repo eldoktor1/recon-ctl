@@ -199,7 +199,8 @@ while IFS=$'\t' read -r host url fresh; do
 
   # --- gf-filter into per-class candidate sets ---
   declare -A classfile=()
-  for cls in $DAST_CLASSES; do
+  IFS=' ' read -ra _DAST_ARR <<< "$DAST_CLASSES"   # split on space (global IFS=$'\n\t' would NOT)
+  for cls in "${_DAST_ARR[@]}"; do
     [[ -f "$HOME/.gf/$cls.json" ]] || continue
     cf="$hdir/$cls.txt"
     "$GF" "$cls" < "$urls" 2>/dev/null | sort -u > "$cf"
