@@ -482,7 +482,7 @@ run_evidence_gate() { v21_killed evidence_gate && return 0; [[ -f "$EVIDENCE_GAT
 # (reconrun) so they share the gate's ownership of ~/recon/v3/findings.db (the gate
 # writes it as reconrun; a d0k reader/writer would hit a perms conflict). reporter
 # may re-probe a stale finding (target-facing); run_scanner also enforces vpn_down.
-V3_PY_DIR="${V3_PY_DIR:-$(cd "$(dirname "$(script_path recon_evidence_gate.sh)")/../v3" 2>/dev/null && pwd)}"
+V3_PY_DIR="${V3_PY_DIR:-$(cd "$(dirname "$(script_path recon_evidence_gate.sh)")/../engine" 2>/dev/null && pwd)}"
 REPORTER_INTERVAL="${REPORTER_INTERVAL:-1800}"
 V3_DIGEST_INTERVAL="${V3_DIGEST_INTERVAL:-86400}"
 run_reporter()  { [[ -f "$V3_PY_DIR/reporter.py" ]] && run_scanner python3 "$V3_PY_DIR/reporter.py" >/dev/null 2>&1 || true; }

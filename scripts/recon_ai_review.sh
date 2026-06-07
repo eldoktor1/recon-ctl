@@ -29,7 +29,7 @@ source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true   # discord_hook / discord
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
-STATE_PY="${STATE_PY:-$SCRIPT_DIR/../v3/state.py}"
+STATE_PY="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
 # absolute path — claude is a native install in ~/.local/bin (not always on PATH)
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
 CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"          # verification model (match-to-task: sonnet)

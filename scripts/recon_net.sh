@@ -65,7 +65,7 @@ discord_hook() {
 # Best-effort + non-fatal; lanes keep their own fast pings (e.g. #takeovers) regardless.
 db_confirm() {
   command -v python3 >/dev/null 2>&1 || return 0
-  local _sp="${STATE_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../v3/state.py}"
+  local _sp="${STATE_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../engine/state.py}"
   [[ -f "$_sp" ]] || return 0
   V3_DB="${V3_DB:-$HOME/recon/v3/findings.db}" python3 "$_sp" record-confirmed "$@" >/dev/null 2>&1 || true
 }

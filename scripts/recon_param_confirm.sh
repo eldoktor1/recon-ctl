@@ -22,7 +22,7 @@ source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
-STATE_PY="${STATE_PY:-$REPO_DIR/v3/state.py}"
+STATE_PY="${STATE_PY:-$REPO_DIR/engine/state.py}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"

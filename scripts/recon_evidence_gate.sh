@@ -46,7 +46,7 @@ REPORTER_QUEUE="${REPORTER_QUEUE:-$V3_DIR/reporter_queue.jsonl}"
 # (P1); >=0.85 confirmed/immediate (P0). FP signatures learned from exhausted leads
 # are queried before probing so the gate goes quieter over time.
 V3_DB="${V3_DB:-$V3_DIR/findings.db}"
-STATE_PY="${STATE_PY:-$SCRIPT_DIR/../v3/state.py}"
+STATE_PY="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
 GATE_PROMOTE_CONF="${GATE_PROMOTE_CONF:-0.70}"
 GATE_IMMEDIATE_CONF="${GATE_IMMEDIATE_CONF:-0.85}"
 
