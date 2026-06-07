@@ -100,3 +100,34 @@ CREATE TABLE IF NOT EXISTS run_counters (
     UNIQUE(day, scope, metric)
 );
 CREATE INDEX IF NOT EXISTS idx_counters_day ON run_counters(day, scope, metric);
+
+-- ---- knowledge_base: RAG-lite learning over past verified outcomes ------------
+-- The article uses sqlite-vec semantic embeddings ("seen this stack before? what
+-- broke?"). We adapt that to a NO-API, no-embedding-dependency design: every Claude
+-- verdict writes a compact profile row here; the analysis/verify agents retrieve the
+-- most relevant prior outcomes by tech-stack + vuln-class keyword match and inject
+-- them into Claude's prompt as context. Claude does the semantic matching in-context.
+-- Net effect matches the article: the system gets quieter and smarter over time,
+-- avoiding mistakes (and noise) it has already reasoned through. (Can be upgraded to
+-- true vectors later by adding an embedding column + sqlite-vec; the API stays same.)
+CREATE TABLE IF NOT EXISTS knowledge_base (
+    id            INTEGER PRIMARY KEY,
+    host          TEXT,
+    root_domain   TEXT,                  -- grouping key for "same target family"
+    program       TEXT,
+    tech          TEXT,                  -- comma-joined stack tags (primary retrieval dim)
+    signal_class  TEXT,
+    vuln_class    TEXT,
+    verdict       TEXT NOT NULL,         -- real | fp | needs-human (the outcome that happened)
+    confidence    REAL,
+    reason        TEXT,                  -- Claude's one-line rationale (the learned lesson)
+    profile       TEXT,                  -- normalized "tech | class | title" free-text for LIKE search
+    source        TEXT,                  -- ai-verify | ai-analyze | operator
+    hit_count     INTEGER NOT NULL DEFAULT 0,  -- times retrieved as context (usefulness signal)
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    last_seen_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_tech       ON knowledge_base(tech);
+CREATE INDEX IF NOT EXISTS idx_kb_vulnclass  ON knowledge_base(vuln_class);
+CREATE INDEX IF NOT EXISTS idx_kb_rootdomain ON knowledge_base(root_domain);
+CREATE INDEX IF NOT EXISTS idx_kb_verdict    ON knowledge_base(verdict);

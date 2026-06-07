@@ -42,6 +42,12 @@ def _utc() -> str:
 
 
 def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+    # CROSS-USER WRITE: the evidence gate writes as `reconrun` (target-facing,
+    # VPN-gated); the Claude analysis/verify agents write as `d0k` (Claude auth).
+    # Both go through this module. umask 0002 ensures any -wal/-shm/-journal sidecar
+    # SQLite creates is group-writable and inherits the dir's default ACLs (which
+    # grant both users rwx) — otherwise the other user hits "readonly database".
+    os.umask(0o002)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)  # autocommit; we BEGIN explicitly
     conn.row_factory = sqlite3.Row
@@ -318,6 +324,73 @@ def record_ai_verdict(conn, finding_id: int, verdict: str, confidence: float, re
                   reason=f"claude-validation: {reason[:160]}", source="ai-validation")
 
 
+def _root_domain(host: str) -> str:
+    """Cheap eTLD+1-ish: last two labels. Good enough for 'same target family'
+    grouping in the KB (not a public-suffix-perfect parse)."""
+    h = (host or "").strip().lower().split(":")[0]
+    parts = [p for p in h.split(".") if p]
+    return ".".join(parts[-2:]) if len(parts) >= 2 else h
+
+
+def kb_record(conn, *, host="", program=None, tech=None, signal_class=None,
+              vuln_class=None, verdict="", confidence=0.0, reason="", source="ai-verify") -> int:
+    """Append a learned outcome to the knowledge base (RAG-lite). Called on every
+    Claude verdict / operator decision so the corpus of 'what happened on this kind
+    of stack' grows. Retrieval is keyword-based (kb_lookup); Claude does the rest."""
+    rd = _root_domain(host)
+    profile = " | ".join([x for x in [tech or "", signal_class or "", vuln_class or "", reason or ""] if x])[:600]
+    now = _utc()
+    with conn:
+        conn.execute("BEGIN")
+        cur = conn.execute(
+            """INSERT INTO knowledge_base(host,root_domain,program,tech,signal_class,vuln_class,
+               verdict,confidence,reason,profile,source,created_at,last_seen_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (host, rd, program, tech, signal_class, vuln_class, verdict,
+             float(confidence or 0), (reason or "")[:400], profile, source, now, now))
+        return cur.lastrowid
+
+
+def kb_lookup(conn, *, tech=None, vuln_class=None, host=None, root_domain=None, limit: int = 5) -> list:
+    """Retrieve the most relevant prior outcomes for an asset, by tech-stack tokens
+    + vuln_class + same target family. Ranked in Python (no vectors). Returns the
+    compact lessons to inject into a Claude prompt. Bumps hit_count on what it returns."""
+    rd = root_domain or _root_domain(host or "")
+    tokens = [t.strip().lower() for t in (tech or "").replace(";", ",").split(",") if t.strip()]
+    # Pull a candidate pool cheaply, then score in Python.
+    clauses, params = [], []
+    if rd:
+        clauses.append("root_domain=?"); params.append(rd)
+    if vuln_class:
+        clauses.append("vuln_class=?"); params.append(vuln_class)
+    for tok in tokens[:8]:
+        clauses.append("LOWER(tech) LIKE ?"); params.append(f"%{tok}%")
+    if not clauses:
+        return []
+    sql = ("SELECT id,host,root_domain,tech,signal_class,vuln_class,verdict,confidence,reason,created_at "
+           "FROM knowledge_base WHERE " + " OR ".join(clauses) + " ORDER BY created_at DESC LIMIT 200")
+    pool = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    def _score(r):
+        s = 0
+        if rd and r.get("root_domain") == rd: s += 3
+        if vuln_class and r.get("vuln_class") == vuln_class: s += 2
+        rtech = (r.get("tech") or "").lower()
+        s += 2 * sum(1 for tok in tokens if tok and tok in rtech)
+        # fp/real lessons are the most actionable
+        if r.get("verdict") in ("fp", "real"): s += 1
+        return s
+    pool.sort(key=lambda r: (_score(r), r.get("created_at", "")), reverse=True)
+    top = [r for r in pool if _score(r) > 0][:limit]
+    if top:
+        ids = [r["id"] for r in top]
+        now = _utc()
+        with conn:
+            conn.execute("BEGIN")
+            conn.executemany("UPDATE knowledge_base SET hit_count=hit_count+1,last_seen_at=? WHERE id=?",
+                             [(now, i) for i in ids])
+    return top
+
+
 def stats(conn) -> dict:
     out = {"by_state": {}, "fp_signatures": 0, "failures_active": 0}
     for r in conn.execute("SELECT state,COUNT(*) c FROM findings GROUP BY state"):
@@ -325,6 +398,10 @@ def stats(conn) -> dict:
     out["fp_signatures"] = conn.execute("SELECT COUNT(*) c FROM false_positive_signatures").fetchone()["c"]
     out["failures_active"] = conn.execute(
         "SELECT COUNT(*) c FROM failure_patterns WHERE recovery_state IN ('backoff','halted')").fetchone()["c"]
+    try:
+        out["kb_entries"] = conn.execute("SELECT COUNT(*) c FROM knowledge_base").fetchone()["c"]
+    except Exception:
+        out["kb_entries"] = 0
     return out
 
 
@@ -359,8 +436,19 @@ def _main(argv):
     elif cmd == "ai-verdict":        # ai-verdict <id> <verdict> <confidence> <reason...>
         record_ai_verdict(conn, int(a[0]), a[1], float(a[2] or 0), " ".join(a[3:]) if len(a) > 3 else "")
         print("ok")
+    elif cmd == "kb-record":         # kb-record <host> <program> <tech> <signal_class> <vuln_class> <verdict> <confidence> <source> [reason...]
+        kb_record(conn, host=a[0], program=(a[1] or None), tech=(a[2] or None),
+                  signal_class=(a[3] or None), vuln_class=(a[4] or None), verdict=a[5],
+                  confidence=float(a[6] or 0), source=(a[7] if len(a) > 7 else "ai-verify"),
+                  reason=" ".join(a[8:]) if len(a) > 8 else "")
+        print("kb-ok")
+    elif cmd == "kb-lookup":         # kb-lookup <tech_csv> <vuln_class> <host> [limit] -> JSON array of prior lessons
+        print(json.dumps(kb_lookup(conn, tech=(a[0] or None), vuln_class=(a[1] if len(a) > 1 else None),
+                                   host=(a[2] if len(a) > 2 else None),
+                                   limit=int(a[3]) if len(a) > 3 else 5)))
     else:
-        print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed ...}", file=sys.stderr); return 2
+        print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed|"
+              "ai-pending|ai-verdict|kb-record|kb-lookup}", file=sys.stderr); return 2
     return 0
 
 

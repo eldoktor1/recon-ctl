@@ -160,6 +160,14 @@ if ! flock -n 8; then
 fi
 echo $$ >&8
 
+# ---- Maintenance lock (fail-closed) ----
+# Refuse to run while the pipeline is being rebuilt/upgraded. recon_ctl's cmd_start
+# checks this too; this is the belt-and-suspenders guard for any direct daemon launch.
+if [[ -f "$STATE_DIR/maintenance" ]]; then
+  log "Maintenance lock set ($STATE_DIR/maintenance) — daemon refusing to start." >> "$LOG_FILE"
+  exit 0
+fi
+
 # ---- CPU priority: deprioritize the whole daemon tree ----
 # Every loop, scanner, triage run and jq worker is forked from this process and
 # inherits its nice value (verified: the value survives fork, execve AND
@@ -488,6 +496,15 @@ AI_REVIEW_SCRIPT="${AI_REVIEW_SCRIPT:-$(script_path recon_ai_review.sh)}"
 AI_REVIEW_INTERVAL="${AI_REVIEW_INTERVAL:-1800}"
 run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >/dev/null 2>&1 || true; }
 
+# ---- Claude-Max ANALYSIS agent (recon_ai_analyze.sh) ------------------------
+# Headless Claude (Haiku — bulk/cheap, match-model-to-task) reads in-scope assets,
+# decides what is worth verifying + which vuln class, and flags evidence-gate
+# candidates: conscious surface selection, not blanket scanning. Feeds gate -> verify.
+# Runs as d0k (Claude auth per-user). Not target-facing (reasons over stored data).
+AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
+AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
+run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >/dev/null 2>&1 || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -610,6 +627,7 @@ run_discord_bot() {
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
+  supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &

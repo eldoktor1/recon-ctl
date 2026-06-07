@@ -165,7 +165,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect","bypass_confirmed","triage_gate_state","triage_gate_attempts","triage_gate_last_probe"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect","bypass_confirmed","triage_gate_state","triage_gate_attempts","triage_gate_last_probe","claude_worth","claude_interest","claude_verdict"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -970,11 +970,27 @@ apply_extra_enrichment() {
     # ignore penalty
     (if $igh != null then $ig_penalty else 0 end) as $ig_b |
 
-    ($r.score + $tf_b + $vf_b + $js_b + $ig_b) as $new_score |
+    # Claude AI prioritisation (v3.2) — analysis + verification as a first-class
+    # signal, like true_fresh. LEAD-discipline preserved: a Claude "worth" hunch is a
+    # small bias only (the P0-CANDIDATE clamp still blocks detection-only P0); a Claude
+    # "real" verdict is gate+Claude CONFIRMED (clamp-exempt downstream); a Claude "fp"
+    # verdict suppresses noise so disproven findings sink out of the queues.
+    (($r.claude_interest // 0) | if type=="number" then . else 0 end) as $ci |
+    (if   ($r.claude_verdict // "") == "real" then 8
+     elif ($r.claude_verdict // "") == "fp"   then -12
+     elif ($r.claude_worth // false) == true  then ([($ci * 5 | floor), 5] | min)
+     else 0 end) as $cl_b |
+    ($new_sigs
+      + (if ($r.claude_verdict // "") == "real" then ["claude:real"] else [] end)
+      + (if ($r.claude_verdict // "") == "fp"   then ["claude:fp-suppressed"] else [] end)
+      + (if (($r.claude_verdict // "") != "fp") and (($r.claude_worth // false) == true) then ["claude:worth"] else [] end)
+    ) as $new_sigs2 |
+
+    ($r.score + $tf_b + $vf_b + $js_b + $ig_b + $cl_b) as $new_score |
 
     $r + {
       score: $new_score,
-      signals: $new_sigs,
+      signals: $new_sigs2,
       triage_true_fresh:        $is_true_fresh,
       triage_true_fresh_bonus:  $tf_b,
       triage_external_first_seen: ($tfh.external_first_seen // null),
@@ -1181,7 +1197,8 @@ apply_cluster_and_submission() {
       (((.takeover_confirmed // false) == true)
         or ((.bypass_confirmed // false) == true)
         or ((.has_critical_port // false) == true)
-        or ((.triage_gate_state // "") == "confirmed")) as $verified |
+        or ((.triage_gate_state // "") == "confirmed")
+        or ((.claude_verdict // "") == "real")) as $verified |   # gate+Claude CONFIRMED -> not detection-only
       (if   ($sg | any(test("kev"; "i"))) or ((.kev_needs_verify // null) != null) or ((.triage_breaking_vuln // false) == true) then "version"
        elif ($sg | any(test("reflect|xss"; "i"))) then "xss"
        elif ($sg | any(test("title:dir-listing|title:phpinfo|title:debug|title:installer|title:spring-error|tech:swagger|tech:graphql"; "i"))) then "content-leak"

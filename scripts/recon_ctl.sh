@@ -125,7 +125,37 @@ seed_seen_files() {
   fi
 }
 
+cmd_maintenance() {
+  # Maintenance lock: when set, cmd_start AND the daemon refuse to launch (fail-
+  # closed). Use during rebuilds/upgrades so nothing target-facing starts.
+  local sub="${1:-status}" lock="$STATE_DIR/maintenance"
+  case "$sub" in
+    on|set|enable)
+      mkdir -p "$STATE_DIR"
+      printf 'maintenance lock set %s\nreason: %s\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${2:-manual rebuild/upgrade}" > "$lock"
+      echo "Maintenance lock ON — pipeline will refuse to start until cleared."
+      echo "  lock: $lock"
+      ;;
+    off|clear|disable)
+      if [[ -f "$lock" ]]; then rm -f "$lock"; echo "Maintenance lock OFF — pipeline may start again."; else echo "No maintenance lock was set."; fi
+      ;;
+    status|"")
+      if [[ -f "$lock" ]]; then echo "Maintenance lock: ON"; sed 's/^/  /' "$lock" 2>/dev/null; else echo "Maintenance lock: off"; fi
+      ;;
+    *) echo "Usage: recon-ctl maintenance {on [reason]|off|status}" ;;
+  esac
+}
+
 cmd_start() {
+  # Maintenance lock (fail-closed): refuse to start while the pipeline is being
+  # rebuilt/upgraded. Clear with `recon-ctl maintenance off` (or rm the file).
+  if [[ -f "$STATE_DIR/maintenance" ]]; then
+    echo "REFUSING to start: maintenance lock is set ($STATE_DIR/maintenance)."
+    [[ -s "$STATE_DIR/maintenance" ]] && sed 's/^/  /' "$STATE_DIR/maintenance"
+    echo "  Clear with: recon-ctl maintenance off"
+    return 1
+  fi
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "Daemon already running (pid $(cat "$PID_FILE"))"; return
   fi
@@ -185,7 +215,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_score|portscan|bypass|restale|digest|screenshot)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_review|ai_analyze|evidence_gate|portscan|bypass|restale|digest|screenshot)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -2596,6 +2626,7 @@ usage() {
 case "${1:-}" in
   start)        cmd_start ;;
   stop)         cmd_stop ;;
+  maintenance|maint) shift; cmd_maintenance "$@" ;;
   status|st)    cmd_status ;;
   rate)         shift; cmd_rate "$@" ;;
   queue|q)      cmd_queue ;;
