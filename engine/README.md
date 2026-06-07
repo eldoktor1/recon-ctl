@@ -43,7 +43,7 @@ All phases are unit/self-test validated (compile + logic). Scope is the only gat
 program tiering). Before re-enabling after a cold stop: (1) dry-run the evidence gate
 against a small candidate batch, (2) `state.py init` + one `orchestrator.py once`.
 
-## Cohesive flow (v3.2, 2026-06-07)
+## Cohesive flow (v3.3, 2026-06-07)
 Two Claude layers bracket a precise, per-class confirmation net. The retired blanket-scan
 lanes (`nuclei-v21/bounty-scan/deep-scan/dast/exposure/digest`) stay on-demand only —
 the evidence gate + confirmers own confirmation now.
@@ -54,9 +54,10 @@ the evidence gate + confirmers own confirmation now.
    takeover · cloudrecon
         -> triage (deterministic score; detection-only P0 clamped to P0-CANDIDATE/P1)
 
-2. CLAUDE ANALYSIS  (ai-analyze, Haiku — bulk/cheap): reads in-scope+paying assets,
-   decides worth / interest / vuln-class with RAG-lite KB context, flags gate
-   candidates. Conscious surface selection — aims the net, never blanket-scans.
+2. CLAUDE ANALYSIS  (ai-analyze, Haiku→Sonnet by asset value): reads in-scope+paying
+   assets, decides worth / interest / vuln-class with RAG-lite KB context (schema-
+   validated output), flags gate candidates. Conscious surface selection — aims the
+   net, never blanket-scans.
 
 3. CONFIRM  (SAFE primitives: unauthenticated, non-destructive)
      - evidence-gate (nuclei): version · unauth-surface · content-leak · graphql ·
@@ -66,12 +67,15 @@ the evidence gate + confirmers own confirmation now.
    pattern-match = LEAD ; a primitive firing = CONFIRMED -> SQLite.
    IDOR / LFI / RCE = operator-LEAD only (hard line).
 
-4. CLAUDE VERIFY  (ai-review, Sonnet; opus-escalate on ambiguity): adversarial FP filter
-   on every confirmed finding -> ai_verdict (mirrored to ES + knowledge_base).
+4. CLAUDE VERIFY  (ai-review, Sonnet; MULTIMODAL): adversarial FP filter on every
+   confirmed finding — judges from the asset SCREENSHOT (Read-scoped to a throwaway
+   per-finding dir) + ES context, schema-validated output, opus-escalate on ambiguity
+   OR low-confidence real/fp. -> ai_verdict (mirrored to ES + knowledge_base).
      real -> reporter + #review  ·  needs-human -> #review  ·  fp -> dismiss + FP-signature
 
 5. REPORTER  (ai_verdict=real only; dup + freshness gates; NEVER auto-submits) -> review queue
-   v3-digest -> daily auditable .md + compact #digest
+   v3-digest -> daily auditable .md + compact #digest (incl. Claude precision self-audit:
+   human-decided precision of 'real' verdicts — `recon-ai accuracy`)
 ```
 **Discord v3 (verdict-driven, smart-not-noisy):** `#review` (Claude real/needs-human —
 APPROVE/DISMISS/INVESTIGATE) · `#takeovers` (first-blood) · `#ops` (halts/vpn/bans) ·
