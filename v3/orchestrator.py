@@ -33,6 +33,13 @@ MAX_CONCURRENT_AGENTS = 4
 PER_PROGRAM_DAILY_REQUESTS = 750          # global volume cap per program/day
 HTTP_403_HALT_STREAK = 3                   # 3 consecutive 403 -> halt
 LLM_DAILY_SPEND_CEILING_USD = 20.0         # halt+alert on breach
+# Financial-tier autonomy guard. Operator decision (2026-06-07): OFF — scope guards
+# govern eligibility, so all in-scope programs get the same READ-ONLY active path.
+# This is safe because nothing here sends authenticated or state-changing requests:
+# the endpoint denylist (fund-moving/state-changing), recon-scope gate, read-only/
+# unauthenticated probing, ban-halt, ceilings and human-gated submission all remain.
+# Re-enable detect+stage-only for FINANCIAL with V3_TIER_GUARD=on.
+TIER_GUARD_ENABLED = os.environ.get("V3_TIER_GUARD", "off").lower() in ("on", "1", "true", "yes")
 # tunables that don't relax a safety boundary may read env
 BATCH = int(os.environ.get("ORCH_BATCH", "40"))
 TICK_SLEEP = int(os.environ.get("ORCH_TICK_SLEEP", "60"))
@@ -200,7 +207,7 @@ def active_test(conn, finding, asset) -> None:
     # The evidence gate already confirmed detection (finding is 'confirmed'); for
     # GENERAL we permit the read-only active PoC and pass straight to the reporter.
     S.transition(conn, finding["id"], "reported", expect="confirmed")
-    log(f"  {finding['host']} [GENERAL] -> active-tested (read-only) -> reporter")
+    log(f"  {finding['host']} -> active-tested (read-only, scope+endpoint-guarded) -> reporter")
 
 
 # ---- main tick --------------------------------------------------------------
@@ -234,14 +241,13 @@ def _route_one(conn, finding) -> str:
         return "blocked-endpoint"
     S.incr_counter(conn, program or "GLOBAL", "requests", 1)
     tier = TIER.classify(program)
-    if tier == TIER.GENERAL:
-        active_test(conn, finding, asset)
-        S.incr_counter(conn, program or "GLOBAL", "tests", 1)
-        return "general-tested"
-    else:
+    if TIER_GUARD_ENABLED and tier == TIER.FINANCIAL:
         stage_poc(conn, finding, asset)
         S.incr_counter(conn, program or "GLOBAL", "staged", 1)
         return "financial-staged"
+    active_test(conn, finding, asset)        # guard off OR general -> read-only active path
+    S.incr_counter(conn, program or "GLOBAL", "tests", 1)
+    return "active-tested"
 
 
 def tick(conn) -> dict:

@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS findings (
     state           TEXT NOT NULL DEFAULT 'discovered',
     score           INTEGER DEFAULT 0,
     priority        TEXT,
+    confidence      REAL NOT NULL DEFAULT 0,       -- 0.0-1.0 evidence confidence (article-style routing)
+    review_tier     TEXT,                          -- immediate (>=0.85) | batch (0.70-0.84) | weekly (<0.70)
     fp_signature    TEXT NOT NULL,                 -- stable signature for FP/dup matching
     evidence        TEXT,                          -- JSON: probe, template, matched_at, redacted response
     attempts        INTEGER NOT NULL DEFAULT 0,
