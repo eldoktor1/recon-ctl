@@ -82,7 +82,7 @@ validates the confirmed survivors for accuracy/relevancy.
   health + verdict breakdown (real/needs-human/fp/pending/reported); `real|human|pending|fp|
   top|detail` subcommands query `findings.db` via a read-only `_ai_db` helper. Fixed the
   footer that advertised the now-dead `recon-ai-now/recon-ai-high`.
-- **Docs** — `claude.md`, `agent/CLAUDE.md`, `agent/init_prompt.md`, `v3/README.md` updated
+- **Docs** — `claude.md` *(removed in v3.2; superseded by README + CLAUDE.md)*, `agent/CLAUDE.md`, `agent/init_prompt.md`, `v3/README.md` updated
   to the Claude-Max validation model (flow diagram now shows the `ai-review` node; operator
   brief reads verdicts from SQLite / `recon-ai`, not `ai_scored.jsonl`).
 
