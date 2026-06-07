@@ -48,6 +48,10 @@ CLAUDE_ESCALATE="${CLAUDE_ESCALATE:-1}"          # 1 = re-judge the hard calls w
 CLAUDE_ESCALATE_MODEL="${CLAUDE_ESCALATE_MODEL:-opus}"  # the "hard call" model
 CLAUDE_ESCALATE_CONF="${CLAUDE_ESCALATE_CONF:-0.75}"    # also escalate a real/fp call below this confidence
 VERIFY_VISION="${VERIFY_VISION:-1}"              # 1 = feed the asset screenshot to Claude (multimodal)
+SAFE_PROBE_ENABLED="${SAFE_PROBE_ENABLED:-1}"    # 1 = Claude may REQUEST safe probes; the HARNESS runs them
+PROBE_ROUNDS="${PROBE_ROUNDS:-2}"                # max re-probe rounds per finding
+PROBE_BUDGET="${PROBE_BUDGET:-6}"                # max total probes per finding (anti-runaway)
+SAFE_PROBE="${SAFE_PROBE:-$SCRIPT_DIR/recon_safe_probe.sh}"
 AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"         # findings per cycle (quota-bounded)
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-180}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
@@ -58,7 +62,7 @@ es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json'
 
 # Strict structured-output contract — validated by the CLI, returned in
 # .structured_output. screen_assessment is optional (only set when a shot is viewed).
-VERDICT_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["real","fp","needs-human"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"},"screen_assessment":{"type":"string"}},"required":["verdict","confidence","reason"]}'
+VERDICT_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"verdict":{"type":"string","enum":["real","fp","needs-human","need-probe"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"},"screen_assessment":{"type":"string"},"probe_requests":{"type":"array","maxItems":6,"items":{"type":"object","additionalProperties":false,"properties":{"url":{"type":"string"},"method":{"type":"string","enum":["GET","HEAD","OPTIONS"]},"why":{"type":"string"}},"required":["url","method"]}}},"required":["verdict","confidence","reason"]}'
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/ai_review.lock"; flock -n 9 || { warn "ai-review already running"; exit 0; }
@@ -75,11 +79,11 @@ timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK" 
 pending="$(V3_DB="$V3_DB" python3 "$STATE_PY" ai-pending "$AI_REVIEW_BATCH" 2>/dev/null)"
 n="$(printf '%s' "$pending" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no confirmed findings pending validation"; exit 0; }
-log "🧠 ─── CLAUDE VERIFY ─── $n confirmed finding(s) · model=$CLAUDE_MODEL · vision=$VERIFY_VISION (Max, no API) ───"
+log "🧠 ─── CLAUDE VERIFY ─── $n confirmed finding(s) · model=$CLAUDE_MODEL · vision=$VERIFY_VISION · probe=$SAFE_PROBE_ENABLED (Max, no API) ───"
 
 # ---- prompt (globals: HAS_SHOT, SHOT_AT) -----------------------------------
 _prompt() {
-  local f="$1" kb="$2" shot_block=""
+  local f="$1" kb="$2" probe_results="${3:-}" shot_block="" probe_block="" results_block=""
   if [[ "$HAS_SHOT" == "1" ]]; then
     shot_block="A SCREENSHOT of this asset is saved as ./screenshot.jpg in your working
 directory (captured ${SHOT_AT:-unknown}). READ and VIEW it — it is PRIMARY evidence.
@@ -90,21 +94,36 @@ it is just a marketing page or a login wall with nothing exposed) that is strong
 evidence. Record a one-line screen_assessment of what you actually saw.
 "
   fi
+  if [[ "$SAFE_PROBE_ENABLED" == "1" ]]; then
+    probe_block="ACTIVE VERIFICATION — you may run SAFE tests. If you cannot decide from the
+evidence and need to see whether the finding actually responds/leaks WITHOUT
+authentication, set verdict=\"need-probe\" and list probe_requests (each: a url + method
+GET/HEAD/OPTIONS, up to 6). A TRUSTED HARNESS — not you — executes them safely:
+unauthenticated, non-destructive, scope-checked, NO redirect-follow, NO internal/metadata
+targets, rate-limited, Mullvad-only — and returns the real responses for your final
+verdict. Use it e.g. to GET the matched URL and see if the sensitive surface is genuinely
+reachable unauthenticated vs. a login wall / 404 / marketing page. Do NOT request a probe
+if the screenshot + evidence already settle it; when you have enough, return real/fp/needs-human.
+"
+  fi
+  [[ -n "$probe_results" ]] && results_block="PROBE RESULTS (real responses from the safe harness — base your verdict on these):
+$probe_results
+"
   cat <<EOF
-You are an adversarial bug-bounty VALIDATION analyst. Judge the finding below using
-ONLY the evidence provided (the finding JSON, the asset context, the past outcomes, and
-the screenshot if present). Do NOT make any network request or assume facts not in the
-evidence. Your job is to DISPROVE it: treat it as a false positive until the evidence
-proves a genuine, reportable, in-scope security issue.
+You are an adversarial bug-bounty VALIDATION analyst. Judge the finding below using the
+evidence provided (the finding JSON, the asset context, the past outcomes, the screenshot
+if present, and any probe results). Your job is to DISPROVE it: treat it as a false
+positive until the evidence proves a genuine, reportable, in-scope security issue.
 
 Mark "real" ONLY for an actually exploitable/exposed primitive (e.g. an unauthenticated
 admin surface genuinely reachable, a confirmed credential/data leak, a working
 access-control bypass). Mark "fp" for noise: version/banner-only detections,
 informational/cosmetic nuclei hits, CORS/security-header niggles with no impact,
 reflected-but-encoded values, a marketing/login page behind a scary-sounding template,
-anything not exploitable as described. Mark "needs-human" ONLY if genuinely ambiguous.
+anything not exploitable as described. Mark "needs-human" ONLY if genuinely ambiguous AND
+a safe probe cannot resolve it.
 
-${shot_block}
+${shot_block}${probe_block}${results_block}
 PAST OUTCOMES on similar stacks (lessons — if a similar case was fp, lean fp; if real,
 that raises plausibility; reason for yourself, do not blindly copy):
 ${kb:-  (none yet)}
@@ -112,34 +131,63 @@ ${kb:-  (none yet)}
 FINDING + ASSET CONTEXT (JSON):
 $f
 
-Give: verdict, confidence 0.0-1.0, one specific-sentence reason, and (if you viewed a
-screenshot) a one-line screen_assessment.
+Give: verdict, confidence 0.0-1.0, one specific-sentence reason, a one-line
+screen_assessment if you viewed a screenshot, and probe_requests if verdict=need-probe.
 EOF
 }
 
-# judge <model> -> "verdict<TAB>confidence<TAB>reason". Globals: f, kb, EV_DIR, HAS_SHOT.
+# judge <model> -> "verdict<TAB>confidence<TAB>reason" via a bounded SAFE-PROBE loop.
+# Globals: f, kb, EV_DIR, HAS_SHOT. Claude only ever gets Read (the screenshot, path-
+# confined). It REQUESTS probes via structured output; the trusted HARNESS runs them
+# through the guarded recon_safe_probe.sh — Claude has NO execution capability.
 judge() {
-  local model="$1" out so v c r sa
+  local model="$1" out so v c r sa reqs nreq pr_results="" round=0
   local -a targs
   if [[ "$HAS_SHOT" == "1" ]]; then
-    targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk)   # read ONLY the evidence dir
+    targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk)   # screenshot only; path-confined
   else
-    targs=(--tools "")   # pure reasoning, no tools at all
+    targs=(--tools "")   # no tools at all — pure reasoning (probes are harness-run, never a Claude tool)
   fi
-  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_prompt "$f" "$kb")" \
-          --model "$model" "${targs[@]}" --no-session-persistence \
-          --json-schema "$VERDICT_SCHEMA" --output-format json </dev/null 2>/dev/null )"
-  so="$(printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null)"
-  if [[ -z "$so" || "$so" == "null" ]]; then
-    # fallback: scrape a verdict object out of .result text (schema miss / older CLI)
-    so="$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null | grep -oE '\{[^{}]*"verdict"[^{}]*\}' | head -1)"
-  fi
-  v="$(printf '%s'  "$so" | jq -r '.verdict // empty' 2>/dev/null)"
-  c="$(printf '%s'  "$so" | jq -r '(.confidence // 0.5)|tostring' 2>/dev/null)"
-  r="$(printf '%s'  "$so" | jq -r '.reason // "no reason"' 2>/dev/null)"
-  sa="$(printf '%s' "$so" | jq -r '.screen_assessment // empty' 2>/dev/null)"
+  local ledger="$EV_DIR/probes.log"; : > "$ledger"
+  while : ; do
+    out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_prompt "$f" "$kb" "$pr_results")" \
+            --model "$model" "${targs[@]}" --no-session-persistence \
+            --json-schema "$VERDICT_SCHEMA" --output-format json </dev/null 2>/dev/null )"
+    so="$(printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null)"
+    if [[ -z "$so" || "$so" == "null" ]]; then
+      so="$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null | grep -oE '\{.*"verdict".*\}' | head -1)"
+    fi
+    v="$(printf '%s'  "$so" | jq -r '.verdict // empty' 2>/dev/null)"
+    c="$(printf '%s'  "$so" | jq -r '(.confidence // 0.5)|tostring' 2>/dev/null)"
+    r="$(printf '%s'  "$so" | jq -r '.reason // "no reason"' 2>/dev/null)"
+    sa="$(printf '%s' "$so" | jq -r '.screen_assessment // empty' 2>/dev/null)"
+    # ACTIVE VERIFICATION: run requested probes through the guarded harness, then re-judge
+    if [[ "$v" == "need-probe" && "$SAFE_PROBE_ENABLED" == "1" && "$round" -lt "$PROBE_ROUNDS" ]]; then
+      reqs="$(printf '%s' "$so" | jq -c '.probe_requests // []' 2>/dev/null)"
+      nreq="$(printf '%s' "$reqs" | jq 'length' 2>/dev/null || echo 0)"
+      if [[ "${nreq:-0}" -gt 0 ]]; then
+        round=$((round+1)); local got="" pi purl pm pres
+        for ((pi=0; pi<nreq; pi++)); do
+          purl="$(printf '%s' "$reqs" | jq -r ".[$pi].url // empty" 2>/dev/null)"
+          pm="$(printf  '%s' "$reqs" | jq -r ".[$pi].method // \"GET\"" 2>/dev/null)"
+          [[ -z "$purl" ]] && continue
+          pres="$(SAFE_PROBE_LEDGER="$ledger" SAFE_PROBE_BUDGET="$PROBE_BUDGET" bash "$SAFE_PROBE" "$purl" "$pm" 2>/dev/null)"
+          [[ -n "$pres" ]] || pres='{"ok":false,"error":"no-output"}'
+          got+="$(jq -nc --arg u "$purl" --arg m "$pm" --argjson res "$pres" '{url:$u,method:$m,result:$res}' 2>/dev/null)"$'\n'
+        done
+        pr_results+="$got"
+        log "   🔍 probe round $round ($nreq req): $(printf '%s' "$reqs" | jq -r '[.[].url]|join(", ")' 2>/dev/null | cut -c1-90)"
+        continue   # re-judge with the real responses
+      fi
+    fi
+    break
+  done
   [[ -n "$sa" && "$sa" != "null" ]] && r="$r [screen: $sa]"
-  case "$v" in real|fp|needs-human) ;; *) v="needs-human"; c="0.3"; r="claude verdict unparseable — defaulting to human review" ;; esac
+  case "$v" in
+    real|fp|needs-human) ;;
+    need-probe) v="needs-human"; r="$r (active-probe budget/rounds exhausted)" ;;
+    *) v="needs-human"; c="0.3"; r="claude verdict unparseable — defaulting to human review" ;;
+  esac
   printf '%s\t%s\t%s' "$v" "$c" "$r"
 }
 
