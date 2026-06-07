@@ -31,7 +31,19 @@ kills FPs). Confirm primitive per class:
   is exploitation). Claude detects + prioritises; a human confirms. Never auto-probed.
 Any confirmed catch still passes the Claude VERIFY adversarial filter before it reaches #review.
 
-## Claude at full capability (v3.4): multimodal, active-verifying, schema-locked, measured
+## Claude is the brain (v3.6): owns the verdict, the FP-kill, and the report
+Claude is LOAD-BEARING, not a filter. **Nothing reaches a report without its `real` verdict**
+— the reporter hard-gates on `ai_verdict='real'`; the old deterministic-confidence bypass is
+gone (if Claude is down, confirmed findings just wait). A `real` verdict must survive a
+**CONSENSUS PANEL** of independent adversarial lenses — *exploitability* (real unauth primitive
+vs cosmetic/version-only), *scope-&-reward* (in-scope, not a dup, severity a program would pay,
+not N/A), *evidence-&-repro* (the probe/screenshot actually proves it). Unanimous confirm →
+`real`; majority refute → fp; else needs-human. Confident fps die in one cheap pass (the panel
+only adjudicates real-candidates). This is the FP-elimination engine — aim it at ~99% of
+*reports* being real. For a consensus-`real`, Claude then **AUTHORS the report** (honest
+severity, impact, reproducible read-only PoC, dedup — overclaiming is forbidden; it gets
+reports closed N/A and dings signal). `formatters` use the authored content; template is fallback.
+
 VERIFY is a **multimodal investigator that can actively test** — but it never *executes*
 anything itself. Per finding it gets the asset SCREENSHOT as primary evidence (a
 cors-misconfig on a marketing homepage looks nothing like a real exposed panel — vision
