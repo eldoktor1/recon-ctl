@@ -49,7 +49,8 @@ es "$ES_URL/$PARAMS_INDEX/_count" >/dev/null 2>&1 || { log "no params catalog ($
 touch "$SEEN"
 
 confirmed_total=0; tested_total=0
-for cls in $PC_CLASSES; do
+IFS=' ' read -ra _PC_ARR <<< "$PC_CLASSES"   # split on space (global IFS=$'\n\t' would NOT)
+for cls in "${_PC_ARR[@]}"; do
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
   # in-scope paying candidates for this class, freshest first
   q="$(jq -nc --arg c "$cls" --argjson n "$PC_BATCH" \
