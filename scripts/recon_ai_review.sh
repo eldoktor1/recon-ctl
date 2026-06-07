@@ -47,6 +47,14 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"           # verification model (match-to-
 CLAUDE_ESCALATE="${CLAUDE_ESCALATE:-1}"          # 1 = re-judge the hard calls with the big model
 CLAUDE_ESCALATE_MODEL="${CLAUDE_ESCALATE_MODEL:-opus}"  # the "hard call" model
 CLAUDE_ESCALATE_CONF="${CLAUDE_ESCALATE_CONF:-0.75}"    # also escalate a real/fp call below this confidence
+# CONSENSUS PANEL — the FP-elimination engine. A finding heading toward 'real' (or any
+# uncertain call) must survive a panel of independent ADVERSARIAL lenses, each trying to
+# REFUTE it from a distinct angle. 'real' requires UNANIMOUS confirm; a majority refute ->
+# fp; otherwise needs-human. Cheap confident fps skip the panel (bulk noise dies in 1 pass).
+CONSENSUS_ENABLED="${CONSENSUS_ENABLED:-1}"
+CONSENSUS_MODEL="${CONSENSUS_MODEL:-${CLAUDE_ESCALATE_MODEL:-opus}}"  # the panel uses the strong model
+CONSENSUS_LENSES="${CONSENSUS_LENSES:-exploitability scope-reward evidence-repro}"
+FP_FAST_CONF="${FP_FAST_CONF:-0.85}"             # primary fp at/above this conf skips the panel
 VERIFY_VISION="${VERIFY_VISION:-1}"              # 1 = feed the asset screenshot to Claude (multimodal)
 SAFE_PROBE_ENABLED="${SAFE_PROBE_ENABLED:-1}"    # 1 = Claude may REQUEST safe probes; the HARNESS runs them
 PROBE_ROUNDS="${PROBE_ROUNDS:-2}"                # max re-probe rounds per finding
@@ -185,6 +193,7 @@ judge() {
     fi
     break
   done
+  printf '%s' "$pr_results" > "$EV_DIR/pr.txt" 2>/dev/null || true   # hand probe evidence to the panel (judge runs in a subshell)
   [[ -n "$sa" && "$sa" != "null" ]] && r="$r [screen: $sa]"
   case "$v" in
     real|fp|needs-human) ;;
@@ -192,6 +201,109 @@ judge() {
     *) v="needs-human"; c="0.3"; r="claude verdict unparseable — defaulting to human review" ;;
   esac
   printf '%s\t%s\t%s' "$v" "$c" "$r"
+}
+
+# ---- CONSENSUS PANEL: independent adversarial lenses (the FP-elimination engine) -------
+LENS_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"vote":{"type":"string","enum":["confirm","refute","unsure"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"}},"required":["vote","reason"]}'
+
+_lens_prompt() {   # lens, f, kb, pr  (globals: HAS_SHOT, SHOT_AT)
+  local lens="$1" f="$2" kb="$3" pr="$4" mandate="" shot=""
+  case "$lens" in
+    exploitability) mandate="LENS = EXPLOITABILITY. Try to REFUTE that this is an actually
+exploitable / exposed UNAUTHENTICATED security primitive. Vote 'refute' if it is only
+informational, version/banner-only, a cosmetic security-header/CORS nit, a login wall with
+nothing behind it, reflected-but-encoded, a parking/marketing page, or otherwise not
+exploitable as described. Vote 'confirm' ONLY if a concrete unauth primitive is genuinely
+present and reachable." ;;
+    scope-reward)   mandate="LENS = SCOPE & REWARD. Try to REFUTE that a bug-bounty program
+would actually PAY for this. Vote 'refute' if it is out-of-scope, non-paying, a likely
+DUPLICATE, a known-accepted-risk / best-practice / informational class that programs close
+as N/A or Informative, or severity too low to reward. Vote 'confirm' ONLY if it is in-scope,
+reward-eligible, and not an obvious duplicate." ;;
+    evidence-repro) mandate="LENS = EVIDENCE & REPRODUCIBILITY. Try to REFUTE that the concrete
+evidence here actually PROVES the issue is real and reproducible RIGHT NOW. Weigh the probe
+responses and the screenshot. Vote 'refute' if the evidence is stale, ambiguous, circumstantial,
+or does not actually demonstrate the claimed issue. Vote 'confirm' ONLY if the evidence
+concretely demonstrates it." ;;
+    *) mandate="LENS = GENERAL. Adversarially try to REFUTE that this is a real, reportable,
+in-scope security finding. Confirm only if it clearly is." ;;
+  esac
+  [[ "$HAS_SHOT" == "1" ]] && shot="A screenshot ./screenshot.jpg is in your working directory — READ and VIEW it as evidence."
+  cat <<EOF
+You are ONE adversarial reviewer on a CONSENSUS PANEL deciding whether a bug-bounty finding
+is REAL and report-worthy. Judge ONLY through your assigned lens; be skeptical and try to
+DISPROVE. A wrong 'confirm' wastes a researcher's signal on an N/A report — so default to
+'refute' unless your lens is genuinely satisfied.
+
+$mandate
+$shot
+
+PROBE EVIDENCE already gathered (real responses):
+${pr:-  (none)}
+PAST OUTCOMES (KB):
+${kb:-  (none yet)}
+FINDING + ASSET CONTEXT (JSON):
+$f
+
+Output your vote (confirm | refute | unsure) for YOUR lens only, a confidence 0-1, and a
+one-sentence reason.
+EOF
+}
+
+# lens_vote <model> <lens> -> "vote<TAB>conf<TAB>reason". Globals: f, kb, EV_DIR, HAS_SHOT, PR_LAST
+lens_vote() {
+  local model="$1" lens="$2" out so v c r pr
+  pr="$(cat "$EV_DIR/pr.txt" 2>/dev/null || true)"
+  local -a targs
+  if [[ "$HAS_SHOT" == "1" ]]; then targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk); else targs=(--tools ""); fi
+  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_lens_prompt "$lens" "$f" "$kb" "$pr")" \
+          --model "$model" "${targs[@]}" --no-session-persistence --json-schema "$LENS_SCHEMA" --output-format json </dev/null 2>/dev/null )"
+  so="$(printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null)"
+  v="$(printf '%s' "$so" | jq -r '.vote // "unsure"' 2>/dev/null)"
+  c="$(printf '%s' "$so" | jq -r '(.confidence // 0.5)|tostring' 2>/dev/null)"
+  r="$(printf '%s' "$so" | jq -r '.reason // ""' 2>/dev/null)"
+  case "$v" in confirm|refute|unsure) ;; *) v="unsure" ;; esac
+  printf '%s\t%s\t%s' "$v" "$c" "$r"
+}
+
+# consensus -> sets globals FINAL_V / FINAL_C / FINAL_R / model_used / RAN_PANEL.
+# Claude is the brain: the PRIMARY pass investigates (multimodal + probe); a confident fp
+# dies cheaply; everything heading toward 'real' (or uncertain) is adjudicated by the panel.
+consensus() {
+  RAN_PANEL=0
+  IFS=$'\t' read -r FINAL_V FINAL_C FINAL_R <<<"$(judge "$CLAUDE_MODEL")"; model_used="$CLAUDE_MODEL"
+  # cheap kill: a confident fp does not need the panel (bulk noise)
+  if [[ "$FINAL_V" == "fp" ]] && ! _lt "${FINAL_C:-0}" "$FP_FAST_CONF"; then return; fi
+  if [[ "$CONSENSUS_ENABLED" != "1" ]]; then
+    # consensus off -> fall back to single escalation on ambiguity / low-confidence
+    if [[ -n "$CLAUDE_ESCALATE_MODEL" && "$CLAUDE_ESCALATE_MODEL" != "$CLAUDE_MODEL" ]]; then
+      if [[ "$FINAL_V" == "needs-human" ]] || { [[ "$FINAL_V" == "real" || "$FINAL_V" == "fp" ]] && _lt "${FINAL_C:-0}" "$CLAUDE_ESCALATE_CONF"; }; then
+        IFS=$'\t' read -r FINAL_V FINAL_C FINAL_R <<<"$(judge "$CLAUDE_ESCALATE_MODEL")"
+        FINAL_R="$FINAL_R (escalated:$CLAUDE_ESCALATE_MODEL)"; model_used="$CLAUDE_ESCALATE_MODEL"; RAN_PANEL=1
+      fi
+    fi
+    return
+  fi
+  # PANEL: independent adversarial lenses try to refute
+  RAN_PANEL=1
+  local confirms=0 refutes=0 unsures=0 nlens=0 lens lvote lconf lr notes=""
+  local -a LENS_ARR; IFS=' ' read -ra LENS_ARR <<< "$CONSENSUS_LENSES"   # split on space (global IFS lacks it)
+  for lens in "${LENS_ARR[@]}"; do
+    nlens=$((nlens+1))
+    IFS=$'\t' read -r lvote lconf lr <<<"$(lens_vote "$CONSENSUS_MODEL" "$lens")"
+    case "$lvote" in confirm) confirms=$((confirms+1)) ;; refute) refutes=$((refutes+1)) ;; *) unsures=$((unsures+1)) ;; esac
+    notes+="[$lens:$lvote] $lr | "
+    log "      🔬 $lens → $lvote (${lconf})"
+  done
+  local refute_majority=$(( (nlens/2) + 1 ))
+  model_used="${CLAUDE_MODEL}+panel($CONSENSUS_MODEL×$nlens)"
+  if [[ "$confirms" -eq "$nlens" && "$nlens" -gt 0 ]]; then
+    FINAL_V="real"; FINAL_C="0.95"; FINAL_R="CONSENSUS REAL ($confirms/$nlens unanimous). $notes"
+  elif [[ "$refutes" -ge "$refute_majority" ]]; then
+    FINAL_V="fp"; FINAL_C="0.9"; FINAL_R="CONSENSUS FP ($refutes/$nlens refuted). $notes"
+  else
+    FINAL_V="needs-human"; FINAL_C="0.5"; FINAL_R="CONSENSUS SPLIT (confirm=$confirms refute=$refutes unsure=$unsures). $notes"
+  fi
 }
 
 _lt() { awk "BEGIN{exit !(($1)<($2))}"; }   # float less-than (exit 0 if $1<$2)
@@ -229,17 +341,9 @@ while IFS= read -r fjson; do
     cp -f "$shot" "$EV_DIR/screenshot.jpg" 2>/dev/null && { HAS_SHOT=1; withshot=$((withshot+1)); }
   fi
 
-  IFS=$'\t' read -r v c r <<<"$(judge "$CLAUDE_MODEL")"; model_used="$CLAUDE_MODEL"
-  # escalate to the big model on genuine ambiguity OR a low-confidence real/fp call
-  if [[ "$CLAUDE_ESCALATE" == "1" && -n "$CLAUDE_ESCALATE_MODEL" && "$CLAUDE_ESCALATE_MODEL" != "$CLAUDE_MODEL" ]]; then
-    do_esc=0
-    [[ "$v" == "needs-human" ]] && do_esc=1
-    { [[ "$v" == "real" || "$v" == "fp" ]] && _lt "${c:-0}" "$CLAUDE_ESCALATE_CONF"; } && do_esc=1
-    if [[ "$do_esc" == "1" ]]; then
-      IFS=$'\t' read -r v c r <<<"$(judge "$CLAUDE_ESCALATE_MODEL")"
-      r="$r (escalated:$CLAUDE_ESCALATE_MODEL)"; model_used="$CLAUDE_ESCALATE_MODEL"; escalated=$((escalated+1))
-    fi
-  fi
+  consensus    # Claude is the brain: primary investigates (multimodal+probe) -> adversarial panel adjudicates
+  v="$FINAL_V"; c="$FINAL_C"; r="$FINAL_R"
+  [[ "${RAN_PANEL:-0}" == "1" ]] && escalated=$((escalated+1))
   rm -rf "$EV_DIR" 2>/dev/null || true
 
   V3_DB="$V3_DB" python3 "$STATE_PY" ai-verdict "$fid" "$v" "$c" "$r" >/dev/null 2>&1 || true
@@ -268,4 +372,4 @@ while IFS= read -r fjson; do
   reviewed=$((reviewed+1)); [[ "$v" == real ]] && real=$((real+1)); [[ "$v" == fp ]] && fp=$((fp+1)); [[ "$v" == needs-human ]] && human=$((human+1))
 done < <(printf '%s' "$pending" | jq -c '.[]' 2>/dev/null)
 
-log "🧠 verify done · 🟢 $real real · 🔴 $fp fp · 🟡 $human human · ↑ $escalated escalated · 📸 $withshot with-shot  (of $reviewed)"
+log "🧠 verify done · 🟢 $real real · 🔴 $fp fp · 🟡 $human human · 🔬 $escalated panel · 📸 $withshot with-shot  (of $reviewed)"
