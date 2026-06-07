@@ -289,7 +289,7 @@ http_fingerprint_check() {
 
   local body schemes=("https" "http")
   for scheme in "${schemes[@]}"; do
-    body="$(curl_net -sk -L --max-redirs 3 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "$scheme://$host/" 2>/dev/null)"
+    body="$(curl_net -sk -L --max-redirs 3 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "$scheme://$host/" 2>/dev/null | tr -d '\0')"
     [[ -n "$body" ]] && break
   done
 
@@ -585,8 +585,8 @@ probe_host() {
   # Fix 2: Azure "stopped app" disqualifier — resource EXISTS and is owned
   # Check if body contains the stopped-app indicator
   local body_check
-  body_check="$(curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "https://$host/" 2>/dev/null \
-                || curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "http://$host/" 2>/dev/null)"
+  body_check="$( { curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "https://$host/" 2>/dev/null \
+                   || curl_net -sk -L --max-redirs 2 -m "$HTTP_TIMEOUT" -A 'Mozilla/5.0 recon-takeover-hunter/2.0' "http://$host/" 2>/dev/null ; } | tr -d '\0')"
   if printf '%s' "$body_check" | grep -qiE 'this web app is stopped' 2>/dev/null; then
     log "SKIP $host → $svc: Azure 'web app stopped' — resource owned (disqualifier)"
     return 0
