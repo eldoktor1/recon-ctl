@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS findings (
     host            TEXT NOT NULL,
     url             TEXT,
     program         TEXT,
-    tier            TEXT NOT NULL DEFAULT 'FINANCIAL',  -- Gate 0 classification (fail-safe default)
     signal_class    TEXT,                          -- gate probe class (version|unauth-surface|xss|...)
     vuln_class      TEXT,                          -- triage vuln class (rce|xss|takeover|...)
     state           TEXT NOT NULL DEFAULT 'discovered',
@@ -95,7 +94,7 @@ CREATE TABLE IF NOT EXISTS run_counters (
     id          INTEGER PRIMARY KEY,
     day         TEXT NOT NULL,         -- YYYY-MM-DD (UTC)
     scope       TEXT NOT NULL,         -- program name | 'GLOBAL'
-    metric      TEXT NOT NULL,         -- requests | llm_spend_usd | tests | confirmed | staged | halted
+    metric      TEXT NOT NULL,         -- requests | llm_spend_usd | tests | confirmed | halted
     value       REAL NOT NULL DEFAULT 0,
     UNIQUE(day, scope, metric)
 );

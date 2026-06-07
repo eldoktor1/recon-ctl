@@ -45,6 +45,13 @@ more fish — without drowning in noise." Built with the pipeline maintenance-lo
 **Discord v3** — verdict-driven, 9 channels → 4 (`#review`/`#takeovers`/`#ops`/`#digest`);
   shared webhook dir; `observability.py` posts a compact daily `#digest`.
 
+**Scope is the only gate** — removed the Gate-0 financial-tier classifier entirely
+  (`v3/tier.py` + `tier_list.tsv`, the `tier` column, the GENERAL/FINANCIAL autonomy
+  split, and the `staged`/PoC-staging state). If a host is in scope, it's in play; the
+  hard line is now the *type* of action (no unsupervised authed/state-changing requests,
+  hard-coded fund-moving endpoint denylist), not the program. `state.py init` self-heals
+  older DBs (idempotent `_migrate` drops a stray `tier` column natively).
+
 **Ops/cleanup** — `recon-ctl maintenance on|off` lock (fail-closed start guard);
   `ai-analyze`/`xss-confirm`/`param-confirm` daemon loops (d0k, VPN-gated where target-
   facing); `cmd_stop` LOOP_PAT updated. Purged dead Ollama dashboard columns from

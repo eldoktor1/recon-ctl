@@ -44,7 +44,7 @@ Deep detail: `v3/README.md`. Daily audit: `python3 v3/observability.py`.
 ```
 scripts/    detection, confirm, Claude agents, control (recon_ctl.sh), net/safety
 v3/         detection→validation→report layer (state.py, reporter.py, orchestrator.py,
-            observability.py, tier.py, db/schema.sql)  ·  SQLite findings.db = finding-state truth
+            observability.py, db/schema.sql)  ·  SQLite findings.db = finding-state truth
 tools/      Playwright workers (screenshot, xss_confirm), param_confirm worker, startup
 agent/      operator brief for "Claude as second man" in the terminal
 docker/     Elasticsearch 8.17.4 + Kibana (localhost-only)

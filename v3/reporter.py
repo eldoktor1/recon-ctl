@@ -127,14 +127,12 @@ def _build_finding(row, asset) -> F.Finding:
         url=row["url"] or asset.get("url") or f"https://{row['host']}",
         program=row["program"] or asset.get("triage_program") or "",
         platform=asset.get("triage_platform") or "",
-        tier=row["tier"],
         vuln_class=row["vuln_class"] or "info-disclosure",
         signal_class=row["signal_class"] or "",
         evidence=ev,
         confirmed_at=row["state_changed_at"],
         scope_confirmation=(f"Program: {row['program'] or asset.get('triage_program','?')} · "
-                            f"in_scope={asset.get('triage_in_scope','?')} · pays={asset.get('triage_pays','?')} · "
-                            f"tier={row['tier']}"),
+                            f"in_scope={asset.get('triage_in_scope','?')} · pays={asset.get('triage_pays','?')}"),
     )
 
 

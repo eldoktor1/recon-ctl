@@ -7,10 +7,9 @@ delegates to the existing bash tools (evidence gate / dast / params) — this mo
 is the SAFETY + STATE + ROUTING brain.
 
 HARD-CODED guardrails (not runtime-configurable — defined here in code):
-  • Autonomy boundary by Gate-0 tier:
-      GENERAL  -> autonomous active testing (non-destructive, read/diff PoC)
-      FINANCIAL/REGULATED -> DETECTION + PoC-STAGING only (stage exact PoC, queue
-                             for human trigger; never send authed/state-changing reqs)
+  • SCOPE is the only eligibility gate: in-scope+pays -> read-only active path; nothing
+    else. (The financial-tier / Gate-0 autonomy boundary was removed in v3.2 —
+    scope guards govern eligibility, not program classification.)
   • Max 4 concurrent testing agents.
   • Per-program daily request ceiling (volume cap, separate from concurrency).
   • Ban / CAPTCHA / 3+ consecutive 403 -> IMMEDIATE full halt + alert, NO auto-resume.
@@ -26,20 +25,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import state as S
-import tier as TIER
 
 # ---- hard-coded guardrail constants (intentionally NOT env-overridable) ------
 MAX_CONCURRENT_AGENTS = 4
 PER_PROGRAM_DAILY_REQUESTS = 750          # global volume cap per program/day
 HTTP_403_HALT_STREAK = 3                   # 3 consecutive 403 -> halt
 LLM_DAILY_SPEND_CEILING_USD = 20.0         # halt+alert on breach
-# Financial-tier autonomy guard. Operator decision (2026-06-07): OFF — scope guards
-# govern eligibility, so all in-scope programs get the same READ-ONLY active path.
-# This is safe because nothing here sends authenticated or state-changing requests:
-# the endpoint denylist (fund-moving/state-changing), recon-scope gate, read-only/
-# unauthenticated probing, ban-halt, ceilings and human-gated submission all remain.
-# Re-enable detect+stage-only for FINANCIAL with V3_TIER_GUARD=on.
-TIER_GUARD_ENABLED = os.environ.get("V3_TIER_GUARD", "off").lower() in ("on", "1", "true", "yes")
 # tunables that don't relax a safety boundary may read env
 BATCH = int(os.environ.get("ORCH_BATCH", "40"))
 TICK_SLEEP = int(os.environ.get("ORCH_TICK_SLEEP", "60"))
@@ -47,7 +38,6 @@ TICK_SLEEP = int(os.environ.get("ORCH_TICK_SLEEP", "60"))
 STATE_DIR = os.path.expanduser(os.environ.get("STATE_DIR", "~/recon/state"))
 HALT_FLAG = os.path.join(STATE_DIR, "v3_halt")        # presence = halted; content = reason. Human removes to resume.
 VPN_DOWN = os.path.join(STATE_DIR, "vpn_down")
-STAGING_QUEUE = os.path.expanduser("~/recon/v3/staged_pocs.jsonl")
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 SCOPE_CHECK = os.path.join(SCRIPT_DIR, "recon_scope_check.sh")
 
@@ -102,7 +92,7 @@ def _alert(text: str):
     try:
         subprocess.run(["bash", "-lc",
                         f'source "{SCRIPT_DIR}/recon_net.sh" 2>/dev/null; '
-                        f'h="$(discord_hook health 2>/dev/null)"; [ -n "$h" ] && '
+                        f'h="$(discord_hook ops 2>/dev/null)"; [ -n "$h" ] && '
                         f'discord_post "$h" "$(jq -nc --arg c {json.dumps(text)} \'{{content:$c}}\')"'],
                        timeout=15, capture_output=True)
     except Exception:
@@ -179,33 +169,12 @@ def handle_failure(conn, program: str, host: str, category: str, detail: str = "
     return rstate
 
 
-# ---- tier routing -----------------------------------------------------------
-def stage_poc(conn, finding, asset) -> None:
-    """FINANCIAL/REGULATED: stage the EXACT (non-fund-moving, read-only) PoC for a
-    human to trigger. Never sends authed/state-changing requests."""
-    url = finding["url"] or asset.get("url") or f"https://{finding['host']}"
-    poc = {
-        "finding_id": finding["id"], "host": finding["host"], "program": finding["program"],
-        "tier": "FINANCIAL", "signal_class": finding["signal_class"], "vuln_class": finding["vuln_class"],
-        "staged_request": {"method": "GET", "url": url,
-                           "note": "read-only confirmation request; human triggers + reviews before any authed step"},
-        "preconditions": "detection confirmed non-intrusively by the evidence gate",
-        "repro": f"Run the staged GET against {url}; compare to the gate evidence.",
-        "evidence": json.loads(finding["evidence"]) if finding["evidence"] else {},
-        "staged_at": _utc(), "action_required": "HUMAN trigger (financial-tier autonomy boundary)",
-    }
-    os.makedirs(os.path.dirname(STAGING_QUEUE), exist_ok=True)
-    with open(STAGING_QUEUE, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(poc) + "\n")
-    S.transition(conn, finding["id"], "staged", expect="confirmed")
-    log(f"  {finding['host']} [FINANCIAL] -> staged PoC (human trigger queued)")
-
-
+# ---- routing ----------------------------------------------------------------
 def active_test(conn, finding, asset) -> None:
-    """GENERAL: autonomous non-destructive active test, then route to reporter.
-    Delegates the actual probe to the bash evidence gate / dast tools (read-only)."""
-    # The evidence gate already confirmed detection (finding is 'confirmed'); for
-    # GENERAL we permit the read-only active PoC and pass straight to the reporter.
+    """Read-only active path for an in-scope confirmed finding, then route to the
+    reporter. The evidence gate already confirmed detection non-intrusively; this stays
+    scope + endpoint-safe + ceiling guarded. (Financial-tier PoC-staging removed v3.2 —
+    scope is the only eligibility gate.)"""
     S.transition(conn, finding["id"], "reported", expect="confirmed")
     log(f"  {finding['host']} -> active-tested (read-only, scope+endpoint-guarded) -> reporter")
 
@@ -240,12 +209,7 @@ def _route_one(conn, finding) -> str:
         log(f"  {host} BLOCKED: {why}")
         return "blocked-endpoint"
     S.incr_counter(conn, program or "GLOBAL", "requests", 1)
-    tier = TIER.classify(program)
-    if TIER_GUARD_ENABLED and tier == TIER.FINANCIAL:
-        stage_poc(conn, finding, asset)
-        S.incr_counter(conn, program or "GLOBAL", "staged", 1)
-        return "financial-staged"
-    active_test(conn, finding, asset)        # guard off OR general -> read-only active path
+    active_test(conn, finding, asset)        # scope-gated read-only active path -> reporter
     S.incr_counter(conn, program or "GLOBAL", "tests", 1)
     return "active-tested"
 
@@ -293,8 +257,7 @@ def main(argv):
     if mode == "once":
         print(json.dumps(tick(conn), indent=2)); return 0
     if mode == "audit":
-        print(json.dumps({"halted": halted(), "stats": S.stats(conn),
-                          "tier_audit": TIER.audit()}, indent=2, default=str)); return 0
+        print(json.dumps({"halted": halted(), "stats": S.stats(conn)}, indent=2, default=str)); return 0
     if mode == "loop":
         import time
         log(f"orchestrator loop start (concurrency={MAX_CONCURRENT_AGENTS}, "

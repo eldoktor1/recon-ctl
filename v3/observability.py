@@ -22,7 +22,6 @@ except Exception:
     def _halted(): return None
 
 DIGEST_DIR = os.path.expanduser(os.environ.get("V3_DIGESTS", "~/recon/v3/digests"))
-STAGING_QUEUE = os.path.expanduser("~/recon/v3/staged_pocs.jsonl")
 
 
 def _today():
@@ -53,7 +52,6 @@ def collect(conn, day: str) -> dict:
     near_ceiling = [v for v in vol if v["value"] >= 0.8 * PER_PROGRAM_DAILY_REQUESTS]
     spend = S.get_counter(conn, "GLOBAL", "llm_spend_usd", day)
     tests = sum(r["value"] for r in q("SELECT value FROM run_counters WHERE day=? AND metric='tests'", day))
-    staged_cnt = sum(r["value"] for r in q("SELECT value FROM run_counters WHERE day=? AND metric='staged'", day))
 
     # FP suppression
     fp_total = q("SELECT COUNT(*) c FROM false_positive_signatures", )[0]["c"]
@@ -66,8 +64,6 @@ def collect(conn, day: str) -> dict:
 
     # current state distribution + queues
     state_dist = {r["state"]: r["c"] for r in q("SELECT state,COUNT(*) c FROM findings GROUP BY state")}
-    staged_awaiting = [dict(r) for r in q(
-        "SELECT host,program,vuln_class FROM findings WHERE state='staged' ORDER BY score DESC LIMIT 50")]
     review_queue = [dict(r) for r in q(
         "SELECT host,program,vuln_class FROM findings WHERE state='reported' ORDER BY score DESC LIMIT 50")]
 
@@ -77,7 +73,6 @@ def collect(conn, day: str) -> dict:
         "activity": {
             "tested": int(tests),
             "confirmed": trans.get("confirmed", 0),
-            "staged": int(staged_cnt) or trans.get("staged", 0),
             "reported": trans.get("reported", 0),
             "dismissed": trans.get("dismissed", 0),
             "lead_exhausted": trans.get("lead_exhausted", 0),
@@ -91,7 +86,6 @@ def collect(conn, day: str) -> dict:
                        "suppressed_today_sigs": fp_hits_today["c"], "suppressions_cumulative": fp_hits_today["s"]},
         "failures_active": fails,
         "state_distribution": state_dist,
-        "staged_awaiting_human": staged_awaiting,
         "review_queue_awaiting_submit": review_queue,
     }
 
@@ -103,9 +97,8 @@ def render(d: dict) -> str:
     if d["halted_now"]:
         L.append(f"\n## 🛑 HALTED RIGHT NOW: {d['halted_now']}\n(human must clear the halt flag to resume — no auto-resume)")
     L.append("\n## Activity")
-    L.append(f"- tested (active, GENERAL): **{a['tested']}**")
+    L.append(f"- tested (active): **{a['tested']}**")
     L.append(f"- confirmed (gate fired): **{a['confirmed']}**")
-    L.append(f"- staged for human trigger (FINANCIAL): **{a['staged']}**")
     L.append(f"- queued for report/review: **{a['reported']}**")
     L.append(f"- dismissed: **{a['dismissed']}**  ·  lead-exhausted: **{a['lead_exhausted']}**")
     L.append("\n## Safety / spend")
@@ -130,9 +123,6 @@ def render(d: dict) -> str:
     L.append(f"- FP signatures on file: **{fp['signatures_total']}**  ·  "
              f"hit today: {fp['suppressed_today_sigs']}  ·  cumulative suppressions: {int(fp['suppressions_cumulative'])}")
     L.append("\n## Queues")
-    L.append(f"- staged PoCs awaiting HUMAN trigger: **{len(d['staged_awaiting_human'])}**")
-    for s in d["staged_awaiting_human"][:15]:
-        L.append(f"    - {s['host']} [{s['program']}] {s['vuln_class']}")
     L.append(f"- findings awaiting HUMAN review+submit: **{len(d['review_queue_awaiting_submit'])}**")
     for s in d["review_queue_awaiting_submit"][:15]:
         L.append(f"    - {s['host']} [{s['program']}] {s['vuln_class']}")
@@ -166,8 +156,7 @@ def _discord_digest(d: dict) -> None:
     msg = (f"\U0001F4CA **v3 digest {d['day']}**\n"
            f"confirmed {a['confirmed']} · reported {a['reported']} · dismissed {a['dismissed']} "
            f"· lead-exhausted {a['lead_exhausted']}\n"
-           f"review queue: {len(d['review_queue_awaiting_submit'])} awaiting submit "
-           f"· staged {len(d['staged_awaiting_human'])}\n"
+           f"review queue: {len(d['review_queue_awaiting_submit'])} awaiting submit\n"
            f"FP suppressed today: {fp['suppressed_today_sigs']} · LLM spend ${d['api_spend_usd']}"
            + (f"\n\U0001F6D1 HALTED: {d['halted_now']}" if d["halted_now"] else ""))
     try:
