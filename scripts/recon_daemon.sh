@@ -552,6 +552,22 @@ AI_MONITOR_SCRIPT="${AI_MONITOR_SCRIPT:-$(script_path recon_ai_monitor.sh)}"
 AI_MONITOR_INTERVAL="${AI_MONITOR_INTERVAL:-3600}"
 run_ai_monitor() { [[ -f "$AI_MONITOR_SCRIPT" ]] && bash "$AI_MONITOR_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# ---- UNIQUE pillars (v3.7): go where the crowd doesn't ----------------------
+# recon_jsintel  — mine each host's JS for the HIDDEN API surface + verify LIVE secrets
+#                  (trufflehog). Target-facing -> d0k, VPN-gated. Writes endpoint feedstock.
+# recon_ai_idor  — Claude reasons over that surface -> ranked BAC/IDOR worklist (the most-
+#                  rewarded class; reasoning only, the human exploits with 2 accounts).
+JSINTEL_SCRIPT="${JSINTEL_SCRIPT:-$(script_path recon_jsintel.sh)}"
+JSINTEL_INTERVAL="${JSINTEL_INTERVAL:-3600}"
+run_jsintel() { [[ -f "$JSINTEL_SCRIPT" ]] && bash "$JSINTEL_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+AI_IDOR_SCRIPT="${AI_IDOR_SCRIPT:-$(script_path recon_ai_idor.sh)}"
+AI_IDOR_INTERVAL="${AI_IDOR_INTERVAL:-3600}"
+run_ai_idor() { [[ -f "$AI_IDOR_SCRIPT" ]] && bash "$AI_IDOR_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_briefing — the 6:30pm "TONIGHT" worklist (IDOR leads to test + findings to submit).
+BRIEFING_SCRIPT="${BRIEFING_SCRIPT:-$(script_path recon_briefing.sh)}"
+BRIEFING_INTERVAL="${BRIEFING_INTERVAL:-3600}"
+run_briefing() { [[ -f "$BRIEFING_SCRIPT" ]] && bash "$BRIEFING_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
 # "detection != exploitation" for the XSS class. TARGET-FACING -> d0k (Playwright
@@ -697,6 +713,9 @@ run_discord_bot() {
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
   supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
   supervise_loop "ai-monitor"     "AI_MONITOR_INTERVAL"    run_ai_monitor     &
+  supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
+  supervise_loop "ai-idor"        "AI_IDOR_INTERVAL"       run_ai_idor        &
+  supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
