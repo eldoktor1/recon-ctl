@@ -146,6 +146,17 @@ promote() {  # host url class evidence-json confidence review_tier program
     '{host:$h, url:$u, gate_class:$c, evidence:$ev, confidence:$cf, review_tier:$rt, confirmed_at:$t, state:"confirmed"}' \
     >> "$REPORTER_QUEUE" 2>/dev/null || true
   db_confirm "$host" "$url" "$program" "$class" "" "$score" "$conf" "$ev"   # SQLite state truth (reporter/observability)
+  # Discord: ONE alert channel for gate-confirmed P0s (immediate tier) — replaces
+  # the retired per-lane raw dumps. Reviewing happens off Discord (review queue).
+  if [[ "$rt" == "immediate" ]]; then
+    local wh; wh="$(discord_hook confirmed 2>/dev/null)"
+    [[ -n "$wh" ]] && discord_post "$wh" "$(jq -nc --arg h "$host" --arg u "$url" --arg c "$class" \
+      --argjson ev "$ev" --argjson cf "$conf" --arg pr "$program" \
+      '{content:("🎯 **CONFIRMED P0** (evidence gate, conf=" + ($cf|tostring) + ") — " + $h),
+        embeds:[{title:$h, url:(if $u=="" then null else $u end), color:15158332,
+          description:("class: " + $c + " · program: " + $pr + "\nevidence: " + (($ev.template) // ($ev.probe) // "?") + " (" + (($ev.severity)//"?") + ")")}]}')" \
+      >/dev/null 2>&1 || true
+  fi
 }
 
 # ---- probes (NON-INTRUSIVE; reuse existing tools) --------------------------
