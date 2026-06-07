@@ -472,6 +472,18 @@ EVIDENCE_GATE_SCRIPT="${EVIDENCE_GATE_SCRIPT:-$(script_path recon_evidence_gate.
 GATE_INTERVAL="${GATE_INTERVAL:-1800}"   # 30 min
 run_evidence_gate() { v21_killed evidence_gate && return 0; [[ -f "$EVIDENCE_GATE_SCRIPT" ]] && run_scanner bash "$EVIDENCE_GATE_SCRIPT" || true; }
 
+# ---- v3 cohesive tail: reporter + observability digest ----------------------
+# reporter.py: SQLite confirmed findings -> human review-queue artifacts (never
+# auto-submits). observability.py: daily auditable digest. Run via run_scanner
+# (reconrun) so they share the gate's ownership of ~/recon/v3/findings.db (the gate
+# writes it as reconrun; a d0k reader/writer would hit a perms conflict). reporter
+# may re-probe a stale finding (target-facing); run_scanner also enforces vpn_down.
+V3_PY_DIR="${V3_PY_DIR:-$(cd "$(dirname "$(script_path recon_evidence_gate.sh)")/../v3" 2>/dev/null && pwd)}"
+REPORTER_INTERVAL="${REPORTER_INTERVAL:-1800}"
+V3_DIGEST_INTERVAL="${V3_DIGEST_INTERVAL:-86400}"
+run_reporter()  { [[ -f "$V3_PY_DIR/reporter.py" ]] && run_scanner python3 "$V3_PY_DIR/reporter.py" >/dev/null 2>&1 || true; }
+run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 "$V3_PY_DIR/observability.py" >/dev/null 2>&1 || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -580,20 +592,26 @@ run_discord_bot() {
   supervise_loop "cve-kev"   "CVE_KEV_INTERVAL"  run_cve_kev    &
   supervise_loop "cve-nvd"   "CVE_NVD_INTERVAL"  run_cve_nvd    &
   supervise_loop "vuln-feed" "VULN_FEED_INTERVAL" run_vuln_feed &
-  supervise_loop "nuclei-v21"     "NUCLEI_INTERVAL"        run_nuclei_v21     &
-  supervise_loop "bounty-scan"    "BOUNTY_SCAN_INTERVAL"   run_smart_scan     &
-  supervise_loop "deep-scan"      "DEEP_SCAN_INTERVAL"     run_deep_scan      &
+  # v3 consolidation: broad nuclei/dast/exposure auto-scans RETIRED — the evidence
+  # gate now owns confirmation (candidate-targeted, confidence-scored) instead of
+  # blasting all P0/P1 and dumping to Discord side-channels. Still runnable on demand
+  # via recon_ctl (scan-now / dast / etc.).
+  # supervise_loop "nuclei-v21"     "NUCLEI_INTERVAL"        run_nuclei_v21     &
+  # supervise_loop "bounty-scan"    "BOUNTY_SCAN_INTERVAL"   run_smart_scan     &
+  # supervise_loop "deep-scan"      "DEEP_SCAN_INTERVAL"     run_deep_scan      &
   supervise_loop "active-checks"  "ACTIVE_CHECKS_INTERVAL" run_active_checks  &
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
-  supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &
+  # supervise_loop "dast"           "DAST_INTERVAL"          run_dast           &  # RETIRED -> evidence gate (xss via params-verify + nuclei)
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
+  supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
+  supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
-  supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &
-  supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &
+  # supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &  # RETIRED -> v3 observability digest
+  # supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &  # RETIRED -> evidence gate (content-leak/unauth probes)
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
 
     # Long-running — supervised with simple restart loops
