@@ -42,7 +42,7 @@ CLAUDE_ANALYZE_MODEL="${CLAUDE_ANALYZE_MODEL:-haiku}"          # bulk/cheap defa
 CLAUDE_ANALYZE_MODEL_HI="${CLAUDE_ANALYZE_MODEL_HI:-sonnet}"  # high-value assets get the stronger model
 ANALYZE_HI_SCORE="${ANALYZE_HI_SCORE:-60}"                    # a chunk whose top triage_score >= this -> HI model
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-120}"
-ANALYZE_BATCH="${ANALYZE_BATCH:-30}"        # assets per cycle (quota-bounded)
+ANALYZE_BATCH="${ANALYZE_BATCH:-45}"        # balanced safe-max (reasoning-only; no target traffic)
 ANALYZE_CHUNK="${ANALYZE_CHUNK:-10}"        # assets per Claude call
 ANALYZE_TTL="${ANALYZE_TTL:-14d}"           # re-analyse cadence (ES date math)
 KB_CONTEXT="${KB_CONTEXT:-3}"               # prior lessons injected per asset
