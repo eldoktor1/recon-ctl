@@ -25,6 +25,7 @@ log()  { printf '[%s AI-REVIEW] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&
 warn() { printf '[%s AI-REVIEW WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true   # discord_hook / discord_post (#review)
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
@@ -129,6 +130,17 @@ while IFS= read -r f; do
     doc="$(jq -nc --arg v "$v" --arg c "$c" --arg r "$r" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg m "$model_used" \
             '{claude_verdict:$v, claude_confidence:($c|tonumber? // 0.5), claude_reason:$r, claude_reviewed_at:$t, claude_verify_model:$m}')"
     es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --argjson d "$doc" '{doc:$d}')" >/dev/null 2>&1 || true
+  fi
+  # v3 Discord: ping the human ONLY on a verdict that needs a decision (real /
+  # needs-human). fp is auto-dismissed silently. This is THE human-review trigger —
+  # moved off the evidence gate so gate-confirmed-but-Claude-fp never pings.
+  if [[ "$v" == "real" || "$v" == "needs-human" ]]; then
+    rh="$(discord_hook review 2>/dev/null || true)"
+    if [[ -n "$rh" ]]; then
+      [[ "$v" == "real" ]] && tag="✅ REAL — review & submit" || tag="🔍 NEEDS-HUMAN — investigate"
+      discord_post "$rh" "$(jq -nc --arg t "$tag" --arg h "$host" --arg vc "${vclass:-?}" --arg c "$c" --arg m "$model_used" --arg r "$r" \
+        '{content:("**"+$t+"**\n`"+$h+"`  ["+$vc+"]  conf="+$c+"  ("+$m+")\n"+$r+"\n→ APPROVE / DISMISS / INVESTIGATE — human-gated, never auto-submitted")}')" >/dev/null 2>&1 || true
+    fi
   fi
   log "  $host [$fid] -> $v (conf=$c, $model_used) $r"
   reviewed=$((reviewed+1)); [[ "$v" == real ]] && real=$((real+1)); [[ "$v" == fp ]] && fp=$((fp+1)); [[ "$v" == needs-human ]] && human=$((human+1))

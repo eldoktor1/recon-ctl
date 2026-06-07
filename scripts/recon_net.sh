@@ -47,8 +47,15 @@ discord_post() {
 # If the file is missing/empty, returns nothing — that channel simply doesn't
 # send (no legacy fallback; the old ~/.recon_discord / _kev scheme is retired).
 discord_hook() {
-  local f="$HOME/.recon_discord_${1}"
-  [[ -f "$f" ]] && tr -d '[:space:]' < "$f" 2>/dev/null
+  # v3.2: resolve from a SHARED dir first so both users (d0k validation agent +
+  # reconrun scanners) find the same webhook without per-home duplication. Order:
+  # per-user file (back-compat) -> $RECON_DISCORD_DIR -> the shared state dir.
+  # v3 channels: review | takeovers | ops | digest. Absent file => channel silent.
+  local ch="$1" f
+  for f in "$HOME/.recon_discord_${ch}" \
+           "${RECON_DISCORD_DIR:-/home/d0k/recon/state/discord}/${ch}"; do
+    [[ -s "$f" ]] && { tr -d '[:space:]' < "$f" 2>/dev/null; return 0; }
+  done
 }
 
 # -----------------------------------------------------------------------------

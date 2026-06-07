@@ -145,6 +145,39 @@ def render(d: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+def _discord_digest(d: dict) -> None:
+    """Best-effort COMPACT daily summary to #digest. The full auditable record is the
+    .md file (source of truth); this is just the once-a-day heads-up the operator
+    asked for. Reads the shared webhook (per-user file or shared discord dir). No API."""
+    import urllib.request
+    hook = ""
+    for p in (os.path.expanduser("~/.recon_discord_digest"),
+              os.path.join(os.environ.get("RECON_DISCORD_DIR", "/home/d0k/recon/state/discord"), "digest")):
+        try:
+            if os.path.isfile(p):
+                hook = open(p, encoding="utf-8").read().strip()
+                if hook:
+                    break
+        except Exception:
+            pass
+    if not hook:
+        return
+    a, fp = d["activity"], d["fp_skipped"]
+    msg = (f"\U0001F4CA **v3 digest {d['day']}**\n"
+           f"confirmed {a['confirmed']} · reported {a['reported']} · dismissed {a['dismissed']} "
+           f"· lead-exhausted {a['lead_exhausted']}\n"
+           f"review queue: {len(d['review_queue_awaiting_submit'])} awaiting submit "
+           f"· staged {len(d['staged_awaiting_human'])}\n"
+           f"FP suppressed today: {fp['suppressed_today_sigs']} · LLM spend ${d['api_spend_usd']}"
+           + (f"\n\U0001F6D1 HALTED: {d['halted_now']}" if d["halted_now"] else ""))
+    try:
+        req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=15)
+    except Exception:
+        pass
+
+
 def main(argv):
     conn = S.connect(); S.init_db(conn)
     as_json = len(argv) > 1 and argv[1] == "json"
@@ -159,6 +192,7 @@ def main(argv):
         fh.write(out)
     print(out)
     print(f"\n[written: {path}]", file=sys.stderr)
+    _discord_digest(d)   # compact #digest ping (best-effort; .md is the source of truth)
     return 0
 
 

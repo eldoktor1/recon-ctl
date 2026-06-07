@@ -88,7 +88,7 @@ last_ingest="$(ec -X POST "$ES_URL/$INDEX_NAME/_search" \
   2>/dev/null | jq -r '.hits.hits[0]._source.first_seen // "unknown"')"
 
 # ── Build and send embed ──────────────────────────────────────────────────────
-hook="$(discord_hook health)"
+hook="$(discord_hook digest)"
 if [[ -z "$hook" ]]; then
   log "No health webhook configured — digest not sent (set ~/.recon_discord_health)"
   exit 0
