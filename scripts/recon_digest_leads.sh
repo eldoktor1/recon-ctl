@@ -338,7 +338,7 @@ case "$MODE" in
     printf '%s\n' "$selected"
     ;;
   post|--post)
-    hook="$(discord_hook leads)"
+    hook="$(discord_hook digest)"
     if [[ -z "$hook" ]]; then
       log "No #leads webhook (~/.recon_discord_leads) — printing instead, NOT writing ledger"
       render_text

@@ -622,7 +622,7 @@ if [[ "$CONFIRMED_THIS_RUN" -gt 10 ]]; then
     > "$HOME/recon/state/kill/v2_nuclei"
 
   # Send alert
-  discord_post "$(discord_hook health)" "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" || true
+  discord_post "$(discord_hook ops)" "{\"content\":\"⚠️ Nuclei auto-disabled: $CONFIRMED_THIS_RUN findings in one run (likely false positive). Investigate before re-enabling.\"}" || true
 fi
 
 log "Nuclei cycle complete"
