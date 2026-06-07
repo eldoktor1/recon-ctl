@@ -334,6 +334,37 @@ def record_ai_verdict(conn, finding_id: int, verdict: str, confidence: float, re
                   reason=f"claude-validation: {reason[:160]}", source="ai-validation")
 
 
+def ai_accuracy(conn) -> dict:
+    """Self-audit: is the Claude layer actually accurate? Computed from SQLite truth.
+    The headline signal is HUMAN DISPOSITION of 'real' verdicts — of the findings Claude
+    called real, how many a human ultimately submitted (accepted) vs dismissed (rejected).
+    That is the only ground-truth precision we have; the rest is supporting telemetry."""
+    q = lambda s, *a: conn.execute(s, a).fetchall()
+    dist = {r["ai_verdict"]: {"count": r["c"], "avg_conf": round(r["ac"] or 0, 3)}
+            for r in q("SELECT ai_verdict, COUNT(*) c, AVG(ai_confidence) ac FROM findings "
+                       "WHERE ai_verdict IS NOT NULL GROUP BY ai_verdict")}
+    real_by_state = {r["state"]: r["c"] for r in
+                     q("SELECT state, COUNT(*) c FROM findings WHERE ai_verdict='real' GROUP BY state")}
+    accepted = real_by_state.get("submitted", 0)
+    rejected = real_by_state.get("dismissed", 0)
+    decided = accepted + rejected
+    pending = sum(v for k, v in real_by_state.items() if k in ("confirmed", "reported"))
+    escalated = q("SELECT COUNT(*) c FROM findings WHERE ai_reason LIKE '%escalated:%'")[0]["c"]
+    fp_ai = q("SELECT COUNT(*) c FROM false_positive_signatures WHERE source='ai-validation'")[0]["c"]
+    kb = q("SELECT COUNT(*) c, COALESCE(SUM(hit_count),0) h FROM knowledge_base")[0]
+    return {
+        "reviewed_total": sum(d["count"] for d in dist.values()),
+        "verdict_distribution": dist,
+        "real_disposition": {
+            "accepted_submitted": accepted, "rejected_dismissed": rejected,
+            "pending_human": pending,
+            "precision_when_decided": round(accepted / decided, 3) if decided else None},
+        "escalations": escalated,
+        "fp_signatures_from_ai": fp_ai,
+        "kb_lessons": kb["c"], "kb_retrievals": int(kb["h"]),
+    }
+
+
 def _root_domain(host: str) -> str:
     """Cheap eTLD+1-ish: last two labels. Good enough for 'same target family'
     grouping in the KB (not a public-suffix-perfect parse)."""
@@ -456,9 +487,11 @@ def _main(argv):
         print(json.dumps(kb_lookup(conn, tech=(a[0] or None), vuln_class=(a[1] if len(a) > 1 else None),
                                    host=(a[2] if len(a) > 2 else None),
                                    limit=int(a[3]) if len(a) > 3 else 5)))
+    elif cmd == "ai-accuracy":       # ai-accuracy -> JSON self-audit of the Claude layer
+        print(json.dumps(ai_accuracy(conn), indent=2))
     else:
         print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed|"
-              "ai-pending|ai-verdict|kb-record|kb-lookup}", file=sys.stderr); return 2
+              "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy}", file=sys.stderr); return 2
     return 0
 
 
