@@ -49,6 +49,18 @@ args: unauthenticated, GET/HEAD/OPTIONS only, no creds, no redirect-follow, SSRF
 guard (refuses private/loopback/169.254/reserved), live scope+pays gate, rate-limited,
 Mullvad-only, audited. **Unauthenticated only** — authenticated testing stays human-in-the-loop.
 
+**Anti-burn (never get banned).** Probing is rate-limited so the Mullvad egress IP isn't
+banned: min-gap + jitter, per-host and global rolling-window caps, a host COOLDOWN on a
+429/403/503, and a global CIRCUIT-BREAKER that pauses ALL probing after repeated blocks
+(`PROBE_*` env). The article's politeness rule, enforced in code.
+
+**MONITOR (Claude's 3rd role).** `recon_ai_monitor.sh` (hourly daemon loop) reads LOCAL
+telemetry only — burn signals (probe blocks/cooldowns/global-pause), verdict precision,
+failures/halts, daemon errors, VPN — and emits a skeptical health + burn_risk + guidance
+assessment to `#ops` / `recon-ai monitor`. It guides and watches every process; it issues
+NO target traffic. So Claude now spans the pipeline: ANALYZE (aim) → VERIFY+probe (confirm)
+→ MONITOR (oversee).
+
 Output is **schema-validated** (`--json-schema` → `.structured_output`; no regex scraping;
 unparseable ⇒ safe `needs-human`). It **escalates to the big model on genuine ambiguity OR a
 low-confidence real/fp**. ANALYZE tiers model by asset value (haiku bulk → sonnet for high
