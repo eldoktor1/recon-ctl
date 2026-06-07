@@ -9,14 +9,21 @@ Features:
 
 - true-fresh engine (`recon_true_fresh.sh`) — certstream + crt.sh
 - dual-lane validator (fast lane `--prefix 00_` for hot-seed batches)
-- bounty + deep + active + JS scan loops, gated to true-fresh hosts
+- **Claude ANALYZE** (Haiku) — aims the net: which in-scope assets are worth testing + class
+- **multi-class CONFIRM** (SAFE primitives): evidence-gate (nuclei + interactsh OOB for SSRF/XXE),
+  `xss-confirm` (browser marker-exec), `param-confirm` (SSTI/redirect/SQLi differential)
+- **Claude VERIFY** (Sonnet→Opus) — adversarial FP filter on every confirmed finding → `#review`
+- every lane's confirmation routes through `findings.db` → Claude verify (universal FP gate)
 - hidden Windows autostart via `ReconWatchdog` → `start_recon_safe.sh`
-- local Elasticsearch at `http://127.0.0.1:9200`
-- target-facing scanners running under `reconrun`
-- preflight safety check before each start
+- local Elasticsearch at `http://127.0.0.1:9200` (index `recon_alive` alias → `recon_alive_v3`)
+- target-facing scanners running under `reconrun`; Claude agents under `d0k` (Max auth)
+- preflight + Mullvad VPN gate before each start; `recon-maintenance on` rebuild lock
 - passive vuln intelligence (KEV + NVD + vuln feeds) with ES matching
-- Ollama AI review after deterministic scoring
 - `browser_curl` / random real-browser UA helpers in `recon_net.sh`
+
+> v3.2 architecture, restore-from-clone, and daily commands: see `README.md`.
+> Operating doctrine (CONFIRMED-vs-LEAD, per-class SAFE primitives, hard line): `CLAUDE.md`.
+> The legacy Ollama AI-review layer was retired in v3.1 — Claude (Max, headless, no API) is the AI layer.
 
 ## Core Architecture
 
@@ -414,14 +421,14 @@ Inspect:
 | `/etc/sudoers.d/recon-safe-preflight` | Narrow NOPASSWD rule for preflight only |
 | `C:\recon\start_recon_hidden.vbs` | Hidden Windows WSL startup wrapper |
 | `~/.recon_es_pass` | ES password |
-| `~/.recon_discord_takeovers` | Webhook → #takeovers channel (first-blood candidates, @here) |
-| `~/.recon_discord_fresh` | Webhook → #fresh channel (true-fresh findings, @here) |
-| `~/.recon_discord_vulns` | Webhook → #vulns channel (DAST / confirmed vulns) |
-| `~/.recon_discord_cve` | Webhook → #cve-kev channel (nuclei CVE/KEV confirmations) |
-| `~/.recon_discord_health` | Webhook → #health channel (pipeline status, killswitch alerts) |
-| `~/.recon_discord_bot` | Discord bot token |
-| `~/.recon_discord_allowed_uid` | Allowed Discord user ID |
-| `~/.recon_discord_channel_id` | Allowed Discord channel ID |
+| `~/recon/state/discord/review` | Webhook → #review (Claude `real`/`needs-human` → APPROVE/DISMISS/INVESTIGATE) |
+| `~/recon/state/discord/takeovers` | Webhook → #takeovers (first-blood candidates) |
+| `~/recon/state/discord/ops` | Webhook → #ops (halts / vpn / nuclei auto-disable) |
+| `~/recon/state/discord/digest` | Webhook → #digest (daily brief) |
+| `~/.recon_discord_bot` | Discord bot token (optional inbound command bot) |
+| `~/.recon_discord_allowed_uid` | Allowed Discord user ID (inbound bot) |
+| `~/.recon_discord_channel_id` | Allowed Discord channel ID (inbound bot) |
+| `~/.recon_es_netrc` | ES credentials (netrc) |
 | `~/.recon_submissions.jsonl` | Submission history |
 | `~/recon/queue/inbox/` | Pending batches |
 | `~/recon/queue/processing/` | In-flight batches |
