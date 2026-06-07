@@ -1073,221 +1073,120 @@ cmd_confirmed() {
 }
 
 # ---------------------------------------------------------------------------
-# _ai_es_table <es_query_json> <n>
-# Run an ES query (full query object) and render results as an AI leads table.
-# Sorted by ai_relevance_score desc, then triage_score desc.
+# _ai_db <sql> — read-only query against the v3 finding-state DB (findings.db).
+# The AI layer is now the Claude-Max VALIDATION agent (recon_ai_review.sh): its
+# verdicts (ai_verdict / ai_confidence / ai_reason) live in SQLite, not ES.
+# (The legacy Ollama ai_relevance_score/ai_recommendation pre-scorer was retired
+# in v3.1.) Tab-separated rows on stdout; silent on any error (missing/locked db).
 # ---------------------------------------------------------------------------
-_ai_es_table() {
-  local query="$1" n="$2"
-  local B='\033[1m' R='\033[0m' G='\033[0;32m' Y='\033[1;33m' RD='\033[0;31m'
+_ai_db() {
+  local db="${V3_DB:-$BASE_DIR/v3/findings.db}"
+  python3 - "$db" "$1" <<'PY' 2>/dev/null
+import sqlite3, sys
+db, sql = sys.argv[1], sys.argv[2]
+try:
+    c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    for row in c.execute(sql):
+        print("\t".join("" if v is None else str(v) for v in row))
+except Exception:
+    pass
+PY
+}
 
-  local body
-  body="$(printf '{
-    "size": %s,
-    "_source": ["host","triage_priority","triage_score","triage_payout_tier","triage_program",
-                "triage_signals","triage_classes","triage_true_fresh","triage_kev_match",
-                "js_secret_hit","js_endpoint_hit",
-                "ai_relevance_score","ai_confidence","ai_recommendation","ai_reason","ai_model"],
-    "query": %s,
-    "sort": [
-      {"ai_relevance_score":{"order":"desc","missing":"_last"}},
-      {"triage_score":{"order":"desc","missing":"_last"}}
-    ]
-  }' "$n" "$query")"
-
-  local resp total
-  resp="$(_es_search "$body")"
-  total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
-
-  if [[ "$total" -eq 0 ]]; then
-    echo "  (no results in ES)"
-    return
-  fi
-
-  printf "${B}%-3s %-4s %-13s %-3s %-4s %-7s %-52s %-22s %s${R}\n" \
-    "AI" "CONF" "REC" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "SIGNALS"
-  printf '%s\n' "$(printf '─%.0s' {1..160})"
-
-  printf '%s' "$resp" | jq -r '
-    .hits.hits[]._source |
-    [
-      ((.ai_relevance_score // 0) | tostring),
-      (.ai_confidence // "?"),
-      (.ai_recommendation // "?"),
-      (.triage_priority // "-"),
-      ((.triage_score // 0) | tostring),
-      (.triage_payout_tier // "-"),
-      (.host // ""),
-      (.triage_program // "-"),
-      ((.triage_signals // []) | join(",") | .[0:60]),
-      (if (.triage_true_fresh // false) then "⚡" else "" end),
-      (if (.triage_kev_match // false) then "🎯" else "" end),
-      (if (.js_secret_hit // false) then "🔑" else "" end)
-    ] | @tsv
-  ' 2>/dev/null \
-  | while IFS=$'\t' read -r ai_s conf rec pri scr tier host prog sigs fresh_icon kev_icon js_icon; do
-      local col="$R"
-      [[ "$rec" == "test_now"      ]] && col="$RD"
-      [[ "$rec" == "manual_review" ]] && col="$Y"
-      [[ "$rec" == "watch"         ]] && col="$G"
-      local icons="${fresh_icon}${kev_icon}${js_icon}"
-      printf "${col}%-3s${R} %-4s %-13s %-3s %-4s %-7s %-52s %-22s %s %s\n" \
-        "$ai_s" "${conf:0:4}" "$rec" "$pri" "$scr" "$tier" \
-        "${host:0:52}" "${prog:0:22}" "$sigs" "$icons"
-    done
-
-  echo
-  printf "  showing: %s of %s matching (sorted by AI score desc)\n" \
-    "$(printf '%s' "$resp" | jq -r '.hits.hits | length' 2>/dev/null)" "$total"
+# ---------------------------------------------------------------------------
+# _ai_table <where> <limit> — render finding rows as a Claude-verdict table.
+# ---------------------------------------------------------------------------
+_ai_table() {
+  local where="$1" n="${2:-50}"
+  local B=$'\033[1m' R=$'\033[0m' G=$'\033[0;32m' Y=$'\033[1;33m' RD=$'\033[0;31m'
+  local rows
+  rows="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(tier,'-'), COALESCE(vuln_class,'-'), state, COALESCE(ai_reason,'') FROM findings WHERE $where ORDER BY (ai_verdict='real') DESC, ai_confidence DESC, state_changed_at DESC LIMIT $n;")"
+  if [[ -z "$rows" ]]; then echo "  (no matching findings)"; return; fi
+  printf "${B}%-12s %-5s %-36s %-9s %-9s %s${R}\n" "VERDICT" "CONF" "HOST" "TIER" "STATE" "CLASS"
+  printf '%s\n' "$(printf '─%.0s' {1..150})"
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r host verdict conf tier cls state reason; do
+    local col="$R"
+    case "$verdict" in
+      real) col="$G" ;; fp) col="$RD" ;; needs-human) col="$Y" ;;
+    esac
+    printf "${col}%-12s${R} %-5s %-36s %-9s %-9s %s\n" "$verdict" "$conf" "${host:0:36}" "${tier:0:9}" "${state:0:9}" "${cls:0:30}"
+  done
 }
 
 cmd_ai() {
   local sub="${1:-status}"; shift || true
-  # Shared filter: hosts that have been AI-reviewed
-  local AI_EXISTS='{"exists":{"field":"ai_reviewed_at"}}'
+  local DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
+  local claude="$HOME/.local/bin/claude"; [[ -x "$claude" ]] || claude="$(command -v claude 2>/dev/null || echo '')"
 
   case "$sub" in
-
-    # ---- status (default) ----
+    # ---- status (default): validation-agent health + verdict breakdown ----
     status|"")
-      hdr "AI review layer — status"
-      local model="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
-      echo "  model: $model  (enabled=${ENABLE_OLLAMA_AI:-1})"
-      if command -v ollama >/dev/null 2>&1 && \
-         curl -fsS -m2 "${OLLAMA_URL:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
-        if ollama list 2>/dev/null | awk '{print $1}' | grep -qxF "$model"; then
-          echo "  ollama: ✅ reachable, model installed"
-        else
-          echo "  ollama: ⚠️  reachable but model not installed — run: ollama pull $model"
-        fi
+      hdr "AI validation layer (Claude-Max) — status"
+      if [[ -n "$claude" && -x "$claude" ]]; then
+        echo "  claude CLI: ✅ $("$claude" --version 2>/dev/null | head -1)  (Max headless, no API key)"
       else
-        echo "  ollama: ❌ not reachable (not running or wrong port)"
+        echo "  claude CLI: ❌ not found — deterministic confidence fallback in effect"
       fi
-
-      local total testnow manual watch skip hi
-      total="$(_es_count_q "$AI_EXISTS")"
-      testnow="$(_es_count_q '{"term":{"ai_recommendation":"test_now"}}')"
-      manual="$(_es_count_q '{"term":{"ai_recommendation":"manual_review"}}')"
-      watch="$(_es_count_q '{"term":{"ai_recommendation":"watch"}}')"
-      skip="$(_es_count_q '{"term":{"ai_recommendation":"skip"}}')"
-      hi="$(_es_count_q '{"range":{"ai_relevance_score":{"gte":70}}}')"
-
-      echo "  ES scored leads: $total   (AI score ≥70: $hi)"
+      echo "  model:      ${CLAUDE_MODEL:-sonnet}    batch: ${AI_REVIEW_BATCH:-15}/cycle"
+      if [[ ! -f "$DB" ]]; then echo "  db:         ❌ $DB (not found — evidence gate has not run yet)"; return 0; fi
+      echo "  db:         $DB"
+      local stats
+      stats="$(_ai_db "SELECT SUM(state='confirmed'), SUM(ai_verdict='real'), SUM(ai_verdict='fp'), SUM(ai_verdict='needs-human'), SUM(state='confirmed' AND ai_verdict IS NULL), SUM(state='reported'), SUM(state='dismissed') FROM findings;")"
+      local conf real fp human pending reported dismissed
+      IFS=$'\t' read -r conf real fp human pending reported dismissed <<<"$stats"
       echo
-      printf "  Recommendations breakdown:\n"
-      printf "    \033[0;31mtest_now\033[0m:      %s\n" "$testnow"
-      printf "    \033[1;33mmanual_review\033[0m: %s\n" "$manual"
-      printf "    \033[0;32mwatch\033[0m:         %s\n" "$watch"
-      printf "    skip:          %s\n" "$skip"
+      printf "  Confirmed findings:      %s\n" "${conf:-0}"
+      printf "    \033[0;32mreal\033[0m (reportable):    %s\n" "${real:-0}"
+      printf "    \033[1;33mneeds-human\033[0m:           %s\n" "${human:-0}"
+      printf "    \033[0;31mfp\033[0m (auto-dismissed):   %s   [total dismissed: %s]\n" "${fp:-0}" "${dismissed:-0}"
+      printf "    pending validation:     %s\n" "${pending:-0}"
+      printf "  Reported (review queue):   %s\n" "${reported:-0}"
       echo
-      printf "  Use subcommands to explore:\n"
-      printf "    recon-ai top [N]       — all leads sorted by AI score (default 50)\n"
-      printf "    recon-ai-now           — test_now leads only\n"
-      printf "    recon-ai-high [score]  — AI score >= N (default 70)\n"
-      printf "    recon-ai watch         — watch + manual_review leads\n"
-      printf "    recon-ai p0            — P0 priority leads\n"
-      printf "    recon-ai detail <host> — full breakdown for one host\n"
+      printf "  Subcommands:\n"
+      printf "    recon-ai real          — Claude-validated reportable findings\n"
+      printf "    recon-ai human         — needs-human (operator decision)\n"
+      printf "    recon-ai pending       — confirmed, awaiting Claude validation\n"
+      printf "    recon-ai fp            — auto-dismissed false positives\n"
+      printf "    recon-ai detail <host> — full verdict + evidence for one host\n"
       ;;
 
-    # ---- top N: all AI-reviewed leads sorted by AI score ----
-    top|all)
-      local n="${1:-${AI_MAX_LEADS:-50}}"
-      hdr "AI scored — top $n by AI score"
-      _ai_es_table "$AI_EXISTS" "$n"
-      ;;
+    real)              hdr "AI-validated — REAL (reportable)";      _ai_table "ai_verdict='real'" "${1:-999}" ;;
+    human|needs-human) hdr "AI-validated — needs human decision";   _ai_table "ai_verdict='needs-human'" "${1:-999}" ;;
+    pending)           hdr "Confirmed — pending Claude validation"; _ai_table "state='confirmed' AND ai_verdict IS NULL" "${1:-999}" ;;
+    fp)                hdr "AI-validated — false positives";        _ai_table "ai_verdict='fp'" "${1:-200}" ;;
+    top|all)           hdr "All findings (verdict order)";          _ai_table "1=1" "${1:-50}" ;;
 
-    # ---- test-now: highest-urgency only ----
-    test-now|testnow|now)
-      hdr "AI scored — test_now leads"
-      _ai_es_table '{"term":{"ai_recommendation":"test_now"}}' 999
-      ;;
-
-    # ---- high: AI score >= N ----
-    high)
-      local min="${1:-70}"
-      hdr "AI scored — high confidence (AI score >= $min)"
-      _ai_es_table "{\"range\":{\"ai_relevance_score\":{\"gte\":$min}}}" 999
-      ;;
-
-    # ---- watch: manual_review + watch leads ----
-    watch)
-      hdr "AI scored — watch + manual_review leads"
-      _ai_es_table '{"bool":{"should":[{"term":{"ai_recommendation":"watch"}},{"term":{"ai_recommendation":"manual_review"}}],"minimum_should_match":1}}' 999
-      ;;
-
-    # ---- p0: P0 priority leads only ----
-    p0)
-      hdr "AI scored — P0 priority leads"
-      _ai_es_table '{"bool":{"filter":[{"exists":{"field":"ai_reviewed_at"}},{"term":{"triage_priority":"P0"}}]}}' 999
-      ;;
-
-    # ---- detail <host>: full breakdown from ES ----
+    # ---- detail <host>: full verdict + evidence from SQLite ----
     detail|show|inspect)
       local target="${1:-}"
       [[ -z "$target" ]] && { echo "Usage: recon-ai detail <host>"; return 1; }
-      local resp
-      resp="$(_es_search "{
-        \"size\": 1,
-        \"query\": {\"bool\":{\"filter\":[
-          {\"exists\":{\"field\":\"ai_reviewed_at\"}},
-          {\"term\":{\"host\":\"$target\"}}
-        ]}}
-      }")"
-      local hit; hit="$(printf '%s' "$resp" | jq -r '.hits.hits[0]._source // empty' 2>/dev/null)"
-      if [[ -z "$hit" ]]; then
-        echo "Host not found in AI scored leads: $target"
-        echo "(Searching for partial match...)"
-        local fuzz; fuzz="$(_es_search "{
-          \"size\": 10,
-          \"_source\": [\"host\"],
-          \"query\": {\"bool\":{\"filter\":[
-            {\"exists\":{\"field\":\"ai_reviewed_at\"}},
-            {\"wildcard\":{\"host\":{\"value\":\"*${target}*\",\"case_insensitive\":true}}}
-          ]}}
-        }")"
-        printf '%s' "$fuzz" | jq -r '.hits.hits[]._source.host' 2>/dev/null | sed 's/^/  /'
-        return 1
-      fi
+      local esc="${target//\'/\'\'}"
+      local row
+      row="$(_ai_db "SELECT host, COALESCE(ai_verdict,'unreviewed'), printf('%.2f',COALESCE(ai_confidence,0)), COALESCE(ai_reason,'(none)'), state, COALESCE(tier,'?'), COALESCE(vuln_class,'?'), COALESCE(signal_class,'?'), COALESCE(program,'?'), COALESCE(url,host), printf('%.2f',COALESCE(confidence,0)), COALESCE(ai_reviewed_at,'never'), COALESCE(evidence,'') FROM findings WHERE host LIKE '%$esc%' ORDER BY state_changed_at DESC LIMIT 1;")"
+      if [[ -z "$row" ]]; then echo "  No finding for host: $target"; return 1; fi
       hdr "AI detail — $target"
-      printf '%s\n' "$hit" | jq -r '
-        "  AI score:       \(.ai_relevance_score // "?") / 100  (\(.ai_confidence // "?") confidence)",
-        "  Recommendation: \(.ai_recommendation // "?")",
-        "  Model:          \(.ai_model // "?")",
-        "",
-        "  Reason:",
-        ("    " + (.ai_reason // "(none)")),
-        "",
-        "  Safe checks:",
-        ((.ai_safe_checks // []) | if length == 0 then "    (none)" else map("    • " + .) | join("\n") end),
-        "",
-        "  Risk flags:",
-        ((.ai_risk_flags // []) | if length == 0 then "    (none)" else map("    ⚠ " + .) | join("\n") end),
-        "",
-        "  ── Triage data ──────────────────────────────────────────",
-        "  Priority:   \(.triage_priority // "?")   Score: \(.triage_score // 0)   Tier: \(.triage_payout_tier // "?")",
-        "  Program:    \(.triage_program // "unknown")  (\(.triage_platform // "?"))",
-        "  URL:        \(.url // .host)",
-        "  Status:     HTTP \(.status_code // 0)   Port: \(.port // 0)",
-        "  Tech:       \((.tech // []) | join(", "))",
-        "  Title:      \(.title // "")",
-        "  True fresh: \(if (.triage_true_fresh // false) then "✅ yes (" + (.triage_external_first_seen // "?") + ")" else "no" end)",
-        "  KEV match:  \(if (.triage_kev_match // false) then "🎯 " + (.triage_kev_signal // "?") else "no" end)",
-        "  Breaking vuln: \(if (.triage_breaking_vuln // false) then "💥 yes (tier=" + (.triage_vuln_tier // "?") + ")" else "no" end)",
-        "  JS secrets: \(if (.js_secret_hit // false) then "🔑 yes" else "no" end)   JS endpoints: \(if (.js_endpoint_hit // false) then "🛤️  yes" else "no" end)",
-        "  Signals:    \((.triage_signals // []) | join(", "))",
-        "  Classes:    \((.triage_classes // []) | join(", "))"
-      ' 2>/dev/null
+      local host verdict conf reason state tier cls sig prog url dconf reviewed evidence
+      IFS=$'\t' read -r host verdict conf reason state tier cls sig prog url dconf reviewed evidence <<<"$row"
+      printf "  Verdict:     %s   (Claude confidence %s)\n" "$verdict" "$conf"
+      printf "  Reason:      %s\n" "$reason"
+      printf "  Reviewed:    %s\n\n" "$reviewed"
+      printf "  State:       %s\n" "$state"
+      printf "  Vuln class:  %s   (signal: %s)\n" "$cls" "$sig"
+      printf "  Tier:        %s   gate-confidence: %s\n" "$tier" "$dconf"
+      printf "  Program:     %s\n" "$prog"
+      printf "  URL:         %s\n" "$url"
+      printf "  Evidence:    %s\n" "${evidence:0:300}"
       ;;
 
     *)
-      echo "recon-ai subcommands:"
-      echo "  status              AI layer health + recommendation breakdown (default)"
-      echo "  top [N]             All AI scored leads sorted by AI score (default 50)"
-      echo "  test-now            Only recommendation=test_now leads"
-      echo "  high [min_score]    Leads with AI score >= min (default 70)"
-      echo "  watch               watch + manual_review leads"
-      echo "  p0                  P0 priority leads only"
-      echo "  detail <host>       Full breakdown for one host (all data from ES)"
+      echo "recon-ai subcommands (Claude-Max validation, SQLite-backed):"
+      echo "  status              Validation-agent health + verdict breakdown (default)"
+      echo "  real                Claude-validated reportable findings"
+      echo "  human               needs-human findings (operator decision)"
+      echo "  pending             confirmed findings awaiting validation"
+      echo "  fp                  auto-dismissed false positives"
+      echo "  top [N]             all findings in verdict order"
+      echo "  detail <host>       full verdict + evidence for one host"
       ;;
   esac
 }
@@ -1504,7 +1403,7 @@ cmd_view() {
   printf "  Triage: P0=%-4s P1=%-4s P2=%-4s  true-fresh=%-4s  KEV=%-4s  JS=%-4s\n" \
     "$t_p0" "$t_p1" "$t_p2" "$t_fresh" "$t_kev" "$t_js"
   printf "  AI:     total=%-4s test_now=%-4s score≥70=%-4s\n" "$t_ai" "$t_now" "$t_hi"
-  printf "\n  Quick commands:  ${G}recon-ai-now${R}  ${G}recon-ai-high${R}  ${G}recon-fresh${R}  ${G}recon-kev${R}  ${G}recon-js${R}  ${G}recon-top 30${R}\n"
+  printf "\n  Quick commands:  ${G}recon-ai${R}  ${G}recon-fresh${R}  ${G}recon-kev${R}  ${G}recon-js${R}  ${G}recon-top 30${R}\n"
   rm -rf "$tmp"
 }
 

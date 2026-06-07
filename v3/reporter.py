@@ -140,8 +140,15 @@ def _build_finding(row, asset) -> F.Finding:
 
 def run(conn, limit: int = 50) -> dict:
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    rows = conn.execute("SELECT * FROM findings WHERE state='confirmed' ORDER BY score DESC LIMIT ?",
-                        (limit,)).fetchall()
+    # Report only Claude-validated 'real' findings; un-reviewed high-confidence ones
+    # fall through (so we don't lose findings if AI review lags / is off). 'fp' are
+    # already dismissed; 'needs-human' are held out of the auto queue by design.
+    fallback = float(os.environ.get("REPORT_CONF_FALLBACK", "0.85"))
+    rows = conn.execute(
+        "SELECT * FROM findings WHERE state='confirmed' AND "
+        "(ai_verdict='real' OR (ai_verdict IS NULL AND confidence >= ?)) "
+        "ORDER BY (ai_verdict='real') DESC, confidence DESC LIMIT ?",
+        (fallback, limit)).fetchall()
     subs = _load_subs()
     out = {"reported": 0, "bounced_stale": 0, "flagged_dup": 0}
     for row in rows:
@@ -171,6 +178,8 @@ def run(conn, limit: int = 50) -> dict:
         with open(REVIEW_QUEUE, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"finding_id": row["id"], "host": row["host"], "program": f.program,
                                  "platform": f.platform, "vuln_class": row["vuln_class"],
+                                 "ai_verdict": (row["ai_verdict"] or "unreviewed"),
+                                 "ai_confidence": row["ai_confidence"], "ai_reason": row["ai_reason"],
                                  "dup_status": dstatus, "report": path, "queued_at": _utc(),
                                  "action_required": "HUMAN review + submit (never auto-submitted)"}) + "\n")
         S.transition(conn, row["id"], "reported", expect="confirmed")

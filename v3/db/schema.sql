@@ -25,8 +25,13 @@ CREATE TABLE IF NOT EXISTS findings (
     state           TEXT NOT NULL DEFAULT 'discovered',
     score           INTEGER DEFAULT 0,
     priority        TEXT,
-    confidence      REAL NOT NULL DEFAULT 0,       -- 0.0-1.0 evidence confidence (article-style routing)
+    confidence      REAL NOT NULL DEFAULT 0,       -- 0.0-1.0 deterministic evidence confidence (gate)
     review_tier     TEXT,                          -- immediate (>=0.85) | batch (0.70-0.84) | weekly (<0.70)
+    -- Claude-Max validation agent (headless `claude -p`, no API) — the accuracy layer.
+    ai_verdict      TEXT,                          -- real | fp | needs-human | NULL(=not yet reviewed)
+    ai_confidence   REAL,                          -- Claude's 0.0-1.0 relevancy/exploitability confidence
+    ai_reason       TEXT,                          -- Claude's one-line justification (adversarial)
+    ai_reviewed_at  TEXT,
     fp_signature    TEXT NOT NULL,                 -- stable signature for FP/dup matching
     evidence        TEXT,                          -- JSON: probe, template, matched_at, redacted response
     attempts        INTEGER NOT NULL DEFAULT 0,

@@ -1,5 +1,40 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.1.0 - 2026-06-07 - Claude-Max validation agent becomes the AI layer; Ollama retired
+
+The AI layer is now **Claude on the Max plan, headless (`claude -p`), no API key/spend**
+— the article's "validation agent." It judges only evidence-gate-CONFIRMED findings
+(a handful/day) adversarially (assume false-positive until the evidence proves
+otherwise) and writes a verdict to SQLite. This replaces the legacy Ollama pre-scorer
+entirely: detection + the deterministic evidence gate are the cheap pre-filter; Claude
+validates the confirmed survivors for accuracy/relevancy.
+
+- **NEW `scripts/recon_ai_review.sh`** — Claude-Max validation agent (daemon `ai-review`
+  loop, runs as `d0k` for Claude auth). Pulls confirmed findings via `state.py ai-pending`,
+  one adversarial prompt each, parses a single-line JSON verdict, writes via
+  `state.py ai-verdict`. `real` → reaches reporter; `fp` → dismissed + FP signature
+  learned; `needs-human` → held for operator. Graceful no-op if `claude` is missing
+  (deterministic confidence stands). Live-validated end-to-end on real Claude: a CORS
+  info-hit → `fp` (0.95, dismissed+learned), a Jenkins script-console template-only hit
+  → `needs-human` (0.6, "template match alone is unconfirmed — manual GET required").
+- **`v3/db/schema.sql`** — `findings` gains `ai_verdict / ai_confidence / ai_reason /
+  ai_reviewed_at`. **`v3/state.py`** — `ai-pending` / `ai-verdict` CLI + `record_ai_verdict`
+  (fp → dismiss + FP signature). **`v3/reporter.py`** — reports only
+  `ai_verdict='real'` (deterministic `confidence >= fallback` only when AI un-run).
+- **RETIRED the Ollama AI-review layer**: `git rm` `recon_ai_score.sh`, `recon_ai_pack.sh`,
+  `recon_ollama.sh`; removed `triage.sh`'s `run_ai_review_layer` call + the
+  `ai_recommendation/ai_relevance_score` scoring map and sort key (triage scoring is
+  deterministic again); dropped `ENABLE_OLLAMA_AI/OLLAMA_*/AI_MAX_LEADS` from the daemon
+  and the `ai_review/` dir creation; bootstrap now one-time-`rm -rf`s the legacy
+  `~/recon/ai_review` packet queue (claude/codex/pending/done/rejected + ai_scored.jsonl).
+- **`recon-ai` (`recon_ctl.sh cmd_ai`) rebuilt on SQLite** — `status` shows validation-agent
+  health + verdict breakdown (real/needs-human/fp/pending/reported); `real|human|pending|fp|
+  top|detail` subcommands query `findings.db` via a read-only `_ai_db` helper. Fixed the
+  footer that advertised the now-dead `recon-ai-now/recon-ai-high`.
+- **Docs** — `claude.md`, `agent/CLAUDE.md`, `agent/init_prompt.md`, `v3/README.md` updated
+  to the Claude-Max validation model (flow diagram now shows the `ai-review` node; operator
+  brief reads verdicts from SQLite / `recon-ai`, not `ai_scored.jsonl`).
+
 ## v3.0.0 - 2026-06-07 - detection → validation → report (evidence gate + state machine + orchestrator)
 
 New `v3/` layer that turns detection into confirmed, reported, non-duplicate findings

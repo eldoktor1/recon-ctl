@@ -51,8 +51,10 @@ ES curl. When calling from Windows via WSL, use a heredoc:
     recon_brain.sh           — manual/scheduled full refresh (scope+KEV+vuln+triage)
     triage.sh                — 6-phase scoring engine (tech signals, scope, KEV,
                                true_fresh, vuln, cluster dedup → agent_targets.jsonl)
-    recon_ai_score.sh        — Ollama review of top triage leads
-    recon_ai_pack.sh         — packages AI results for operator
+    recon_ai_review.sh       — Claude-Max VALIDATION agent (headless `claude -p`,
+                               no API): adversarially judges evidence-gate-CONFIRMED
+                               findings → ai_verdict in v3/findings.db (accuracy layer)
+    recon_evidence_gate.sh   — Phase A: probes P0-CANDIDATEs, promotes only real fires
     recon_takeover_hunter.sh — CNAME/NXDOMAIN takeover first-blood detection
     recon_true_fresh.sh      — certstream CT-log listener → true_fresh.jsonl
     recon_fresh_modules.sh   — post-true_fresh enrichment modules
@@ -61,7 +63,6 @@ ES curl. When calling from Windows via WSL, use a heredoc:
     recon_net.sh             — thin network wrappers (run_net, curl_net, curl_direct)
     recon_ctl.sh             — control script: start/stop/status/health/queue/top/ai/etc.
     recon_es_bootstrap.sh    — ES index setup
-    recon_ollama.sh          — Ollama API call wrapper
     recon_inspect.sh         — query/inspect tool
     recon_killswitch.sh      — kill-switch management (WSL2: no-op)
     recon_hot_seed.sh        — flushes CT/true_fresh results to fast-lane inbox
@@ -120,9 +121,11 @@ vuln/
 firstblood/
   takeovers_to_claim.tsv
   takeovers_watching.tsv
-ai_review/
-  ai_scored.jsonl        — Ollama-reviewed leads
-  rejected/              — raw Ollama output that failed JSON parse
+v3/
+  findings.db            — SQLite finding-state store (WAL). Lifecycle states +
+                           Claude-Max validation verdicts (ai_verdict/ai_confidence/
+                           ai_reason). Source of truth for confirmed→reported flow.
+  reports/review_queue.jsonl — human review/submit queue (never auto-submitted)
 ```
 
 ---

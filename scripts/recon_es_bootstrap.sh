@@ -23,14 +23,13 @@ delete_recon_index() {
 
 clear_derived_host_state() {
   local archive_root="$BASE_DIR/archive/es_reset_$(date -u +%Y%m%dT%H%M%SZ)"
-  mkdir -p "$archive_root/cve" "$archive_root/triage" "$archive_root/ai_review" "$archive_root/vuln"
+  mkdir -p "$archive_root/cve" "$archive_root/triage" "$archive_root/vuln"
 
   local f
   for f in \
     "$BASE_DIR/cve/kev_targets.jsonl" \
     "$BASE_DIR/vuln/vuln_targets.jsonl" \
-    "$BASE_DIR/triage/agent_targets.jsonl" \
-    "$BASE_DIR/ai_review/ai_scored.jsonl"; do
+    "$BASE_DIR/triage/agent_targets.jsonl"; do
     if [[ -s "$f" ]]; then
       mv "$f" "$archive_root/${f#$BASE_DIR/}" 2>/dev/null || true
     else
@@ -38,11 +37,10 @@ clear_derived_host_state() {
     fi
   done
 
-  if [[ -d "$BASE_DIR/ai_review/pending" ]]; then
-    mkdir -p "$archive_root/ai_review/pending"
-    find "$BASE_DIR/ai_review/pending" -maxdepth 1 -type f -name '*.md' \
-      -exec mv -t "$archive_root/ai_review/pending" {} + 2>/dev/null || true
-  fi
+  # v3.1: retire the legacy Ollama AI-review packet queue (claude/codex/pending/
+  # done/rejected + ai_scored.jsonl). The AI layer is now the Claude-Max validation
+  # agent writing verdicts to v3/findings.db — no flat-file queue. One-time cleanup.
+  rm -rf "$BASE_DIR/ai_review" 2>/dev/null || true
 
   : > "$BASE_DIR/cve/kev_targets.jsonl"
   mkdir -p "$BASE_DIR/vuln"

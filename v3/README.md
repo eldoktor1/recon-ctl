@@ -41,7 +41,8 @@ The evidence gate (Phase A) runs as a daemon loop (`recon_daemon.sh` registers `
 All phases are unit/self-test validated (compile + logic). **Live integration testing is pending** — the daemon was stopped during the build and target-facing probes were not run. Before re-enabling: (1) human-review `tier_list.tsv` and set GENERAL where appropriate (until then nothing is autonomous-active-eligible — fail-safe), (2) dry-run the evidence gate against a small candidate batch, (3) `state.py init` + one `orchestrator.py once`.
 
 ## Consolidated cohesive flow (post-v3, 2026-06-07)
-The daemon was cut from 28 → 22 loops. The redundant active-confirmation lanes that
+The daemon was cut from 28 → 23 loops (22 after consolidation, +1 for the new
+`ai-review` Claude validation loop). The redundant active-confirmation lanes that
 only dumped to Discord side-channels were retired (the evidence gate owns
 confirmation now): `nuclei-v21`, `bounty-scan`, `deep-scan`, `dast`, `exposure`,
 `digest`. Their scripts remain for on-demand `recon_ctl` use.
@@ -57,7 +58,14 @@ portscan/bypass/takeover/cloudrecon ─┘        │
                                      <0.70 LEAD · 0.70-0.84 batch/P1 · >=0.85 P0
                                               │ confirmed -> ES + SQLite + #confirmed
                                               ▼
-                                   reporter (SQLite -> review queue, dup+freshness, NEVER submits)
+                                   ai-review (Claude-Max VALIDATION agent, headless,
+                                     no API): adversarial judge of each confirmed
+                                     finding -> ai_verdict in SQLite
+                                       real -> reaches reporter
+                                       fp   -> dismissed + FP signature learned
+                                       needs-human -> held for operator
+                                              ▼
+                                   reporter (only ai_verdict=real, dup+freshness, NEVER submits)
                                               ▼
                                    v3-digest (daily auditable brief)
 ```
@@ -65,10 +73,18 @@ portscan/bypass/takeover/cloudrecon ─┘        │
 (daily). Per-lane raw dumps retired. Review happens off Discord, in the queue/digest.
 
 ## Claude as the "second man" (operator model)
-The pipeline is fully deterministic (Ollama for enrichment only — no Claude/LLM in
-the loop, no API spend). Claude runs in the **terminal** (Max plan) as the operator's
-second set of hands: while you're at work the daemon produces a tight signal, and
-Claude is invoked to triage/decide/submit against it. The one-stop brief:
+Claude shows up in two distinct, non-overlapping roles — both on the **Max plan, no
+API key, no API spend** (headless `claude -p` is billed to the Max subscription):
+
+1. **In-loop VALIDATION agent** (`scripts/recon_ai_review.sh`, daemon `ai-review` loop):
+   the article's accuracy layer. Detection and the evidence gate are fully
+   deterministic; Claude is invoked *only* on gate-CONFIRMED findings (a handful/day,
+   trivial quota) to adversarially disprove each one. Its verdict (`real`/`fp`/
+   `needs-human`) is written to SQLite and gates the reporter. The retired Ollama
+   pre-scorer is gone — the deterministic gate is the cheap pre-filter now.
+2. **Terminal OPERATOR** (you, at the keyboard / Claude in the terminal): the second
+   set of hands that triages, decides, and prepares submissions against the tight
+   signal the daemon produces while you're at work. The one-stop brief:
 ```
 python3 v3/observability.py        # what ran, what's confirmed, what needs you (review queue, halts)
 python3 v3/reporter.py             # (re)build review-queue reports from confirmed findings

@@ -28,7 +28,7 @@ confirm or reject each one with targeted safe verification.
 ### Primary source: agent_targets.jsonl
 ```bash
 AGENT_FILE=~/recon/triage/agent_targets.jsonl
-AI_FILE=~/recon/ai_review/ai_scored.jsonl
+FINDINGS_DB=~/recon/v3/findings.db          # Claude-validated finding states (recon-ai)
 NUCLEI_FILE=~/recon/nuclei/confirmed.jsonl
 TAKEOVER_FILE=~/recon/firstblood/takeovers_to_claim.tsv
 STATE_DIR=~/recon/agent
@@ -128,11 +128,15 @@ cat ~/recon/firstblood/takeovers_to_claim.tsv
 # Nuclei-confirmed findings from pipeline (already confirmed — just report)
 cat ~/recon/nuclei/confirmed.jsonl | jq '{host,template_id,severity,matched_at}'
 
-# AI-reviewed leads (use safe_checks guidance)
-jq -c 'select(.ai.ai_relevance_score >= 70) |
-  {host,url,score,priority,payout_tier,program,
-   ai_score:.ai.ai_relevance_score,
-   safe_checks:.ai.safe_checks,reason:.ai.reason}' ~/recon/ai_review/ai_scored.jsonl
+# Claude-VALIDATED findings (the AI accuracy layer; verdicts live in SQLite now).
+# Fastest: use the control command —
+#   recon-ai real      # reportable (Claude verdict=real)
+#   recon-ai human     # needs-human (operator decision)
+#   recon-ai pending   # confirmed, awaiting validation
+# Or query the DB directly (read-only):
+sqlite3 -readonly ~/recon/v3/findings.db \
+  "SELECT host, vuln_class, printf('%.2f',ai_confidence) AS conf, ai_reason
+     FROM findings WHERE ai_verdict='real' ORDER BY ai_confidence DESC;"
 ```
 
 ---
