@@ -645,6 +645,12 @@ while IFS= read -r hit; do
       -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
       -d "$update_body" > /dev/null 2>&1 || warn "ES update failed for $host"
 
+    # Everything gets verified: route the confirmed auth-bypass to Claude VERIFY too.
+    db_confirm "$host" "${base_url:-https://$host}" "$program" "auth-bypass" "auth-bypass" "$new_score" \
+      "$(awk -v c="${best_conf:-0}" 'BEGIN{printf "%.2f",(c+0)/100}')" \
+      "$(jq -nc --arg w "${waf:-?}" --arg t "${best_tech:-?}" --argjson c "${best_conf:-0}" --argjson p "$bypass_records" \
+          '{probe:"bypass-auth-differential", waf:$w, technique:$t, top_confidence:$c, paths:$p}' 2>/dev/null)"
+
     # Discord alert — pick the single highest-confidence record for the embed.
     top_rec="$(jq -c 'sort_by(-.confidence) | .[0]' <<< "$bypass_records")"
     top_path="$(jq -r '.path' <<< "$top_rec")"
