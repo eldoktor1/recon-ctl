@@ -15,6 +15,22 @@ NXDOMAIN + unclaimed-fingerprint verification, +15, P0) vs `takeover:cname-lead`
 (CNAME→provider + 404 heuristic, +3, never P0 on its own). Every other lane should
 match this discipline.
 
+## Multi-class confirmation (v3.2): wide net, each catch SAFE + FP-filtered
+The net is wide but every class has ONE precise, **SAFE (unauthenticated, non-destructive)**
+confirmation primitive. Pattern/catalog match = LEAD; the primitive firing = CONFIRMED.
+Claude is the relevance+FP layer at BOTH ends (analysis aims the net; verify adversarially
+kills FPs). Confirm primitive per class:
+- **XSS** → headless-Chromium marker EXECUTES (not mere reflection). `recon_xss_confirm.sh`.
+- **SSTI** → `{{a*b}}` evaluates to the product (math only, never RCE). `recon_param_confirm.sh`.
+- **open-redirect** → param drives the `Location:` header to OUR canary host (not followed).
+- **SQLi** → error/boolean DIFFERENTIAL (`'` vs `''`) — injectable, **never a data harvest**.
+- **GraphQL / Swagger-OpenAPI** → introspection / spec exposure (read-only, nuclei in the gate).
+- **SSRF / XXE** → OUT-OF-BAND callback to a canary we control (interactsh). Callback = definitive;
+  point entities/fetches at our canary, never `file://` or internal data.
+- **IDOR/BOLA, LFI, RCE/file-read** → **operator-LEAD only** (hard line: needs 2 owned accounts /
+  is exploitation). Claude detects + prioritises; a human confirms. Never auto-probed.
+Any confirmed catch still passes the Claude VERIFY adversarial filter before it reaches #review.
+
 ## Documented false-positive patterns (never score as CONFIRMED)
 - **KEV tech-class match without a confirmed in-range version** (Spring actuator,
   Confluence, Jira, F5, MOVEit, AEM, Magento, Drupal≥8, …) → LEAD, not P0. Verify

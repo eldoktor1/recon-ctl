@@ -40,37 +40,39 @@ The evidence gate (Phase A) runs as a daemon loop (`recon_daemon.sh` registers `
 ## Status
 All phases are unit/self-test validated (compile + logic). **Live integration testing is pending** — the daemon was stopped during the build and target-facing probes were not run. Before re-enabling: (1) human-review `tier_list.tsv` and set GENERAL where appropriate (until then nothing is autonomous-active-eligible — fail-safe), (2) dry-run the evidence gate against a small candidate batch, (3) `state.py init` + one `orchestrator.py once`.
 
-## Consolidated cohesive flow (post-v3, 2026-06-07)
-The daemon was cut from 28 → 23 loops (22 after consolidation, +1 for the new
-`ai-review` Claude validation loop). The redundant active-confirmation lanes that
-only dumped to Discord side-channels were retired (the evidence gate owns
-confirmation now): `nuclei-v21`, `bounty-scan`, `deep-scan`, `dast`, `exposure`,
-`digest`. Their scripts remain for on-demand `recon_ctl` use.
+## Cohesive flow (v3.2, 2026-06-07)
+Two Claude layers bracket a precise, per-class confirmation net. The retired blanket-scan
+lanes (`nuclei-v21/bounty-scan/deep-scan/dast/exposure/digest`) stay on-demand only —
+the evidence gate + confirmers own confirmation now.
 
 ```
-DETECTION (feeders)                 CONFIRM            REVIEW
-discovery/validate/scope/true-fresh ─┐
-cve-kev/cve-nvd/vuln-feed            ─┤
-js-scanner/active-checks/params     ─┼─► triage (P0-CANDIDATE, held P1)
-portscan/bypass/takeover/cloudrecon ─┘        │
-                                              ▼
-                                   evidence-gate (confidence-scored, non-intrusive)
-                                     <0.70 LEAD · 0.70-0.84 batch/P1 · >=0.85 P0
-                                              │ confirmed -> ES + SQLite + #confirmed
-                                              ▼
-                                   ai-review (Claude-Max VALIDATION agent, headless,
-                                     no API): adversarial judge of each confirmed
-                                     finding -> ai_verdict in SQLite
-                                       real -> reaches reporter
-                                       fp   -> dismissed + FP signature learned
-                                       needs-human -> held for operator
-                                              ▼
-                                   reporter (only ai_verdict=real, dup+freshness, NEVER submits)
-                                              ▼
-                                   v3-digest (daily auditable brief)
+1. DETECTION (cast the net): discovery · validate · scope · true-fresh · cve-kev/nvd ·
+   vuln-feed · js-scanner · active-checks · params(4-wide) · portscan · bypass ·
+   takeover · cloudrecon
+        -> triage (deterministic score; detection-only P0 clamped to P0-CANDIDATE/P1)
+
+2. CLAUDE ANALYSIS  (ai-analyze, Haiku — bulk/cheap): reads in-scope+paying assets,
+   decides worth / interest / vuln-class with RAG-lite KB context, flags gate
+   candidates. Conscious surface selection — aims the net, never blanket-scans.
+
+3. CONFIRM  (SAFE primitives: unauthenticated, non-destructive)
+     - evidence-gate (nuclei): version · unauth-surface · content-leak · graphql ·
+       swagger/openapi ;  SSRF/XXE via interactsh OOB callback
+     - xss-confirm:   headless-Chromium marker EXECUTION
+     - param-confirm: SSTI ({{a*b}}->product) · open-redirect (->canary) · SQLi (error-diff)
+   pattern-match = LEAD ; a primitive firing = CONFIRMED -> SQLite.
+   IDOR / LFI / RCE = operator-LEAD only (hard line).
+
+4. CLAUDE VERIFY  (ai-review, Sonnet; opus-escalate on ambiguity): adversarial FP filter
+   on every confirmed finding -> ai_verdict (mirrored to ES + knowledge_base).
+     real -> reporter + #review  ·  needs-human -> #review  ·  fp -> dismiss + FP-signature
+
+5. REPORTER  (ai_verdict=real only; dup + freshness gates; NEVER auto-submits) -> review queue
+   v3-digest -> daily auditable .md + compact #digest
 ```
-**Discord, redesigned:** `#confirmed` (gate P0 only) · `#ops` (halts/vpn) · `#digest`
-(daily). Per-lane raw dumps retired. Review happens off Discord, in the queue/digest.
+**Discord v3 (verdict-driven, smart-not-noisy):** `#review` (Claude real/needs-human —
+APPROVE/DISMISS/INVESTIGATE) · `#takeovers` (first-blood) · `#ops` (halts/vpn/bans) ·
+`#digest` (daily). Per-finding spam channels retired — that data lives in ES + `recon-ai`.
 
 ## Claude as the "second man" (operator model)
 Claude shows up in two distinct, non-overlapping roles — both on the **Max plan, no

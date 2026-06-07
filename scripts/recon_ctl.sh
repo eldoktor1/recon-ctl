@@ -429,8 +429,7 @@ cmd_top() {
     \"size\": $n,
     \"_source\": [\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",
                   \"triage_program\",\"triage_classes\",\"triage_true_fresh\",
-                  \"triage_kev_match\",\"js_secret_hit\",\"js_endpoint_hit\",
-                  \"ai_recommendation\",\"ai_relevance_score\"],
+                  \"triage_kev_match\",\"js_secret_hit\",\"js_endpoint_hit\"],
     \"query\": {\"bool\":{
       \"filter\": [{\"exists\":{\"field\":\"triage_score\"}}],
       \"must_not\": [{\"term\":{\"triage_ignored\":true}}]
@@ -439,7 +438,7 @@ cmd_top() {
   }")"
   local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
   [[ "$total" -eq 0 ]] && { echo "  (no triaged targets in ES yet)"; return; }
-  printf '%-2s %-3s %-4s %-7s %-52s %-22s %-4s %s\n' "FL" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "AI" "CLASSES"
+  printf '%-2s %-3s %-4s %-7s %-52s %-22s %s\n' "FL" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "CLASSES"
   printf '%s\n' "$(printf '─%.0s' {1..136})"
   printf '%s' "$resp" | jq -r '
     .hits.hits[]._source |
@@ -453,16 +452,11 @@ cmd_top() {
       (.triage_payout_tier // "-"),
       (.host // "?"),
       (.triage_program // "-"),
-      (if   (.ai_recommendation // "") == "test_now"      then "TN"
-       elif (.ai_recommendation // "") == "manual_review" then "MR"
-       elif (.ai_recommendation // "") == "skip"          then "SK"
-       elif (.ai_recommendation // "") == "watch"         then "WA"
-       else "-" end),
       ((.triage_classes // []) | map(select(. != "low-priority" and . != "low-signal")) | join(","))
     ] | @tsv' 2>/dev/null \
-  | while IFS=$'\t' read -r fl pri scr tier host prog ai cls; do
-      printf '%-2s %-3s %-4s %-7s %-52s %-22s %-4s %s\n' \
-        "$fl" "$pri" "$scr" "$tier" "${host:0:52}" "${prog:0:22}" "$ai" "$cls"
+  | while IFS=$'\t' read -r fl pri scr tier host prog cls; do
+      printf '%-2s %-3s %-4s %-7s %-52s %-22s %s\n' \
+        "$fl" "$pri" "$scr" "$tier" "${host:0:52}" "${prog:0:22}" "$cls"
     done
   echo
   printf "  showing: %s  |  total scored in ES: %s\n" "$n" "$total"
@@ -851,8 +845,7 @@ cmd_fresh() {
     -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $fetch_n,
       \"_source\": [\"host\",\"url\",\"triage_priority\",\"triage_score\",\"triage_signals\",
-                    \"triage_program\",\"triage_payout_tier\",\"triage_kev_match\",\"first_seen\",
-                    \"ai_recommendation\",\"ai_relevance_score\"],
+                    \"triage_program\",\"triage_payout_tier\",\"triage_kev_match\",\"first_seen\"],
       \"query\": {\"bool\": {\"filter\": [
         {\"term\": {\"triage_true_fresh\": true}},
         {\"term\": {\"triage_pays\": true}},
@@ -874,12 +867,7 @@ cmd_fresh() {
       (.host // "?"),
       (.triage_program // "?"),
       ((.triage_signals // []) | join(",")),
-      (.first_seen // "" | split("T")[0]),
-      (if   (.ai_recommendation // "") == "test_now"      then "AI:TN"
-       elif (.ai_recommendation // "") == "manual_review" then "AI:MR"
-       elif (.ai_recommendation // "") == "watch"         then "AI:WA"
-       elif (.ai_recommendation // "") == "skip"          then "AI:SK"
-       else "" end)
+      (.first_seen // "" | split("T")[0])
     ] | @tsv
   ' 2>/dev/null)"
 
@@ -889,13 +877,13 @@ cmd_fresh() {
   # --new: filter to hosts not in seen file, cap at N after filtering
   local new_hosts="" shown_rows="" count=0
   if [[ "$new_only" -eq 1 ]]; then
-    while IFS=$'\t' read -r icon pri score tier host prog sigs date ai; do
+    while IFS=$'\t' read -r icon pri score tier host prog sigs date; do
       [[ -z "$host" ]] && continue
       [[ "$count" -ge "$n" ]] && break
       # Fix 12: skip if host is in active ignore list
       if printf '%s\n' "$ignored_hosts" | grep -qxF "$host" 2>/dev/null; then continue; fi
       if ! grep -qxF "$host" "$SEEN_FILE"; then
-        shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}	${ai}"$'\n'
+        shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}"$'\n'
         new_hosts="${new_hosts}${host}"$'\n'
         count=$(( count + 1 ))
       fi
@@ -904,11 +892,11 @@ cmd_fresh() {
     # Non---new browse: never write to seen file. Writing here poisons the
     # seen list with high-scoring hosts that the user may not have acted on,
     # making subsequent recon-fresh-new calls return nothing.
-    while IFS=$'\t' read -r icon pri score tier host prog sigs date ai; do
+    while IFS=$'\t' read -r icon pri score tier host prog sigs date; do
       [[ -z "$host" ]] && continue
       # Fix 12: skip if host is in active ignore list
       if printf '%s\n' "$ignored_hosts" | grep -qxF "$host" 2>/dev/null; then continue; fi
-      shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}	${ai}"$'\n'
+      shown_rows="${shown_rows}${icon}	${pri}	${score}	${tier}	${host}	${prog}	${sigs}	${date}"$'\n'
     done <<< "$rows"
   fi
 
@@ -919,8 +907,7 @@ cmd_fresh() {
   local out
   out="$(printf '%s' "$shown_rows" | awk -F'\t' 'NF{
     icon = ($1=="KEV") ? "🔴" : ($1=="P0") ? "⚡" : "▸"
-    ai = ($9 != "") ? $9 : ""
-    printf "%-3s %-3s %-4s %-8s %-55s %-25s %-6s %s  %s\n", icon,$2,$3,$4,$5,$6,ai,$7,$8
+    printf "%-3s %-3s %-4s %-8s %-55s %-25s %s  %s\n", icon,$2,$3,$4,$5,$6,$7,$8
   }')"
 
   if [[ -n "$out" ]]; then
@@ -1186,6 +1173,39 @@ cmd_ai() {
     fp)                hdr "AI-validated — false positives";        _ai_table "ai_verdict='fp'" "${1:-200}" ;;
     top|all)           hdr "All findings (verdict order)";          _ai_table "1=1" "${1:-50}" ;;
 
+    # ---- analysis: Claude ANALYSIS leads worth verifying (from ES, not SQLite) ----
+    analysis|analyze)
+      local an_n="${1:-50}"
+      hdr "Claude-analysis leads (worth verifying) — from ES"
+      local an_resp
+      an_resp="$(_es_search "{
+        \"size\": $an_n,
+        \"_source\": [\"host\",\"claude_interest\",\"claude_suggested_class\",
+                      \"claude_analysis\",\"triage_program\",\"triage_payout_tier\"],
+        \"query\": {\"term\": {\"claude_worth\": true}},
+        \"sort\": [{\"claude_interest\": {\"order\": \"desc\", \"missing\": \"_last\"}}]
+      }")"
+      local an_total; an_total="$(printf '%s' "$an_resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+      if [[ "${an_total:-0}" -eq 0 ]]; then echo "  (no Claude-analysis leads in ES yet)"; return 0; fi
+      printf "%-4s %-44s %-20s %s\n" "INT" "HOST" "CLASS" "PROGRAM"
+      printf '%s\n' "$(printf '─%.0s' {1..120})"
+      printf '%s' "$an_resp" | jq -r '
+        .hits.hits[]._source |
+        [
+          ((.claude_interest // 0) | tostring),
+          (.host // "?"),
+          (.claude_suggested_class // "-"),
+          (.triage_program // "-"),
+          ((.claude_analysis // "") | gsub("[\n\t]";" "))
+        ] | @tsv' 2>/dev/null \
+      | while IFS=$'\t' read -r intr host cls prog note; do
+          printf "%-4s %-44s %-20s %s\n" "$intr" "${host:0:44}" "${cls:0:20}" "${prog:0:30}"
+          [[ -n "$note" ]] && printf "       %s\n" "${note:0:110}"
+        done
+      echo
+      printf "  showing: %s  |  total Claude-worth leads in ES: %s\n" "$an_n" "$an_total"
+      ;;
+
     # ---- detail <host>: full verdict + evidence from SQLite ----
     detail|show|inspect)
       local target="${1:-}"
@@ -1216,6 +1236,7 @@ cmd_ai() {
       echo "  pending             confirmed findings awaiting validation"
       echo "  fp                  auto-dismissed false positives"
       echo "  top [N]             all findings in verdict order"
+      echo "  analysis            Claude-analysis leads worth verifying (from ES)"
       echo "  detail <host>       full verdict + evidence for one host"
       ;;
   esac
@@ -1246,10 +1267,8 @@ cmd_view() {
   { timeout 5 curl -sS --max-time 4 https://am.i.mullvad.net/json 2>/dev/null \
       | jq -r 'if .mullvad_exit_ip then "✅ "+.mullvad_exit_ip_hostname else "❌ NOT MULLVAD ("+.ip+")" end' 2>/dev/null \
       || echo "⏱ timeout"; } > "$tmp/vpn" &
-  { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_signals\",\"ai_relevance_score\",\"ai_confidence\",\"ai_recommendation\"],\"query\":{\"term\":{\"ai_recommendation\":\"test_now\"}},\"sort\":[{\"ai_relevance_score\":{\"order\":\"desc\"}}]}" > "$tmp/ai_testnow"; } &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_signals\"],\"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_priority\":\"P0\"}},{\"term\":{\"triage_true_fresh\":true}},{\"term\":{\"triage_pays\":true}}]}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/fresh_p0"; } &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_true_fresh\",\"triage_classes\"],\"query\":{\"term\":{\"triage_priority\":\"P0\"}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/all_p0"; } &
-  { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"ai_relevance_score\",\"ai_recommendation\",\"ai_reason\"],\"query\":{\"bool\":{\"filter\":[{\"exists\":{\"field\":\"ai_reviewed_at\"}},{\"range\":{\"ai_relevance_score\":{\"gte\":70}}}],\"must_not\":[{\"term\":{\"ai_recommendation\":\"test_now\"}}]}},\"sort\":[{\"ai_relevance_score\":{\"order\":\"desc\"}}]}" > "$tmp/ai_high"; } &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_kev_signal\"],\"query\":{\"term\":{\"triage_kev_match\":true}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/kev"; } &
   { _es_search "{\"size\":5,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_program\",\"js_secret_hit\",\"js_endpoint_hit\",\"url\"],\"query\":{\"bool\":{\"should\":[{\"term\":{\"js_secret_hit\":true}},{\"term\":{\"js_endpoint_hit\":true}}],\"minimum_should_match\":1}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/js"; } &
   {
@@ -1258,9 +1277,6 @@ cmd_view() {
     _es_count_q '{"term":{"triage_priority":"P2"}}' > "$tmp/cnt_p2"
     _es_count_q '{"term":{"triage_true_fresh":true}}' > "$tmp/cnt_fresh"
     _es_count_q '{"term":{"triage_kev_match":true}}' > "$tmp/cnt_kev"
-    _es_count_q '{"exists":{"field":"ai_reviewed_at"}}' > "$tmp/cnt_ai_total"
-    _es_count_q '{"term":{"ai_recommendation":"test_now"}}' > "$tmp/cnt_ai_now"
-    _es_count_q '{"range":{"ai_relevance_score":{"gte":70}}}' > "$tmp/cnt_ai_hi"
     _es_count_q '{"bool":{"should":[{"term":{"js_secret_hit":true}},{"term":{"js_endpoint_hit":true}}],"minimum_should_match":1}}' > "$tmp/cnt_js"
   } &
   wait
@@ -1269,32 +1285,6 @@ cmd_view() {
   local vpn_state; vpn_state="$(cat "$tmp/vpn"    2>/dev/null || echo '?')"
   printf "  daemon: ${B}%s${R}   queue: inbox=%s proc=%s   ES: %s docs   VPN: %s\n\n" \
     "$daemon_state" "$inbox" "$proc" "$es_count" "$vpn_state"
-
-  # ── 1. AI test_now ─────────────────────────────────────────────────────────
-  local n_now; n_now="$(cat "$tmp/cnt_ai_now" 2>/dev/null || echo 0)"
-  printf "${RD}${B}━━━ 🔥 AI: TEST NOW (%s leads) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}\n" "$n_now"
-  if [[ "$n_now" -gt 0 ]]; then
-    printf "${B}%-3s %-4s %-3s %-4s %-7s %-50s %-22s %s${R}\n" "AI" "CONF" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "TOP_SIGNAL"
-    jq -r '
-      .hits.hits[]._source |
-      [
-        ((.ai_relevance_score // 0) | tostring),
-        (.ai_confidence // "?" | .[0:4]),
-        (.triage_priority // "-"),
-        ((.triage_score // 0) | tostring),
-        (.triage_payout_tier // "-"),
-        (.host // ""),
-        (.triage_program // "-"),
-        ((.triage_signals // []) | .[0] // "-")
-      ] | @tsv' "$tmp/ai_testnow" 2>/dev/null \
-    | while IFS=$'\t' read -r ai_s conf pri scr tier host prog sig; do
-        printf "%-3s %-4s %-3s %-4s %-7s %-50s %-22s %s\n" \
-          "$ai_s" "$conf" "$pri" "$scr" "$tier" "${host:0:50}" "${prog:0:22}" "$sig"
-      done
-  else
-    echo "  (none)"
-  fi
-  echo
 
   # ── 2. True-fresh P0 targets ───────────────────────────────────────────────
   local n_fresh_p0; n_fresh_p0="$(jq -r '.hits.total.value // 0' "$tmp/fresh_p0" 2>/dev/null || echo 0)"
@@ -1341,32 +1331,6 @@ cmd_view() {
       done
   else
     echo "  (no P0 targets)"
-  fi
-  echo
-
-  # ── 4. AI high-scoring (>=70, not test_now) ───────────────────────────────
-  local n_high; n_high="$(cat "$tmp/cnt_ai_hi" 2>/dev/null || echo 0)"
-  printf "${B}━━━ 🤖 AI HIGH CONFIDENCE (score ≥70, not test_now) — %s leads ━━━━━━━━━━━━━━━━━━━━━━━━━${R}\n" "$n_high"
-  local hi_shown; hi_shown="$(jq -r '.hits.total.value // 0' "$tmp/ai_high" 2>/dev/null || echo 0)"
-  if [[ "$hi_shown" -gt 0 ]]; then
-    printf "${B}%-3s %-13s %-3s %-4s %-7s %-50s %s${R}\n" "AI" "REC" "PRI" "SCR" "TIER" "HOST" "REASON"
-    jq -r '
-      .hits.hits[]._source |
-      [
-        ((.ai_relevance_score // 0) | tostring),
-        (.ai_recommendation // "?"),
-        (.triage_priority // "-"),
-        ((.triage_score // 0) | tostring),
-        (.triage_payout_tier // "-"),
-        (.host // ""),
-        (.ai_reason // "" | .[0:60])
-      ] | @tsv' "$tmp/ai_high" 2>/dev/null \
-    | while IFS=$'\t' read -r ai_s rec pri scr tier host reason; do
-        printf "%-3s %-13s %-3s %-4s %-7s %-50s %s\n" \
-          "$ai_s" "$rec" "$pri" "$scr" "$tier" "${host:0:50}" "${reason:0:60}"
-      done
-  else
-    echo "  (none)"
   fi
   echo
 
@@ -1419,20 +1383,16 @@ cmd_view() {
 
   # ── 8. Summary counts ─────────────────────────────────────────────────────
   printf "${C}${B}╔══════════════════════════════════════ SUMMARY ═════════════════════════════════════════╗${R}\n"
-  local t_p0 t_p1 t_p2 t_fresh t_kev t_ai t_now t_hi t_js
+  local t_p0 t_p1 t_p2 t_fresh t_kev t_js
   t_p0="$(cat    "$tmp/cnt_p0"       2>/dev/null || echo 0)"
   t_p1="$(cat    "$tmp/cnt_p1"       2>/dev/null || echo 0)"
   t_p2="$(cat    "$tmp/cnt_p2"       2>/dev/null || echo 0)"
   t_fresh="$(cat "$tmp/cnt_fresh"    2>/dev/null || echo 0)"
   t_kev="$(cat   "$tmp/cnt_kev"      2>/dev/null || echo 0)"
-  t_ai="$(cat    "$tmp/cnt_ai_total" 2>/dev/null || echo 0)"
-  t_now="$(cat   "$tmp/cnt_ai_now"   2>/dev/null || echo 0)"
-  t_hi="$(cat    "$tmp/cnt_ai_hi"    2>/dev/null || echo 0)"
   t_js="$(cat    "$tmp/cnt_js"       2>/dev/null || echo 0)"
 
   printf "  Triage: P0=%-4s P1=%-4s P2=%-4s  true-fresh=%-4s  KEV=%-4s  JS=%-4s\n" \
     "$t_p0" "$t_p1" "$t_p2" "$t_fresh" "$t_kev" "$t_js"
-  printf "  AI:     total=%-4s test_now=%-4s score≥70=%-4s\n" "$t_ai" "$t_now" "$t_hi"
   printf "\n  Quick commands:  ${G}recon-ai${R}  ${G}recon-fresh${R}  ${G}recon-kev${R}  ${G}recon-js${R}  ${G}recon-top 30${R}\n"
   rm -rf "$tmp"
 }
@@ -1741,8 +1701,6 @@ cmd_ignored() {
 # Usage: recon_ctl fetch [flags] [N]
 #   -p P0|P1|P2        priority tier (repeat for OR: -p P0 -p P1)
 #   -t <tech>          technology name (repeat for OR, case-insensitive)
-#   -r <rec>           AI recommendation: test_now | watch | manual_review | skip
-#   -a <score>         min AI relevance score (e.g. -a 70)
 #   -P <prog>          program name contains (partial, case-insensitive)
 #   --kev              KEV-matched hosts only
 #   --js               JS secrets or endpoints only
@@ -1757,8 +1715,6 @@ cmd_ignored() {
 # Examples:
 #   recon-fetch -p P0 --pays                        paying P0 targets
 #   recon-fetch -t jenkins -t confluence --pays      Jenkins or Confluence, paying
-#   recon-fetch -r test_now --hosts                  hosts for AI test_now → pipe to nuclei
-#   recon-fetch -a 70 -p P0                          AI score >=70 AND P0
 #   recon-fetch --kev --pays --hosts                 KEV-matched paying hosts
 #   recon-fetch --fresh -p P0 -p P1 --hosts          fresh P0/P1 host list
 #   recon-fetch -P hackerone_program -t wordpress     wordpress on one program
@@ -1767,7 +1723,7 @@ cmd_ignored() {
 #   recon-fetch --takeover                           confirmed takeovers (ES-tagged by hunter)
 # ---------------------------------------------------------------------------
 cmd_fetch() {
-  local priorities=() techs=() classes=() ai_rec="" ai_min=0 program=""
+  local priorities=() techs=() classes=() program=""
   local kev=0 js=0 fresh=0 pays=0 show_ignored=0 takeover=0
   local hosts_only=0 save=0 outfile="" n=100
 
@@ -1776,8 +1732,6 @@ cmd_fetch() {
       -p)              priorities+=("$2"); shift 2 ;;
       -t)              techs+=("$2"); shift 2 ;;
       -c|--class)      classes+=("$2"); shift 2 ;;
-      -r)              ai_rec="$2"; shift 2 ;;
-      -a)              ai_min="$2"; shift 2 ;;
       -P)              program="$2"; shift 2 ;;
       --kev)           kev=1; shift ;;
       --js)            js=1; shift ;;
@@ -1812,10 +1766,6 @@ cmd_fetch() {
     done
     filters+=("{\"bool\":{\"should\":[$tshoulds],\"minimum_should_match\":1}}")
   fi
-
-  # AI filters
-  [[ -n "$ai_rec"       ]] && filters+=("{\"term\":{\"ai_recommendation\":\"$ai_rec\"}}")
-  [[ "$ai_min" -gt 0   ]] && filters+=("{\"range\":{\"ai_relevance_score\":{\"gte\":$ai_min}}}")
 
   # Program partial match
   [[ -n "$program" ]] && filters+=("{\"wildcard\":{\"triage_program\":{\"value\":\"*${program}*\",\"case_insensitive\":true}}}")
@@ -1852,20 +1802,13 @@ cmd_fetch() {
   else                                    query="{\"bool\":{\"filter\":[$fs],\"must_not\":[$mns]}}"
   fi
 
-  # Sort: lead with AI score if AI filter active
-  local sort_clause
-  if [[ -n "$ai_rec" || "$ai_min" -gt 0 ]]; then
-    sort_clause='[{"ai_relevance_score":{"order":"desc","missing":"_last"}},{"triage_score":{"order":"desc","missing":"_last"}}]'
-  else
-    sort_clause='[{"triage_score":{"order":"desc","missing":"_last"}}]'
-  fi
+  local sort_clause='[{"triage_score":{"order":"desc","missing":"_last"}}]'
 
   local body; body="$(printf '{
     "size": %s,
     "_source": ["host","url","triage_priority","triage_score","triage_payout_tier",
                 "triage_program","triage_classes","triage_signals","triage_true_fresh",
                 "triage_kev_match","js_secret_hit","js_endpoint_hit",
-                "ai_relevance_score","ai_confidence","ai_recommendation","ai_reason",
                 "triage_pays","triage_in_scope","tech","first_seen"],
     "query": %s,
     "sort": %s
@@ -1880,8 +1823,6 @@ cmd_fetch() {
   [[ ${#priorities[@]} -gt 0 ]] && parts+=("pri=$(IFS=,; printf '%s' "${priorities[*]}")")
   [[ ${#techs[@]}      -gt 0 ]] && parts+=("tech=$(IFS=,; printf '%s' "${techs[*]}")")
   [[ ${#classes[@]}    -gt 0 ]] && parts+=("class=$(IFS=,; printf '%s' "${classes[*]}")")
-  [[ -n "$ai_rec"              ]] && parts+=("rec=$ai_rec")
-  [[ "$ai_min" -gt 0           ]] && parts+=("ai≥$ai_min")
   [[ -n "$program"             ]] && parts+=("prog~$program")
   [[ "$kev"      -eq 1         ]] && parts+=("KEV")
   [[ "$js"       -eq 1         ]] && parts+=("JS")
@@ -1909,64 +1850,30 @@ cmd_fetch() {
 
   local B='\033[1m' R='\033[0m' G='\033[0;32m' Y='\033[1;33m' RD='\033[0;31m'
 
-  # AI-focused columns when AI filter active
-  if [[ -n "$ai_rec" || "$ai_min" -gt 0 ]]; then
-    printf "${B}%-3s %-4s %-13s %-3s %-4s %-7s %-52s %-22s %s${R}\n" \
-      "AI" "CONF" "REC" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "FLAGS"
-    printf '%s\n' "$(printf '─%.0s' {1..160})"
-    printf '%s' "$resp" | jq -r '
-      .hits.hits[]._source |
-      [
-        ((.ai_relevance_score // 0) | tostring),
-        (.ai_confidence // "?"),
-        (.ai_recommendation // "-"),
-        (.triage_priority // "-"),
-        ((.triage_score // 0) | tostring),
-        (.triage_payout_tier // "-"),
-        (.host // ""),
-        (.triage_program // "-"),
-        ([
-          (if (.triage_true_fresh // false) then "⚡" else "" end),
-          (if (.triage_kev_match // false) then "🎯" else "" end),
-          (if (.js_secret_hit // false) then "🔑" else "" end),
-          (if (.js_endpoint_hit // false) then "🛤" else "" end)
-        ] | map(select(length>0)) | join(""))
-      ] | @tsv' 2>/dev/null \
-    | while IFS=$'\t' read -r ai_s conf rec pri scr tier host prog flags; do
-        local col="$R"
-        [[ "$rec" == "test_now"      ]] && col="$RD"
-        [[ "$rec" == "manual_review" ]] && col="$Y"
-        [[ "$rec" == "watch"         ]] && col="$G"
-        printf "${col}%-3s${R} %-4s %-13s %-3s %-4s %-7s %-52s %-22s %s\n" \
-          "$ai_s" "${conf:0:4}" "$rec" "$pri" "$scr" "$tier" \
-          "${host:0:52}" "${prog:0:22}" "$flags"
-      done
-  else
-    # Standard triage columns
-    printf "${B}%-2s %-3s %-4s %-7s %-50s %-22s %-25s %s${R}\n" \
-      "FL" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "TECH" "CLASSES"
-    printf '%s\n' "$(printf '─%.0s' {1..160})"
-    printf '%s' "$resp" | jq -r '
-      .hits.hits[]._source |
-      [
-        ([
-          (if (.triage_true_fresh // false) then "⚡" else "" end),
-          (if (.triage_kev_match // false) then "🎯" else "" end),
-          (if (.js_secret_hit // false) then "🔑" else "" end)
-        ] | map(select(length>0)) | join("")),
-        (.triage_priority // "-"),
-        ((.triage_score // 0) | tostring),
-        (.triage_payout_tier // "-"),
-        (.host // ""),
-        (.triage_program // "-"),
-        ((.tech // []) | .[0:3] | join(",")),
-        ((.triage_classes // []) | map(select(. != "low-priority" and . != "low-signal")) | join(","))
-      ] | @tsv' 2>/dev/null \
-    | while IFS=$'\t' read -r fl pri scr tier host prog tech cls; do
-        printf '%-2s %-3s %-4s %-7s %-50s %-22s %-25s %s\n' \
-          "$fl" "$pri" "$scr" "$tier" "${host:0:50}" "${prog:0:22}" "${tech:0:25}" "$cls"
-      done
-  fi
+  # Standard triage columns
+  printf "${B}%-2s %-3s %-4s %-7s %-50s %-22s %-25s %s${R}\n" \
+    "FL" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "TECH" "CLASSES"
+  printf '%s\n' "$(printf '─%.0s' {1..160})"
+  printf '%s' "$resp" | jq -r '
+    .hits.hits[]._source |
+    [
+      ([
+        (if (.triage_true_fresh // false) then "⚡" else "" end),
+        (if (.triage_kev_match // false) then "🎯" else "" end),
+        (if (.js_secret_hit // false) then "🔑" else "" end)
+      ] | map(select(length>0)) | join("")),
+      (.triage_priority // "-"),
+      ((.triage_score // 0) | tostring),
+      (.triage_payout_tier // "-"),
+      (.host // ""),
+      (.triage_program // "-"),
+      ((.tech // []) | .[0:3] | join(",")),
+      ((.triage_classes // []) | map(select(. != "low-priority" and . != "low-signal")) | join(","))
+    ] | @tsv' 2>/dev/null \
+  | while IFS=$'\t' read -r fl pri scr tier host prog tech cls; do
+      printf '%-2s %-3s %-4s %-7s %-50s %-22s %-25s %s\n' \
+        "$fl" "$pri" "$scr" "$tier" "${host:0:50}" "${prog:0:22}" "${tech:0:25}" "$cls"
+    done
 
   echo
   printf "  total matching in ES: %s  |  shown: %s  |  cap: %s\n" "$total" "$shown" "$n"
@@ -2260,114 +2167,6 @@ cmd_bulk() {
   esac
 }
 
-# ---------------------------------------------------------------------------
-# cmd_firstblood — Fix 14: first command to run each session
-# Queries ES for unsubmitted, in-scope, paying, true-fresh P0/P1 hosts
-# with high confidence, sorted by first_seen ascending (oldest = highest priority)
-# ---------------------------------------------------------------------------
-cmd_firstblood() {
-  local n="${1:-25}"
-  local B='\033[1m' R='\033[0m' G='\033[0;32m' Y='\033[1;33m' RD='\033[0;31m' C='\033[1;36m'
-
-  printf "${C}${B}╔══════════════ 🩸 FIRST BLOOD TARGETS ══════════════╗${R}\n"
-  printf "${C}${B}║  Run this FIRST each session — oldest unsubmitted    ║${R}\n"
-  printf "${C}${B}╚══════════════════════════════════════════════════════╝${R}\n\n"
-
-  # Load ignored hosts for query-time filtering (Fix 12)
-  local ignored_hosts; ignored_hosts="$(_load_active_ignored)"
-
-  # Load submitted hosts
-  local subs_file="$HOME/.recon_submissions.jsonl"
-  local submitted_hosts=""
-  if [[ -s "$subs_file" ]]; then
-    submitted_hosts="$(jq -r 'select(.status != "rejected" and .status != "duplicate") | .host' \
-      "$subs_file" 2>/dev/null | sort -u)"
-  fi
-
-  # ES query: true_fresh + in_scope + pays + P0/P1 + confidence=high (once available) + not ignored
-  # Sort by first_seen ascending (oldest unsubmitted first = highest priority)
-  # Note: triage_confidence field is written by Fix 11; fall back to multi-signal check
-  local resp
-  resp="$(_es_search "{
-    \"size\": 200,
-    \"_source\": [\"host\",\"url\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",
-                  \"triage_program\",\"triage_signals\",\"triage_classes\",\"triage_true_fresh\",
-                  \"triage_kev_match\",\"triage_confidence\",\"triage_pattern_only\",
-                  \"triage_external_first_seen\",\"first_seen\",\"tech\"],
-    \"query\": {\"bool\": {
-      \"filter\": [
-        {\"term\": {\"triage_true_fresh\": true}},
-        {\"term\": {\"triage_in_scope\": true}},
-        {\"term\": {\"triage_pays\": true}},
-        {\"terms\": {\"triage_priority\": [\"P0\",\"P1\"]}},
-        {\"bool\": {\"should\": [
-          {\"term\": {\"triage_confidence\": \"high\"}},
-          {\"bool\": {\"must_not\": [{\"term\": {\"triage_pattern_only\": true}}]}}
-        ], \"minimum_should_match\": 1}}
-      ],
-      \"must_not\": [
-        {\"term\": {\"triage_ignored\": true}},
-        {\"term\": {\"triage_out_of_scope\": true}}
-      ]
-    }},
-    \"sort\": [{\"first_seen\": {\"order\": \"asc\"}}]
-  }")"
-
-  local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
-  if [[ "$total" -eq 0 ]]; then
-    echo "  (no first-blood targets found — pipeline may still be scanning)"
-    return
-  fi
-
-  printf "${B}%-2s %-3s %-4s %-7s %-52s %-22s %-10s %s${R}\n" \
-    "FL" "PRI" "SCR" "TIER" "HOST" "PROGRAM" "FRESH_DATE" "CLASSES"
-  printf '%s\n' "$(printf '─%.0s' {1..140})"
-
-  local shown=0
-  while IFS=$'\t' read -r fresh pri score tier host prog sigs cls date conf pattern_only; do
-    [[ -z "$host" ]] && continue
-    [[ "$shown" -ge "$n" ]] && break
-
-    # Fix 12: skip if in active ignore list
-    if printf '%s\n' "$ignored_hosts" | grep -qxF "$host" 2>/dev/null; then continue; fi
-
-    # Fix 14: skip already-submitted hosts
-    if printf '%s\n' "$submitted_hosts" | grep -qxF "$host" 2>/dev/null; then continue; fi
-
-    local col="$R"
-    [[ "$pri" == "P0" ]] && col="$RD"
-
-    local flags=""
-    [[ "$fresh" == "⚡" ]] && flags+="⚡"
-    [[ "$conf" == "high" && "$pattern_only" != "true" ]] && flags+="✅"
-    [[ "$pattern_only" == "true" ]] && flags+="⚠"
-
-    printf "${col}%-2s${R} %-3s %-4s %-7s %-52s %-22s %-10s %s %s\n" \
-      "$flags" "$pri" "$score" "$tier" "${host:0:52}" "${prog:0:22}" \
-      "${date:0:10}" "${cls:0:40}" ""
-    shown=$(( shown + 1 ))
-  done < <(printf '%s' "$resp" | jq -r '
-    .hits.hits[]._source |
-    [
-      (if (.triage_true_fresh // false) then "⚡" else " " end),
-      (.triage_priority // "-"),
-      ((.triage_score // 0) | tostring),
-      (.triage_payout_tier // "-"),
-      (.host // ""),
-      (.triage_program // "-"),
-      ((.triage_signals // []) | join(",")),
-      ((.triage_classes // []) | map(select(. != "low-priority" and . != "low-signal")) | join(",")),
-      (.first_seen // "" | split("T")[0]),
-      (.triage_confidence // "low"),
-      ((.triage_pattern_only // false) | tostring)
-    ] | @tsv' 2>/dev/null)
-
-  echo
-  printf "  Showing: %s unsubmitted targets  |  Total matching in ES: %s\n" "$shown" "$total"
-  printf "\n  ${G}Tip: run 'recon-submit <host> <class>' after submitting to track status${R}\n"
-  printf "  ${G}Tip: targets sorted by first_seen ASC — oldest first = stalest opportunity${R}\n\n"
-}
-
 cmd_vuln() {
   local sub="${1:-status}"
   case "$sub" in
@@ -2502,8 +2301,6 @@ usage() {
   printf "      ${Y}-p P0${R}              priority tier (repeat: -p P0 -p P1)\n"
   printf "      ${Y}-t jenkins${R}         technology (repeat for OR, case-insensitive)
       ${Y}-c takeover${R}        triage class (repeat for OR: -c takeover -c rce)\n"
-  printf "      ${Y}-r test_now${R}        AI rec: test_now | watch | manual_review | skip\n"
-  printf "      ${Y}-a 70${R}              min AI relevance score\n"
   printf "      ${Y}-P hackerone_prog${R}  program name contains (partial match)\n"
   printf "      ${Y}--kev${R}              KEV-matched hosts only\n"
   printf "      ${Y}--js${R}               JS secrets or endpoints only\n"
@@ -2515,8 +2312,6 @@ usage() {
   printf "    Examples:\n"
   printf "      recon-fetch -p P0 --pays\n"
   printf "      recon-fetch -t jenkins -t confluence --pays\n"
-  printf "      recon-fetch -r test_now --hosts | nuclei -l /dev/stdin -t exposures/\n"
-  printf "      recon-fetch -a 70 --pays --save\n"
   printf "      recon-fetch --fresh -p P0 -p P1 --hosts\n"
   printf "      recon-fetch --kev --pays --hosts\n"
   printf "      recon-fetch --class takeover --pays\n"
