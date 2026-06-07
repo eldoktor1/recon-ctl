@@ -138,15 +138,14 @@ def _build_finding(row, asset) -> F.Finding:
 
 def run(conn, limit: int = 50) -> dict:
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    # Report only Claude-validated 'real' findings; un-reviewed high-confidence ones
-    # fall through (so we don't lose findings if AI review lags / is off). 'fp' are
-    # already dismissed; 'needs-human' are held out of the auto queue by design.
-    fallback = float(os.environ.get("REPORT_CONF_FALLBACK", "0.85"))
+    # HARD GATE: ONLY Claude-validated 'real' findings reach a report. There is no
+    # deterministic-confidence bypass — Claude is load-bearing. If the AI layer is down,
+    # confirmed findings simply wait in 'confirmed' (nothing is auto-reported un-validated).
+    # 'fp' are already dismissed; 'needs-human' are held out of the auto queue by design.
     rows = conn.execute(
-        "SELECT * FROM findings WHERE state='confirmed' AND "
-        "(ai_verdict='real' OR (ai_verdict IS NULL AND confidence >= ?)) "
-        "ORDER BY (ai_verdict='real') DESC, confidence DESC LIMIT ?",
-        (fallback, limit)).fetchall()
+        "SELECT * FROM findings WHERE state='confirmed' AND ai_verdict='real' "
+        "ORDER BY ai_confidence DESC, confidence DESC LIMIT ?",
+        (limit,)).fetchall()
     subs = _load_subs()
     out = {"reported": 0, "bounced_stale": 0, "flagged_dup": 0}
     for row in rows:
