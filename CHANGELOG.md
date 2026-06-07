@@ -1,5 +1,26 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.6.0 - 2026-06-07 - Claude becomes the BRAIN: hard gate + consensus panel + authored reports
+
+Claude was a bypassable filter at the edges. Now it owns the decisive path — the verdict,
+the FP-kill, and the report — so it is load-bearing and drives FP elimination + report quality.
+
+- **HARD GATE** (`engine/reporter.py`) — nothing reaches a report without Claude's
+  `ai_verdict='real'`. Removed the deterministic-confidence bypass; if the AI layer is down,
+  confirmed findings wait (nothing auto-ships un-validated).
+- **CONSENSUS PANEL** (`recon_ai_review.sh`) — the FP-elimination engine. The primary pass
+  investigates (multimodal + active probe); a confident fp dies cheaply; anything heading
+  toward `real` (or uncertain) faces a panel of independent adversarial lenses, each trying
+  to REFUTE from a distinct angle — **exploitability**, **scope-&-reward** (would a program
+  pay, not a dup/N/A), **evidence-&-repro**. Unanimous confirm → `real`; majority refute →
+  fp; else needs-human. Panel uses the strong model. Verified: eToro CORS → 3 lenses refuted
+  with distinct concrete reasoning → CONSENSUS FP.
+- **CLAUDE-AUTHORED REPORTS** (`recon_ai_review.sh` + `engine/{state,reporter,formatters}.py`)
+  — for a consensus-`real`, Claude writes the report: honest severity (no overclaiming),
+  impact, reproducible read-only PoC from the actual evidence, dedup assessment. Stored in a
+  new `ai_report` column (idempotent `_migrate` ADD COLUMN); renderers use it, template is
+  fallback. Verified: authored High/CVSS-8.2 packet flows through the H1 renderer.
+
 ## v3.5.0 - 2026-06-07 - Anti-burn rate limiting + Claude MONITOR role (unattended-ready)
 
 Hardening so active verification can run unattended without getting the egress IP banned,
