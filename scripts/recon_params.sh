@@ -53,11 +53,17 @@ if [[ -z "${PARAMS_CLASSES:-}" ]]; then
   # + rce and img-traversal from community Gf-Patterns (installed in reconrun home)
   PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\ndebug\nrce\nredirect\nidor\nimg-traversal'
 fi
-PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-10}"
+# v3.2 throughput (balanced): the serial 10-host/cycle loop covered only ~13 hosts/day
+# (0.05% of in-scope), starving the confirmers. Parallelise the per-host crawl PARAM_PARALLEL-wide
+# and raise hosts/cycle — per-host rate limits (KATANA_RL, gau jitter) are unchanged so we
+# buy throughput without becoming aggressive (the article's ban cautionary tale).
+PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-30}"
+PARAM_PARALLEL="${PARAM_PARALLEL:-4}"           # concurrent per-host crawls
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
 PARAMS_ZERO_COOLDOWN_HOURS="${PARAMS_ZERO_COOLDOWN_HOURS:-6}"
-PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-400}"
-PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-1200}"
+PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
+WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
 KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
 KATANA_RL="${KATANA_RL:-15}"
@@ -85,6 +91,49 @@ ensure_index() {
       "first_seen":{"type":"date"},
       "cataloged_at":{"type":"date"}
     }}}' >/dev/null 2>&1 || warn "could not create $PARAMS_INDEX index"
+}
+
+# crawl_host — all per-host work, writing ONLY into its own dir under $wd so N copies
+# run concurrently without clobbering shared files. Emits: bulk.part (ndjson), scanned
+# (cooldown marker), cls.<class> (per-class URLs), urlcount. katana(live)+gau(archive),
+# waybackurls fallback when gau yields nothing. Target-facing; per-host rate-limited.
+crawl_host() {
+  local host="$1" url="$2" root="$3" program="$4" tier="$5" fresh="$6" fseen="$7" wd="$8"
+  local hd="$wd/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
+  local now; now="$(date +%s)"
+  sleep $(( (RANDOM % PARAMS_INTER_HOST_SLEEP) + 1 ))   # jitter so N parallel gau hits don't burst a provider
+  { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
+    [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
+  } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
+  local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
+  # gau fallback: different archive provider when gau is rate-limited / empty
+  if [[ "${raw_n:-0}" -eq 0 && -n "$WAYBACKURLS" ]]; then
+    printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$WAYBACKURLS" 2>/dev/null \
+      | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
+    raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
+  fi
+  log "  $host — ${raw_n:-0} param URLs"
+  if [[ "${raw_n:-0}" -eq 0 ]]; then
+    local zero_secs=$(( ${PARAMS_ZERO_COOLDOWN_HOURS:-6} * 3600 ))
+    printf '%s\t%s\n' "$(( now - PARAMS_COOLDOWN_DAYS*86400 + zero_secs ))" "$host" > "$hd/scanned"
+    return 0
+  fi
+  if [[ -x "$QSREPLACE" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
+  [[ -s "$hd/urls" ]] || { printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"; return 0; }
+  : > "$hd/classified.tsv"
+  local cls
+  for cls in $PARAMS_CLASSES; do "$GF" "$cls" < "$hd/urls" 2>/dev/null | sed "s|\$|\t$cls|" >> "$hd/classified.tsv"; done
+  [[ -s "$hd/classified.tsv" ]] || { printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"; return 0; }
+  for cls in $PARAMS_CLASSES; do awk -F'\t' -v c="$cls" '$2==c{print $1}' "$hd/classified.tsv" > "$hd/cls.$cls" 2>/dev/null || true; done
+  awk -F'\t' '{a[$1]=a[$1]","$2} END{for(u in a){sub(/^,/,"",a[u]); print u"\t"a[u]}}' "$hd/classified.tsv" \
+  | while IFS=$'\t' read -r u classes; do
+      local iso id; iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; id="$(printf '%s' "$u" | sha1sum | cut -c1-40)"
+      jq -nc --arg u "$u" --arg id "$id" --arg h "$host" --arg rd "$root" --arg pr "$program" --arg ti "$tier" \
+            --argjson tf "${fresh:-false}" --arg fs "$fseen" --arg ca "$iso" --arg cl "$classes" \
+        '{index:{_id:$id}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$hd/bulk.part"
+    done
+  printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"
+  wc -l < "$hd/urls" | tr -d ' ' > "$hd/urlcount"
 }
 
 # ---------------------------------------------------------------------------
@@ -157,59 +206,36 @@ cmd_collect() {
     log "candidate bias: $(wc -l < "$covered") proven-coverage root(s) floated to front"
   fi
 
-  local picked=0 bulk="$WORK/bulk.ndjson"; : > "$bulk"
-  local total_urls=0
+  # Build the worklist: up to PER_CYCLE not-yet-scanned hosts (cooldown-respecting).
+  local worklist="$WORK/worklist.tsv"; : > "$worklist"
+  local picked=0
   while IFS=$'\t' read -r host url root program tier fresh fseen; do
     [[ "$picked" -ge "$PARAMS_HOSTS_PER_CYCLE" ]] && break
     [[ -z "$host" ]] && continue
     grep -qxF "$host" "$WORK/done.set" && continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" >> "$worklist"
     picked=$((picked+1))
-    local hd="$WORK/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
-    # crawl (katana live + gau historical), keep param URLs, dedup by structure
-    # -fs rdn keeps katana within the seed's root domain (= in-scope program),
-    # so the catalog never collects off-scope URLs from wandered links.
-    { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
-      [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
-    } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
-    local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
-    log "  [$picked/$PARAMS_HOSTS_PER_CYCLE] $host — ${raw_n} param URLs"
-    # Zero-result cooldown: write a short-term entry so the host isn't retried
-    # every 30-min cycle. Entry timestamp is back-dated so it expires after
-    # PARAMS_ZERO_COOLDOWN_HOURS (default 6h) instead of the full 7-day window.
-    # This breaks the GAU rate-limit death-loop where the same 20 hosts are
-    # hammered every cycle because nothing was ever written to the scanned file.
-    if [[ "$raw_n" -eq 0 ]]; then
-      local zero_secs=$(( ${PARAMS_ZERO_COOLDOWN_HOURS:-6} * 3600 ))
-      local short_ts=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 + zero_secs ))
-      printf '%s\t%s\n' "$short_ts" "$host" >> "$SCANNED_FILE"
-      continue
-    fi
-    if [[ -x "$QSREPLACE" && -s "$hd/raw" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
-    [[ -s "$hd/urls" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
-    # Brief pause between hosts — OTX/urlscan rate-limit quickly under back-to-back requests.
-    sleep "${PARAMS_INTER_HOST_SLEEP:-5}"
-    : > "$hd/classified.tsv"
-    local cls
-    for cls in $PARAMS_CLASSES; do
-      "$GF" "$cls" < "$hd/urls" 2>/dev/null | sed "s|\$|\t$cls|" >> "$hd/classified.tsv"
-    done
-    [[ -s "$hd/classified.tsv" ]] || { printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"; continue; }
-    # per-class files (append; deduped at end)
-    for cls in $PARAMS_CLASSES; do
-      awk -F'\t' -v c="$cls" '$2==c{print $1}' "$hd/classified.tsv" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
-    done
-    # ES docs: one per url with vuln_classes[]
-    awk -F'\t' '{a[$1]=a[$1]","$2} END{for(u in a){sub(/^,/,"",a[u]); print u"\t"a[u]}}' "$hd/classified.tsv" \
-    | while IFS=$'\t' read -r u classes; do
-        local iso; iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-        local id; id="$(printf '%s' "$u" | sha1sum | cut -c1-40)"
-        jq -nc --arg u "$u" --arg id "$id" --arg h "$host" --arg rd "$root" --arg pr "$program" --arg ti "$tier" \
-              --argjson tf "${fresh:-false}" --arg fs "$fseen" --arg ca "$iso" --arg cl "$classes" \
-          '{index:{_id:$id}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$bulk"
-      done
-    total_urls=$(( total_urls + $(wc -l < "$hd/urls" | tr -d ' ') ))
-    printf '%s\t%s\n' "$NOW" "$host" >> "$SCANNED_FILE"
   done < "$WORK/cand.tsv"
+  [[ "$picked" -gt 0 ]] || { log "no fresh in-scope candidates this cycle (all in cooldown)"; exit 0; }
+  log "crawling $picked host(s), ${PARAM_PARALLEL}-wide"
+
+  # Parallel pool: PARAM_PARALLEL concurrent crawl_host jobs, each isolated to its own
+  # dir (no shared-file races). Per-host rate limits + gau jitter keep egress polite.
+  local running=0
+  while IFS=$'\t' read -r host url root program tier fresh fseen; do
+    crawl_host "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" "$WORK" &
+    running=$((running+1))
+    if (( running >= PARAM_PARALLEL )); then wait -n 2>/dev/null || wait; running=$((running-1)); fi
+  done < "$worklist"
+  wait
+
+  # Aggregate per-host outputs (serial — no races now that all jobs are done).
+  local bulk="$WORK/bulk.ndjson"; : > "$bulk"
+  cat "$WORK"/*/bulk.part >> "$bulk"         2>/dev/null || true
+  cat "$WORK"/*/scanned   >> "$SCANNED_FILE" 2>/dev/null || true
+  local cls
+  for cls in $PARAMS_CLASSES; do cat "$WORK"/*/cls."$cls" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true; done
+  local total_urls; total_urls="$(cat "$WORK"/*/urlcount 2>/dev/null | awk '{s+=$1} END{print s+0}')"
 
   # dedup per-class files
   local cls
