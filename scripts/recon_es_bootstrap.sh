@@ -17,8 +17,21 @@ ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 VALIDATE="${VALIDATE:-$SCRIPT_DIR/recon_validate.sh}"
 
 delete_recon_index() {
-  curl -fsS -m 30 "${ES_AUTH[@]}" -X DELETE "$ES_URL/$INDEX_NAME" >/dev/null 2>&1 || true
-  log "deleted index if present: $INDEX_NAME"
+  # Alias-aware: after the v3 clean reindex, recon_alive is an ALIAS, and ES forbids
+  # DELETE on an alias name. Resolve to the concrete backing index(es) and delete
+  # those (which also removes the alias); fall back to plain-index delete otherwise.
+  local concrete
+  concrete="$(curl -fsS -m 30 "${ES_AUTH[@]}" "$ES_URL/_alias/$INDEX_NAME" 2>/dev/null | jq -r 'keys[]?' 2>/dev/null)"
+  if [[ -n "$concrete" ]]; then
+    local idx
+    for idx in $concrete; do
+      curl -fsS -m 30 "${ES_AUTH[@]}" -X DELETE "$ES_URL/$idx" >/dev/null 2>&1 || true
+      log "deleted backing index: $idx (resolved from alias $INDEX_NAME)"
+    done
+  else
+    curl -fsS -m 30 "${ES_AUTH[@]}" -X DELETE "$ES_URL/$INDEX_NAME" >/dev/null 2>&1 || true
+    log "deleted index if present: $INDEX_NAME"
+  fi
 }
 
 clear_derived_host_state() {
@@ -54,6 +67,7 @@ bootstrap_mapping() {
     bash "$VALIDATE" >/dev/null
   log "bootstrapped mapping: $INDEX_NAME"
   apply_screenshot_mapping
+  apply_claude_mapping
 }
 
 # Idempotent: PUT explicit mappings for fields that must NOT be auto-detected.
@@ -79,6 +93,33 @@ apply_screenshot_mapping() {
   log "applied screenshot_* mapping"
 }
 
+# Idempotent: explicit mappings for the Claude AI layer fields (v3.1+). Without
+# these, ES dynamic-mapping would guess types from first value (e.g. a 0.0 float
+# could land as `long`, or a verdict string as analyzed `text`), breaking range
+# filters and term queries. The analysis agent (recon_ai_analyze.sh) owns the
+# claude_analysis_*/claude_worth/claude_interest fields; the verification agent
+# (recon_ai_review.sh) owns claude_verdict/claude_confidence/claude_reason.
+apply_claude_mapping() {
+  curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+    -X PUT "$ES_URL/$INDEX_NAME/_mapping" \
+    -d '{
+      "properties": {
+        "claude_verdict":         {"type": "keyword"},
+        "claude_confidence":      {"type": "float"},
+        "claude_reason":          {"type": "text"},
+        "claude_reviewed_at":     {"type": "date"},
+        "claude_verify_model":    {"type": "keyword"},
+        "claude_worth":           {"type": "boolean"},
+        "claude_interest":        {"type": "float"},
+        "claude_analysis":        {"type": "text"},
+        "claude_suggested_class": {"type": "keyword"},
+        "claude_analyzed_at":     {"type": "date"},
+        "claude_analyze_model":   {"type": "keyword"}
+      }
+    }' >/dev/null
+  log "applied claude_* mapping"
+}
+
 verify_mapping() {
   curl -fsS -m 30 "${ES_AUTH[@]}" "$ES_URL/$INDEX_NAME/_mapping" \
     | jq -e --arg idx "$INDEX_NAME" '
@@ -89,8 +130,8 @@ verify_mapping() {
       ($p.triage_pays.type == "boolean") and
       ($p.triage_kev_cves.type == "keyword") and
       ($p.v2_nuclei_status.type == "keyword") and
-      ($p.ai_relevance_score.type == "integer") and
-      ($p.ai_recommendation.type == "keyword")
+      ($p.claude_verdict.type == "keyword") and
+      ($p.claude_confidence.type == "float")
     ' >/dev/null
   local count
   count="$(curl -fsS -m 30 "${ES_AUTH[@]}" "$ES_URL/$INDEX_NAME/_count" | jq -r '.count')"

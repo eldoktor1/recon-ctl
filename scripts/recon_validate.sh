@@ -167,15 +167,17 @@ _INDEX_PROPERTIES='{
   "v2_nuclei_severity":{"type":"keyword"},
   "v2_nuclei_run_at":{"type":"date"},
 
-  "ai_relevance_score":{"type":"integer"},
-  "ai_confidence":{"type":"keyword"},
-  "ai_recommendation":{"type":"keyword"},
-  "ai_route":{"type":"keyword"},
-  "ai_reason":{"type":"text"},
-  "ai_safe_checks":{"type":"keyword","ignore_above":1024},
-  "ai_risk_flags":{"type":"keyword","ignore_above":512},
-  "ai_model":{"type":"keyword","ignore_above":128},
-  "ai_reviewed_at":{"type":"date"}
+  "claude_verdict":{"type":"keyword"},
+  "claude_confidence":{"type":"float"},
+  "claude_reason":{"type":"text"},
+  "claude_reviewed_at":{"type":"date"},
+  "claude_verify_model":{"type":"keyword","ignore_above":128},
+  "claude_worth":{"type":"boolean"},
+  "claude_interest":{"type":"float"},
+  "claude_analysis":{"type":"text"},
+  "claude_suggested_class":{"type":"keyword"},
+  "claude_analyzed_at":{"type":"date"},
+  "claude_analyze_model":{"type":"keyword","ignore_above":128}
 }'
 
 ensure_index() {

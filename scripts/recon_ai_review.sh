@@ -31,9 +31,16 @@ V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
 STATE_PY="${STATE_PY:-$SCRIPT_DIR/../v3/state.py}"
 # absolute path — claude is a native install in ~/.local/bin (not always on PATH)
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
-CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"          # fast+cheap on quota; override to opus for hard calls
+CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"          # verification model (match-to-task: sonnet)
+CLAUDE_ESCALATE="${CLAUDE_ESCALATE:-1}"         # 1 = re-judge ambiguous needs-human once with the big model
+CLAUDE_ESCALATE_MODEL="${CLAUDE_ESCALATE_MODEL:-opus}"  # the "hard call" model
 AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"        # findings per cycle (quota-bounded)
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-120}"
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"
+INDEX_NAME="${INDEX_NAME:-recon_alive}"
+NETRC="${NETRC:-$HOME/.recon_es_netrc}"          # ES verdict-mirror is best-effort (skipped if absent)
+KB_CONTEXT="${KB_CONTEXT:-3}"                     # prior KB lessons injected into the prompt
+es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/ai_review.lock"; flock -n 9 || { warn "ai-review already running"; exit 0; }
@@ -51,8 +58,8 @@ n="$(printf '%s' "$pending" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no confirmed findings pending validation"; exit 0; }
 log "validating $n confirmed finding(s) with Claude ($CLAUDE_MODEL, Max headless)"
 
-_prompt() {  # finding-json -> adversarial validation prompt
-  local f="$1"
+_prompt() {  # finding-json + kb-context -> adversarial validation prompt
+  local f="$1" kb="$2"
   cat <<EOF
 You are an adversarial bug-bounty VALIDATION analyst. Judge the finding below using
 ONLY the evidence provided. Do NOT make any network request or assume facts not in
@@ -66,6 +73,10 @@ CORS/security-header niggles with no impact, reflected-but-encoded values, anyth
 not exploitable as described. Mark "needs-human" only if the evidence is genuinely
 ambiguous.
 
+PAST OUTCOMES on similar stacks (lessons learned — if a similar case was fp, lean fp;
+if real, that raises plausibility; reason for yourself, do not blindly copy):
+${kb:-  (none yet)}
+
 FINDING (JSON):
 $f
 
@@ -74,26 +85,53 @@ Output ONLY a single-line JSON object — no markdown, no prose, no code fence:
 EOF
 }
 
-reviewed=0; real=0; fp=0; human=0
+# judge <model> -> "verdict<TAB>confidence<TAB>reason" over the current finding ($f)
+# and KB context ($kb). Globals f, kb are set by the loop below.
+judge() {
+  local model="$1" out vjson v c r
+  out="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_prompt "$f" "$kb")" --model "$model" --output-format json </dev/null 2>/dev/null \
+         | jq -r '.result // empty' 2>/dev/null)"
+  vjson="$(printf '%s' "$out" | grep -oE '\{[^{}]*"verdict"[^{}]*\}' | head -1)"
+  v="$(printf '%s' "$vjson" | jq -r '.verdict // empty' 2>/dev/null)"
+  c="$(printf '%s' "$vjson" | jq -r '(.confidence // 0.5)|tostring' 2>/dev/null)"
+  r="$(printf '%s' "$vjson" | jq -r '.reason // "no reason"' 2>/dev/null)"
+  case "$v" in real|fp|needs-human) ;; *) v="needs-human"; c="0.3"; r="claude verdict unparseable — defaulting to human review" ;; esac
+  printf '%s\t%s\t%s' "$v" "$c" "$r"
+}
+
+reviewed=0; real=0; fp=0; human=0; escalated=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
   fid="$(printf '%s' "$f" | jq -r '.id')"
   host="$(printf '%s' "$f" | jq -r '.host')"
-  out="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_prompt "$f")" --model "$CLAUDE_MODEL" --output-format json </dev/null 2>/dev/null \
-         | jq -r '.result // empty' 2>/dev/null)"
-  # robust extraction: pull the JSON object even if wrapped in stray text
-  verdict_json="$(printf '%s' "$out" | grep -oE '\{[^{}]*"verdict"[^{}]*\}' | head -1)"
-  v="$(printf '%s' "$verdict_json" | jq -r '.verdict // empty' 2>/dev/null)"
-  c="$(printf '%s' "$verdict_json" | jq -r '(.confidence // 0.5)|tostring' 2>/dev/null)"
-  r="$(printf '%s' "$verdict_json" | jq -r '.reason // "no reason"' 2>/dev/null)"
-  case "$v" in
-    real|fp|needs-human) ;;
-    *) v="needs-human"; c="0.3"; r="claude verdict unparseable — defaulting to human review" ;;
-  esac
+  vclass="$(printf '%s' "$f" | jq -r '.vuln_class // ""')"
+  sclass="$(printf '%s' "$f" | jq -r '.signal_class // ""')"
+  program="$(printf '%s' "$f" | jq -r '.program // ""')"
+  # asset stack from ES (best-effort) -> KB retrieval + richer context
+  tech=""
+  [[ -f "$NETRC" ]] && tech="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '(.tech // []) | join(",")' 2>/dev/null)"
+  kb="$(V3_DB="$V3_DB" python3 "$STATE_PY" kb-lookup "$tech" "$vclass" "$host" "$KB_CONTEXT" 2>/dev/null \
+        | jq -r '.[]? | "  * [\(.verdict)] \(.host) (\(.tech // "?")) \(.vuln_class // "?"): \(.reason // "")"' 2>/dev/null)"
+
+  IFS=$'\t' read -r v c r <<<"$(judge "$CLAUDE_MODEL")"; model_used="$CLAUDE_MODEL"
+  # escalate genuinely-ambiguous calls to the big model, once (match model to difficulty)
+  if [[ "$CLAUDE_ESCALATE" == "1" && "$v" == "needs-human" && -n "$CLAUDE_ESCALATE_MODEL" && "$CLAUDE_ESCALATE_MODEL" != "$CLAUDE_MODEL" ]]; then
+    IFS=$'\t' read -r v c r <<<"$(judge "$CLAUDE_ESCALATE_MODEL")"
+    r="$r (escalated:$CLAUDE_ESCALATE_MODEL)"; model_used="$CLAUDE_ESCALATE_MODEL"; escalated=$((escalated+1))
+  fi
+
   V3_DB="$V3_DB" python3 "$STATE_PY" ai-verdict "$fid" "$v" "$c" "$r" >/dev/null 2>&1 || true
-  log "  $host [$fid] -> $v (conf=$c) $r"
+  # learn: append the outcome to the knowledge base (the RAG-lite corpus the agents query)
+  V3_DB="$V3_DB" python3 "$STATE_PY" kb-record "$host" "$program" "$tech" "$sclass" "$vclass" "$v" "$c" "ai-verify" "$r" >/dev/null 2>&1 || true
+  # mirror Claude's verdict into ES (asset truth) so dashboards/queries/dedup see it
+  if [[ -f "$NETRC" ]]; then
+    doc="$(jq -nc --arg v "$v" --arg c "$c" --arg r "$r" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg m "$model_used" \
+            '{claude_verdict:$v, claude_confidence:($c|tonumber? // 0.5), claude_reason:$r, claude_reviewed_at:$t, claude_verify_model:$m}')"
+    es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --argjson d "$doc" '{doc:$d}')" >/dev/null 2>&1 || true
+  fi
+  log "  $host [$fid] -> $v (conf=$c, $model_used) $r"
   reviewed=$((reviewed+1)); [[ "$v" == real ]] && real=$((real+1)); [[ "$v" == fp ]] && fp=$((fp+1)); [[ "$v" == needs-human ]] && human=$((human+1))
 done < <(printf '%s' "$pending" | jq -c '.[]' 2>/dev/null)
 
-log "ai-review done — reviewed=$reviewed real=$real fp=$fp needs-human=$human"
+log "ai-review done — reviewed=$reviewed real=$real fp=$fp needs-human=$human escalated=$escalated"
