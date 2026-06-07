@@ -258,6 +258,39 @@ def get_counter(conn, scope: str, metric: str, day: str | None = None) -> float:
     return row["value"] if row else 0.0
 
 
+def review_tier_for(confidence: float) -> str:
+    return "immediate" if confidence >= 0.85 else ("batch" if confidence >= 0.70 else "weekly")
+
+
+def record_confirmed(conn, host, *, url=None, program=None, signal_class=None,
+                     vuln_class=None, score=0, evidence=None, confidence=0.0) -> int:
+    """Authoritative gate write: a probe fired → finding is CONFIRMED. Upserts and
+    forces state=confirmed (the gate already verified non-intrusively). Tier comes
+    from Gate 0. Idempotent on dedup_key."""
+    import tier as _tier
+    tier = _tier.classify(program)
+    dedup = f"{(host or '').lower()}|{signal_class or ''}|{vuln_class or ''}"
+    sig = fp_signature(host, signal_class, vuln_class)
+    ev = evidence if isinstance(evidence, str) else json.dumps(evidence or {})
+    rt = review_tier_for(confidence)
+    now = _utc()
+    with conn:
+        conn.execute("BEGIN")
+        cur = conn.execute(
+            """INSERT INTO findings(dedup_key,host,url,program,tier,signal_class,vuln_class,
+               state,score,confidence,review_tier,fp_signature,evidence,created_at,updated_at,state_changed_at,verifying_since)
+               VALUES(?,?,?,?,?,?,?, 'confirmed',?,?,?,?,?,?,?,?,NULL)
+               ON CONFLICT(dedup_key) DO UPDATE SET state='confirmed', url=COALESCE(excluded.url,url),
+                 program=excluded.program, tier=excluded.tier, score=excluded.score,
+                 confidence=excluded.confidence, review_tier=excluded.review_tier,
+                 evidence=excluded.evidence, updated_at=excluded.updated_at,
+                 state_changed_at=excluded.state_changed_at, verifying_since=NULL""",
+            (dedup, host, url, program, tier, signal_class, vuln_class, score, confidence, rt, sig, ev, now, now, now))
+        fid = conn.execute("SELECT id FROM findings WHERE dedup_key=?", (dedup,)).fetchone()["id"]
+        _audit(conn, fid, "promote", None, "confirmed", f"confidence={confidence} tier={tier} review={rt}")
+    return fid
+
+
 def stats(conn) -> dict:
     out = {"by_state": {}, "fp_signatures": 0, "failures_active": 0}
     for r in conn.execute("SELECT state,COUNT(*) c FROM findings GROUP BY state"):
@@ -273,14 +306,29 @@ def _main(argv):
     conn = connect()
     init_db(conn)
     cmd = argv[1] if len(argv) > 1 else "stats"
+    a = argv[2:]
     if cmd == "init":
         print(f"initialized {DB_PATH}")
     elif cmd == "resume":
         print(f"resumed (stale verifying -> scored): {resume_stale_verifying(conn)}")
     elif cmd == "stats":
         print(json.dumps(stats(conn), indent=2))
+    elif cmd == "check-fp":   # check-fp <host> <signal_class> [vuln_class] ; prints FP|OK, exit 0=FP
+        sig = fp_signature(a[0], a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else "")
+        hit = is_fp(conn, sig)
+        print("FP" if hit else "OK")   # robust signal (callers match stdout, not just exit)
+        return 0 if hit else 1
+    elif cmd == "record-fp":  # record-fp <host> <signal_class> [vuln_class] [reason] [source]
+        sig = fp_signature(a[0], a[1] if len(a) > 1 else "", a[2] if len(a) > 2 else "")
+        record_fp(conn, sig, a[3] if len(a) > 3 else "", a[4] if len(a) > 4 else "gate-exhausted")
+        print(sig)
+    elif cmd == "record-confirmed":  # host url program signal_class vuln_class score confidence evidence_json
+        record_confirmed(conn, a[0], url=a[1], program=a[2], signal_class=a[3],
+                         vuln_class=(a[4] or None), score=int(a[5] or 0),
+                         confidence=float(a[6] or 0), evidence=(a[7] if len(a) > 7 else "{}"))
+        print("confirmed")
     else:
-        print("usage: state.py {init|resume|stats}", file=sys.stderr); return 2
+        print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed ...}", file=sys.stderr); return 2
     return 0
 
 

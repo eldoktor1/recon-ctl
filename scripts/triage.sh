@@ -1288,6 +1288,7 @@ update_es_scores() {
       "triage_p0_candidate":        (.triage_p0_candidate // false),
       "triage_gate_state":          (.triage_gate_state // null),
       "triage_gate_class":          (.triage_gate_class // null),
+      "triage_gate_attempts":       (.triage_gate_attempts // 0),
       "triage_kev_cves":    [(.kev_cves // [])[].id],
       "triage_true_fresh":          (.triage_true_fresh // false),
       "triage_true_fresh_bonus":    (.triage_true_fresh_bonus // 0),

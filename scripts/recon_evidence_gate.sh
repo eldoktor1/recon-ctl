@@ -41,6 +41,14 @@ SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
 NUCLEI_BIN="${NUCLEI_BIN:-$(command -v nuclei 2>/dev/null || echo '')}"
 PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 REPORTER_QUEUE="${REPORTER_QUEUE:-$V3_DIR/reporter_queue.jsonl}"
+# v3 SQLite bridge + confidence routing (article-style): a bare nuclei fire is NOT
+# a P0 — confidence gates promotion. <0.70 stays LEAD; 0.70-0.84 confirmed/batch
+# (P1); >=0.85 confirmed/immediate (P0). FP signatures learned from exhausted leads
+# are queried before probing so the gate goes quieter over time.
+V3_DB="${V3_DB:-$V3_DIR/findings.db}"
+STATE_PY="${STATE_PY:-$SCRIPT_DIR/../v3/state.py}"
+GATE_PROMOTE_CONF="${GATE_PROMOTE_CONF:-0.70}"
+GATE_IMMEDIATE_CONF="${GATE_IMMEDIATE_CONF:-0.85}"
 
 # Gate policy (decisions: N=5, 3h cooldown, 5d TTL)
 GATE_BATCH="${GATE_BATCH:-30}"                 # candidates per cycle (interim volume cap; per-program ceiling is Phase D)
@@ -58,6 +66,22 @@ exec 9>"$STATE_DIR/evidence_gate.lock"; flock -n 9 || { warn "evidence gate alre
 es() { curl -fsS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
 now_epoch() { date -u +%s; }
 iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+# confidence from probe severity (article-style scoring)
+confidence_of() {
+  case "${1,,}" in
+    critical) echo 0.95 ;; high) echo 0.85 ;; medium) echo 0.72 ;;
+    low) echo 0.45 ;; info|informational) echo 0.35 ;; *) echo 0.40 ;;
+  esac
+}
+ge() { awk "BEGIN{exit !($1>=$2)}"; }   # float a>=b
+
+# v3 SQLite bridge (parameterized via state.py CLI — injection-safe). No-op if
+# python3/state.py unavailable, so the gate degrades gracefully to ES-only.
+_db_ok() { command -v python3 >/dev/null 2>&1 && [[ -f "$STATE_PY" ]]; }
+fp_known() { _db_ok || return 1; [[ "$(V3_DB="$V3_DB" python3 "$STATE_PY" check-fp "$1" "$2" 2>/dev/null)" == "FP" ]]; }
+fp_learn() { _db_ok || return 0; V3_DB="$V3_DB" python3 "$STATE_PY" record-fp "$1" "$2" "" "gate-exhausted" >/dev/null 2>&1 || true; }
+db_confirm() { _db_ok || return 0; V3_DB="$V3_DB" python3 "$STATE_PY" record-confirmed "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" >/dev/null 2>&1 || true; }
 
 # ---- candidate selection (the queue) ---------------------------------------
 # gate_state in (candidate,verifying), attempts<N, cooled down, in-scope-paying.
@@ -94,8 +118,8 @@ set_state() {  # host gate_state [extra-json-doc-fields]
   es -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
      -d "$(jq -nc --argjson d "$doc" '{doc:$d}')" >/dev/null 2>&1 || true
 }
-bump_attempt() {  # host attempts first_at
-  local host="$1" attempts="$2" first_at="$3"; local na=$((attempts+1))
+bump_attempt() {  # host attempts first_at class
+  local host="$1" attempts="$2" first_at="$3" class="${4:-none}"; local na=$((attempts+1))
   local fa="$first_at"; [[ -z "$fa" ]] && fa="$(iso)"
   local age_ok=1
   if [[ -n "$first_at" ]]; then
@@ -105,19 +129,23 @@ bump_attempt() {  # host attempts first_at
   if (( na >= GATE_MAX_ATTEMPTS )) || (( age_ok == 0 )); then
     log "  $host — exhausted (attempts=$na) → lead-exhausted (stays P1)"
     set_state "$host" "lead-exhausted" "$(jq -nc --argjson a "$na" --arg fa "$fa" '{triage_gate_attempts:$a, triage_gate_first_at:$fa}')"
+    fp_learn "$host" "$class"   # learn the signature so we stop re-probing this dead lead
   else
     set_state "$host" "candidate" "$(jq -nc --argjson a "$na" --arg fa "$fa" '{triage_gate_attempts:$a, triage_gate_first_at:$fa}')"
   fi
 }
-promote() {  # host url class evidence-json
-  local host="$1" url="$2" class="$3" ev="$4"
-  log "  $host — PROBE FIRED ($class) → promote P0 + queue for reporter"
+promote() {  # host url class evidence-json confidence review_tier program
+  local host="$1" url="$2" class="$3" ev="$4" conf="$5" rt="$6" program="${7:-}"
+  local prio="P1" score=14
+  [[ "$rt" == "immediate" ]] && { prio="P0"; score=15; }
+  log "  $host — PROBE FIRED ($class, conf=$conf, $rt) → $prio + reporter"
   set_state "$host" "confirmed" \
-    "$(jq -nc --argjson ev "$ev" --arg p "P0" '{triage_priority:$p, triage_score:15, triage_gate_evidence:$ev, triage_p0_candidate:false}')"
-  # Hand to Reporter (Phase C consumes this queue; Phase B will mirror into SQLite)
-  jq -nc --arg h "$host" --arg u "$url" --arg c "$class" --argjson ev "$ev" --arg t "$(iso)" \
-    '{host:$h, url:$u, gate_class:$c, evidence:$ev, confirmed_at:$t, state:"confirmed"}' \
+    "$(jq -nc --argjson ev "$ev" --arg p "$prio" --argjson sc "$score" --argjson c "$conf" --arg rt "$rt" \
+       '{triage_priority:$p, triage_score:$sc, triage_gate_evidence:$ev, triage_gate_confidence:$c, triage_gate_review_tier:$rt, triage_p0_candidate:false}')"
+  jq -nc --arg h "$host" --arg u "$url" --arg c "$class" --argjson ev "$ev" --argjson cf "$conf" --arg rt "$rt" --arg t "$(iso)" \
+    '{host:$h, url:$u, gate_class:$c, evidence:$ev, confidence:$cf, review_tier:$rt, confirmed_at:$t, state:"confirmed"}' \
     >> "$REPORTER_QUEUE" 2>/dev/null || true
+  db_confirm "$host" "$url" "$program" "$class" "" "$score" "$conf" "$ev"   # SQLite state truth (reporter/observability)
 }
 
 # ---- probes (NON-INTRUSIVE; reuse existing tools) --------------------------
@@ -127,7 +155,7 @@ nuclei_probe() {  # url  tag-set
   [[ -n "$NUCLEI_BIN" ]] || { warn "nuclei missing"; return 1; }
   local out; out="$(timeout "$PROBE_TIMEOUT" "$NUCLEI_BIN" -u "$url" \
       -tags "$tags" -etags "$NUCLEI_ETAGS" -severity info,low,medium,high,critical \
-      -rl "$NUCLEI_RL" -silent -jsonl -nc -duc 2>/dev/null | head -1)" || true
+      -rl "$NUCLEI_RL" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
   [[ -z "$out" ]] && return 1
   printf '%s' "$out" | jq -c '{probe:"nuclei", template:(."template-id"//"?"),
       severity:(.info.severity//"?"), matched_at:(."matched-at"//.host//""), name:(.info.name//"")}' 2>/dev/null
@@ -137,13 +165,13 @@ xss_probe() {  # host — confirmed only if params lane already broke out unenco
   local vf="$BASE_DIR/params/verify_xss.jsonl"
   [[ -s "$vf" ]] || return 1
   grep -F "\"$host\"" "$vf" 2>/dev/null | jq -c 'select(.status=="confirmed") |
-      {probe:"dalfox/params-verify", url:.url, status:.status}' 2>/dev/null | head -1 | grep . || return 1
+      {probe:"dalfox/params-verify", url:.url, status:.status, severity:"high"}' 2>/dev/null | head -1 | grep . || return 1
 }
 bypass_probe() {  # host — confirmed only if the bypass lane verified an auth-differential
   local host="$1"
   es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null \
     | jq -ce 'select(.bypass_confirmed==true) | {probe:"bypass-auth-differential",
-        path:(.bypass_path//"?"), waf:(.bypass_waf//"?")}' 2>/dev/null || return 1
+        path:(.bypass_path//"?"), waf:(.bypass_waf//"?"), severity:"high"}' 2>/dev/null || return 1
 }
 
 probe_for_class() {  # class url host  → echoes evidence json on FIRE
@@ -165,7 +193,9 @@ main() {
   log "evidence gate: $total candidate(s) this cycle (batch cap=$GATE_BATCH)"
 
   local fired=0 cleared=0 exhausted=0
-  while IFS=$'\t' read -r host url class attempts first_at program tier; do
+  # Read the queue on FD 3 — probes (nuclei et al.) read stdin and would otherwise
+  # consume the loop's here-string, ending the loop after the first candidate.
+  while IFS=$'\t' read -r host url class attempts first_at program tier <&3; do
     [[ -z "$host" ]] && continue
     [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — halting"; break; }
     # scope gate — never probe out-of-scope
@@ -177,14 +207,26 @@ main() {
       log "  $host — unprobeable class → lead-exhausted (stays P1)"
       set_state "$host" "lead-exhausted" '{"triage_gate_class":"none"}'; exhausted=$((exhausted+1)); continue
     fi
+    # learned-FP pre-check — skip dead leads we already killed (quieter over time)
+    if fp_known "$host" "$class"; then
+      log "  $host — known FP signature, skipping (lead-exhausted)"
+      set_state "$host" "lead-exhausted" '{}'; exhausted=$((exhausted+1)); continue
+    fi
     set_state "$host" "verifying" "$(jq -nc --arg fa "${first_at:-$(iso)}" '{triage_gate_first_at:$fa}')"
     local ev; ev="$(probe_for_class "$class" "$url" "$host" || true)"
     if [[ -n "$ev" ]]; then
-      promote "$host" "$url" "$class" "$ev"; fired=$((fired+1))
+      local sev conf; sev="$(printf '%s' "$ev" | jq -r '.severity // "info"' 2>/dev/null)"; conf="$(confidence_of "$sev")"
+      if ge "$conf" "$GATE_PROMOTE_CONF"; then
+        local rt="batch"; ge "$conf" "$GATE_IMMEDIATE_CONF" && rt="immediate"
+        promote "$host" "$url" "$class" "$ev" "$conf" "$rt" "$program"; fired=$((fired+1))
+      else
+        log "  $host — probe fired but low confidence ($sev=$conf < $GATE_PROMOTE_CONF) → stays LEAD"
+        bump_attempt "$host" "${attempts:-0}" "$first_at" "$class"; cleared=$((cleared+1))
+      fi
     else
-      bump_attempt "$host" "${attempts:-0}" "$first_at"; cleared=$((cleared+1))
+      bump_attempt "$host" "${attempts:-0}" "$first_at" "$class"; cleared=$((cleared+1))
     fi
-  done <<< "$cands"
+  done 3<<< "$cands"
 
   log "gate cycle done — fired(P0)=$fired, no-fire=$cleared, exhausted=$exhausted"
 }
