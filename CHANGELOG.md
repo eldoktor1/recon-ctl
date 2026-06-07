@@ -1,5 +1,33 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.0.0 - 2026-06-07 - detection → validation → report (evidence gate + state machine + orchestrator)
+
+New `v3/` layer that turns detection into confirmed, reported, non-duplicate findings
+plus safety scaffolding for unattended operation. Scanners unchanged (kept as tools).
+ES = asset truth; SQLite (`~/recon/v3/findings.db`, WAL) = finding-state truth. Each
+phase committed + self-test validated; live integration pending (daemon was stopped
+during build, no target-facing probes run). See `v3/README.md`.
+
+- **Gate 0** — `v3/tier.py` + `tier_list.tsv`: financial-tier classifier, default-unknown
+  → FINANCIAL; GENERAL only via human review. 609 programs seeded FINANCIAL/unreviewed.
+- **Phase A — evidence gate** — `triage.sh` clamps every detection-only P0 to a
+  P0-CANDIDATE (held at P1); `recon_evidence_gate.sh` runs the non-intrusive class
+  probe (nuclei detect/exposure, dalfox via params-verify, bypass auth-differential)
+  and promotes to P0 only on a real fire; N=5/3h/5d → lead-exhausted. Reconnects
+  nuclei/dast as the gate's probes. Daemon registers the `evidence-gate` loop.
+- **Phase B — state machine** — `db/schema.sql` + `state.py`: guarded atomic
+  transitions, WAL crash-safe resume (stale `verifying`→`scored`, no double-fire),
+  FP-signature table (queried before scanning), failure_patterns (6-cat backoff),
+  run_counters, audit_log.
+- **Phase C — reporter** — `formatters.py` + `reporter.py`: Finding → H1/Bugcrowd/
+  Intigriti reports; dup pre-check; evidence-freshness re-probe (since-patched →
+  bounce, not reported); never auto-submits.
+- **Phase D — orchestrator** — `orchestrator.py`: tier autonomy boundary (GENERAL
+  autonomous read-only / FINANCIAL detect+stage-only); hard-coded guardrails (4
+  concurrent, per-program 750/day, ban/captcha/3×403 → halt-no-resume, scope gate,
+  fund-moving endpoint denylist, backoff, $20 LLM spend ceiling, vpn pause).
+- **Phase E — observability** — `observability.py`: auditable daily digest from SQLite.
+
 ## v2.9.0 - 2026-06-06 - Triage P0 false-positive hardening (CONFIRMED vs LEAD)
 
 Established the CONFIRMED-vs-LEAD discipline (see CLAUDE.md): only a directly
