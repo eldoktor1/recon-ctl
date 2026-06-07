@@ -167,7 +167,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect","bypass_confirmed","triage_gate_state","triage_gate_attempts","triage_gate_last_probe"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -1169,6 +1169,39 @@ apply_cluster_and_submission() {
       }
     else . end) |
 
+    # ── PHASE A: Evidence gate — generalize the clamp to ALL detection-only P0s ──
+    # Invert promote-then-confirm. A host only mints P0 directly when it carries a
+    # VERIFIED primitive (confirmed takeover / WAF bypass / portscan-confirmed-open
+    # critical port) OR the evidence gate already promoted it (gate_state=confirmed).
+    # Every other host reaching P0 on detection-only evidence becomes a P0-CANDIDATE:
+    # held at P1, tagged with the probe class, queued for recon_evidence_gate.sh.
+    # gate_state/attempts/last_probe are owned by the gate worker — we preserve any
+    # existing value and only initialise new docs to "candidate" (never reset
+    # in-flight verifying / exhausted state).
+    map(
+      (.signals // []) as $sg |
+      (((.takeover_confirmed // false) == true)
+        or ((.bypass_confirmed // false) == true)
+        or ((.has_critical_port // false) == true)
+        or ((.triage_gate_state // "") == "confirmed")) as $verified |
+      (if   ($sg | any(test("kev"; "i"))) or ((.kev_needs_verify // null) != null) or ((.triage_breaking_vuln // false) == true) then "version"
+       elif ($sg | any(test("reflect|xss"; "i"))) then "xss"
+       elif ($sg | any(test("title:dir-listing|title:phpinfo|title:debug|title:installer|title:spring-error|tech:swagger|tech:graphql"; "i"))) then "content-leak"
+       elif ($sg | any(test("^tech:|host:(admin|internal|ci|scm|vpn|monitoring|atlassian|auth|storage)"; "i"))) then "unauth-surface"
+       elif ($sg | any(test("status:40"; "i"))) then "auth-bypass"
+       else "none" end) as $gclass |
+      if ($verified | not) and (.score >= '"$P0_THRESHOLD"') then
+        . + {
+          score: ('"$P0_THRESHOLD"' - 1),
+          signals: (.signals + ["cap:p0-candidate-ungated"]),
+          triage_p0_candidate: true,
+          triage_gate_class: $gclass,
+          triage_gate_state: (if (.triage_gate_state // "") == "" then "candidate" else .triage_gate_state end)
+        }
+      else
+        . + { triage_p0_candidate: false }
+      end) |
+
     # AI score integration - uses ai_recommendation / ai_relevance_score fetched from ES,
     # written by recon_ai_score.sh in the prior triage pass.
     # ai_rec=skip: -10, ai_rec=test_now + score>=80: +3 bonus+confidence=high
@@ -1252,6 +1285,9 @@ update_es_scores() {
       "triage_kev_signal":  (.kev_signal // null),
       "triage_kev_needs_verify": (.kev_needs_verify // null),
       "triage_kev_unverified_sole": (.kev_unverified_sole // false),
+      "triage_p0_candidate":        (.triage_p0_candidate // false),
+      "triage_gate_state":          (.triage_gate_state // null),
+      "triage_gate_class":          (.triage_gate_class // null),
       "triage_kev_cves":    [(.kev_cves // [])[].id],
       "triage_true_fresh":          (.triage_true_fresh // false),
       "triage_true_fresh_bonus":    (.triage_true_fresh_bonus // 0),

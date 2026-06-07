@@ -465,6 +465,13 @@ BYPASS_SCRIPT="${BYPASS_SCRIPT:-$(script_path recon_bypass.sh)}"
 BYPASS_INTERVAL="${BYPASS_INTERVAL:-3600}"
 run_bypass() { v21_killed bypass && return 0; [[ -f "$BYPASS_SCRIPT" ]] && run_scanner bash "$BYPASS_SCRIPT" || true; }
 
+# ---- PHASE A evidence gate (recon_evidence_gate.sh) --------------------------
+# Probes P0-CANDIDATEs (detection-only P0s triage held at P1) with non-intrusive
+# class probes; promotes to P0 only on a real fire. Target-facing → run_scanner.
+EVIDENCE_GATE_SCRIPT="${EVIDENCE_GATE_SCRIPT:-$(script_path recon_evidence_gate.sh)}"
+GATE_INTERVAL="${GATE_INTERVAL:-1800}"   # 30 min
+run_evidence_gate() { v21_killed evidence_gate && return 0; [[ -f "$EVIDENCE_GATE_SCRIPT" ]] && run_scanner bash "$EVIDENCE_GATE_SCRIPT" || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -583,6 +590,7 @@ run_discord_bot() {
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
+  supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "digest"         "DIGEST_INTERVAL"        run_digest         &
   supervise_loop "exposure"       "EXPOSURE_INTERVAL"      run_exposure       &
