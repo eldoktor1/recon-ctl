@@ -215,7 +215,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_review|ai_analyze|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_review|ai_analyze|ai_monitor|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -1206,6 +1206,18 @@ cmd_ai() {
       printf "  showing: %s  |  total Claude-worth leads in ES: %s\n" "$an_n" "$an_total"
       ;;
 
+    # ---- monitor: latest Claude pipeline health/guidance assessment ----
+    monitor|health)
+      hdr "Claude monitor — latest pipeline health + guidance"
+      local mf="${AI_MONITOR_OUT:-$BASE_DIR/state/ai_monitor_latest.json}"
+      [[ -f "$mf" ]] || { echo "  (no assessment yet — ai-monitor has not run)"; return 0; }
+      jq -r '"  at: \(.at // "?")",
+             "  health: \(.health)   ·   burn-risk: \(.burn_risk)",
+             "  \(.summary)",
+             (if (.guidance//[])|length>0 then "  guidance:", ((.guidance[])|"    🧭 \(.)") else empty end),
+             (if (.anomalies//[])|length>0 then "  anomalies:", ((.anomalies[])|"    ⚠️  \(.)") else empty end)' "$mf" 2>/dev/null || cat "$mf"
+      ;;
+
     # ---- accuracy: Claude layer self-audit (is it actually working?) ----
     accuracy|audit)
       hdr "Claude accuracy — self-audit (human disposition of 'real' verdicts)"
@@ -1252,6 +1264,7 @@ cmd_ai() {
       echo "  top [N]             all findings in verdict order"
       echo "  analysis            Claude-analysis leads worth verifying (from ES)"
       echo "  accuracy            self-audit: 'real'-verdict precision + verdict mix"
+      echo "  monitor             latest pipeline health + guidance (burn-risk watch)"
       echo "  detail <host>       full verdict + evidence for one host"
       ;;
   esac
