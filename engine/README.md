@@ -30,11 +30,11 @@ Max 4 concurrent agents · per-program daily request ceiling (750) · ban/CAPTCH
 
 ## Running (inside the kali VM — never over WSL interop)
 ```
-python3 v3/state.py init                 # create the DB (idempotent; auto-migrates older DBs)
-python3 v3/orchestrator.py once          # one orchestration pass
-python3 v3/orchestrator.py loop          # continuous (halts persist until human clears ~/recon/state/v3_halt)
-python3 v3/reporter.py                   # build review-queue reports from confirmed findings
-python3 v3/observability.py              # write today's audit digest
+python3 engine/state.py init                 # create the DB (idempotent; auto-migrates older DBs)
+python3 engine/orchestrator.py once          # one orchestration pass
+python3 engine/orchestrator.py loop          # continuous (halts persist until human clears ~/recon/state/v3_halt)
+python3 engine/reporter.py                   # build review-queue reports from confirmed findings
+python3 engine/observability.py              # write today's audit digest
 ```
 The evidence gate (Phase A) runs as a daemon loop (`recon_daemon.sh` registers `evidence-gate`).
 
@@ -91,8 +91,8 @@ API key, no API spend** (headless `claude -p` is billed to the Max subscription)
    set of hands that triages, decides, and prepares submissions against the tight
    signal the daemon produces while you're at work. The one-stop brief:
 ```
-python3 v3/observability.py        # what ran, what's confirmed, what needs you (review queue, halts)
-python3 v3/reporter.py             # (re)build review-queue reports from confirmed findings
+python3 engine/observability.py        # what ran, what's confirmed, what needs you (review queue, halts)
+python3 engine/reporter.py             # (re)build review-queue reports from confirmed findings
 sqlite3 ~/recon/v3/findings.db "SELECT host,program,confidence,review_tier FROM findings WHERE state='reported' ORDER BY confidence DESC;"
 ```
 Submission stays human-gated; Claude prepares, you approve + send.

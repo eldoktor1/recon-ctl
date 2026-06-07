@@ -30,7 +30,7 @@ REPORTER (real only; dup + freshness gates; NEVER auto-submits) → review queue
 ```
 IDOR / LFI / RCE stay **operator-leads** (hard line — never auto-exploited). Claude runs on the
 **Max plan, headless (`claude -p`), no API key**. Two layers: ANALYZE aims the net, VERIFY kills FPs.
-Deep detail: `v3/README.md`. Daily audit: `python3 v3/observability.py`.
+Deep detail: `engine/README.md`. Daily audit: `python3 engine/observability.py`.
 
 ## Security model (non-negotiable)
 - **Mullvad is sole egress, fail-closed.** Startup runs a root preflight + VPN gate; the

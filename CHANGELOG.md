@@ -52,6 +52,15 @@ more fish — without drowning in noise." Built with the pipeline maintenance-lo
   hard-coded fund-moving endpoint denylist), not the program. `state.py init` self-heals
   older DBs (idempotent `_migrate` drops a stray `tier` column natively).
 
+**Unified repo layout** — renamed the version-named code dir `v3/` → role-named
+  `engine/` (the Python detection→validation→report package), so every top-level dir is
+  now role-named (`scripts/`, `tools/`, `engine/`, `docker/`, `docs/`). Done as `git mv`
+  (history preserved) + repointed the 7 code-path references (STATE_PY / `V3_PY_DIR`).
+  Least-damaging on purpose: the **runtime data dir** `~/recon/v3/` (live findings.db,
+  reports, digests) and the `V3_*` env-var names are left untouched — moving a live DB
+  with the daemon up is a separate, WSL-up maintenance step. All engine call sites are
+  guarded (`[[ -f ]]`/`|| true`), so the rename self-heals on the next daemon cycle.
+
 **Ops/cleanup** — `recon-ctl maintenance on|off` lock (fail-closed start guard);
   `ai-analyze`/`xss-confirm`/`param-confirm` daemon loops (d0k, VPN-gated where target-
   facing); `cmd_stop` LOOP_PAT updated. Purged dead Ollama dashboard columns from
