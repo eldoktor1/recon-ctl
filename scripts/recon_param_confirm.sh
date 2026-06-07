@@ -32,6 +32,12 @@ SEEN="${PARAM_SEEN:-$STATE_DIR/param_confirm_seen.txt}"
 PC_CLASSES="${PC_CLASSES:-ssti redirect sqli}"
 PC_BATCH="${PC_BATCH:-10}"                 # URLs per class per cycle (quota/load bound)
 es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
+# Live scope guard (authoritative at probe time): only probe a host that is CURRENTLY
+# in-scope + paying + not out-of-scope — never trust stale catalog scope.
+in_scope_now() {
+  [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" 2>/dev/null | jq -r \
+     '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+}
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/param_confirm.lock"; flock -n 9 || { warn "already running"; exit 0; }
@@ -59,12 +65,13 @@ for cls in $PC_CLASSES; do
   for url in "${urls[@]}"; do
     [[ -z "$url" ]] && continue
     [[ -f "$STATE_DIR/vpn_down" ]] && break
+    host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
+    in_scope_now "$host" || { printf '%s\n' "$url" >> "$SEEN"; continue; }   # live scope guard
     out="$(timeout 60 python3 "$WORKER" "$url" "$cls" 2>/dev/null)"
     printf '%s\n' "$url" >> "$SEEN"
     tested_total=$((tested_total+1))
     [[ -z "$out" ]] && continue
     [[ "$(printf '%s' "$out" | jq -r '.confirmed // false' 2>/dev/null)" == "true" ]] || continue
-    host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
     prog="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '.triage_program // ""' 2>/dev/null)"
     ev="$(printf '%s' "$out" | jq -c '{probe:("param-"+.class), context:.context, param:.param, payload:.payload, evidence:.evidence, matched_at:.url}' 2>/dev/null)"
     V3_DB="$V3_DB" python3 "$STATE_PY" record-confirmed "$host" "$url" "$prog" "$cls" "$cls" "15" "0.85" "$ev" >/dev/null 2>&1 || true
