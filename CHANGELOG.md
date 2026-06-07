@@ -1,5 +1,35 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.3.0 - 2026-06-07 - Claude at full capability: multimodal, schema-locked, measured
+
+Built with the pipeline maintenance-locked. The Claude layer was using ~half its
+capability — judging from a one-line summary string. Now it works the actual case file,
+multimodally, while staying pure reasoning (never issues a request against a target).
+Every change verified end-to-end on Max auth (claude 2.1.165): real ES + real Claude.
+
+- **MULTIMODAL VERIFY** (`recon_ai_review.sh`) — the asset SCREENSHOT is handed to Claude
+  as primary evidence. Each finding gets a throwaway temp dir holding ONLY its own
+  screenshot; Claude is Read-scoped to that dir (`--tools Read --add-dir --permission-mode
+  dontAsk`), never the broader filesystem. Proven: a `cors-misconfig`/"unauth-surface"
+  gate hit on the eToro marketing homepage → **FP 0.95**, reasoning citing the screen
+  ("eToro marketing homepage, no admin surface"). Findings also enriched with ES asset
+  truth (tech/title/server/status/content-type/final-url + the gate's nuclei evidence).
+- **SCHEMA-VALIDATED OUTPUT** (both agents) — `--json-schema` → `.structured_output`,
+  replacing brittle regex/text-scraping (kept as fallback). Root must be an object (the
+  API wraps it as a tool input_schema; a top-level array 400s) — analyze verdicts live
+  under `assets`.
+- **SMARTER ESCALATION** — re-judge with the big model on genuine ambiguity OR a
+  LOW-confidence (<0.75) real/fp, not just literal `needs-human`.
+- **ANALYZE MODEL TIERING** (`recon_ai_analyze.sh`) — a chunk whose top `triage_score` ≥
+  `ANALYZE_HI_SCORE` (60) is judged by sonnet; bulk stays haiku.
+- **PRECISION SELF-AUDIT** (`engine/state.py ai_accuracy` + `recon-ai accuracy` + daily
+  digest) — measures the human-decided precision of `real` verdicts (accepted=submitted
+  vs rejected=dismissed) — the only ground truth — plus verdict mix, escalation count,
+  AI-learned FP signatures, KB size. We measure the layer now instead of asserting it.
+- **FIX** — `recon-ctl` `_ai_table`/`detail` still read the dropped `tier` column; removed
+  (would error once `_migrate` drops it live). Never pass `--bare` (forces API-key auth,
+  bypasses Max OAuth).
+
 ## v3.2.0 - 2026-06-07 - Claude analysis layer, wide reliable multi-class net, clean ES
 
 Two Claude layers + a precise per-class confirmation net, all FP-gated. "Bigger net,

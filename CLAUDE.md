@@ -31,6 +31,20 @@ kills FPs). Confirm primitive per class:
   is exploitation). Claude detects + prioritises; a human confirms. Never auto-probed.
 Any confirmed catch still passes the Claude VERIFY adversarial filter before it reaches #review.
 
+## Claude at full capability (v3.3): multimodal, schema-locked, measured
+VERIFY is no longer a one-line text classifier — it's a **multimodal investigator** that
+still only REASONS (never issues a request at a target). Per finding it gets the asset
+SCREENSHOT as primary evidence (a cors-misconfig on a marketing homepage looks nothing
+like a real exposed panel — vision kills those FPs) plus ES asset context, Read-scoped to
+a throwaway per-finding dir (`--tools Read --add-dir`, never the filesystem). Output is
+**schema-validated** (`--json-schema` → `.structured_output`; no regex scraping; unparseable
+⇒ safe `needs-human`). It **escalates to the big model on genuine ambiguity OR a low-confidence
+real/fp** (a confidently-wrong verdict is the real risk). ANALYZE tiers model by asset value
+(haiku bulk → sonnet for high triage_score). And we **measure** it: `state.py ai-accuracy` /
+`recon-ai accuracy` reports the human-decided precision of `real` verdicts (accepted vs
+dismissed) — the only ground truth. Never pass `--bare` (it forces API-key auth and bypasses
+the Max OAuth login).
+
 ## Documented false-positive patterns (never score as CONFIRMED)
 - **KEV tech-class match without a confirmed in-range version** (Spring actuator,
   Confluence, Jira, F5, MOVEit, AEM, Magento, Drupal≥8, …) → LEAD, not P0. Verify
