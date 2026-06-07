@@ -177,11 +177,30 @@ bypass_probe() {  # host — confirmed only if the bypass lane verified an auth-
         path:(.bypass_path//"?"), waf:(.bypass_waf//"?"), severity:"high"}' 2>/dev/null || return 1
 }
 
+# OOB probe for SSRF/XXE — re-enables the oast/ssrf/xxe templates the default policy
+# excludes, and confirms via interactsh (projectdiscovery) OUT-OF-BAND callback. A
+# callback is definitive + non-destructive (we point entities/fetches at OUR canary,
+# never file:// or internal data). Detection, not exploitation.
+oob_probe() {  # url  tag-set
+  local url="$1" tags="$2"
+  [[ -n "$NUCLEI_BIN" ]] || { warn "nuclei missing"; return 1; }
+  local out; out="$(timeout "$PROBE_TIMEOUT" "$NUCLEI_BIN" -u "$url" \
+      -tags "$tags" -etags "dos,brute-force,bruteforce" -severity medium,high,critical \
+      -rl "$NUCLEI_RL" -silent -jsonl -nc -duc </dev/null 2>/dev/null | head -1)" || true
+  [[ -z "$out" ]] && return 1
+  printf '%s' "$out" | jq -c '{probe:"nuclei-oob", template:(."template-id"//"?"),
+      severity:(.info.severity//"?"), matched_at:(."matched-at"//.host//""), name:(.info.name//"")}' 2>/dev/null
+}
+
 probe_for_class() {  # class url host  → echoes evidence json on FIRE
   case "$1" in
     version)        nuclei_probe "$2" "tech,detect,version,cve,exposure" ;;
     unauth-surface) nuclei_probe "$2" "exposure,exposed-panel,unauth,misconfig,default-login" ;;
     content-leak)   nuclei_probe "$2" "exposure,disclosure,files,listing,backup,config" ;;
+    graphql)        nuclei_probe "$2" "graphql" ;;
+    swagger)        nuclei_probe "$2" "swagger,openapi,exposure,api" ;;
+    ssrf)           oob_probe   "$2" "ssrf" ;;            # interactsh OOB
+    xxe)            oob_probe   "$2" "xxe" ;;             # interactsh OOB
     xss)            xss_probe "$3" ;;
     auth-bypass)    bypass_probe "$3" ;;
     *)              return 1 ;;   # unprobeable → caller marks lead-exhausted
