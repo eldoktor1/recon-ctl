@@ -291,6 +291,33 @@ def record_confirmed(conn, host, *, url=None, program=None, signal_class=None,
     return fid
 
 
+def ai_pending(conn, limit: int = 20) -> list:
+    """Confirmed findings not yet judged by the Claude validation agent."""
+    rows = conn.execute(
+        "SELECT id,host,url,program,tier,signal_class,vuln_class,score,confidence,evidence "
+        "FROM findings WHERE state='confirmed' AND ai_verdict IS NULL ORDER BY confidence DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_ai_verdict(conn, finding_id: int, verdict: str, confidence: float, reason: str) -> None:
+    """Write Claude's adversarial verdict. fp -> dismiss + learn FP signature;
+    real/needs-human -> stay confirmed (real is what reaches the review queue)."""
+    now = _utc()
+    with conn:
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE findings SET ai_verdict=?,ai_confidence=?,ai_reason=?,ai_reviewed_at=?,updated_at=? WHERE id=?",
+            (verdict, confidence, reason, now, now, finding_id))
+        row = conn.execute("SELECT host,signal_class,vuln_class,state FROM findings WHERE id=?", (finding_id,)).fetchone()
+        _audit(conn, finding_id, "ai-verdict", row["state"] if row else None, verdict, f"conf={confidence}: {reason[:120]}")
+    if verdict == "fp" and row is not None:
+        # adversarially-disproven -> dismiss + remember the signature so we never re-surface it
+        transition(conn, finding_id, "dismissed", expect="confirmed", last_error=f"AI fp: {reason[:160]}")
+        record_fp(conn, fp_signature(row["host"], row["signal_class"], row["vuln_class"]),
+                  reason=f"claude-validation: {reason[:160]}", source="ai-validation")
+
+
 def stats(conn) -> dict:
     out = {"by_state": {}, "fp_signatures": 0, "failures_active": 0}
     for r in conn.execute("SELECT state,COUNT(*) c FROM findings GROUP BY state"):
@@ -327,6 +354,11 @@ def _main(argv):
                          vuln_class=(a[4] or None), score=int(a[5] or 0),
                          confidence=float(a[6] or 0), evidence=(a[7] if len(a) > 7 else "{}"))
         print("confirmed")
+    elif cmd == "ai-pending":        # ai-pending [limit] -> JSON array of findings to validate
+        print(json.dumps(ai_pending(conn, int(a[0]) if a else 20)))
+    elif cmd == "ai-verdict":        # ai-verdict <id> <verdict> <confidence> <reason...>
+        record_ai_verdict(conn, int(a[0]), a[1], float(a[2] or 0), " ".join(a[3:]) if len(a) > 3 else "")
+        print("ok")
     else:
         print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed ...}", file=sys.stderr); return 2
     return 0

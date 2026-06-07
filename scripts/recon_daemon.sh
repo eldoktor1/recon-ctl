@@ -70,8 +70,6 @@ prepare_scanner_dirs() {
     "$BASE_DIR/cve/raw"
     "$BASE_DIR/vuln"
     "$BASE_DIR/vuln/raw"
-    "$BASE_DIR/ai_review"
-    "$BASE_DIR/ai_review/pending"
     "$BASE_DIR/js_recon"
     "$BASE_DIR/js_recon/dump"
   )
@@ -127,12 +125,10 @@ run_scanner() {
     BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-2}"
     INBOX_FILE_CAP="${INBOX_FILE_CAP:-200}"
     BATCH_SIZE="${BATCH_SIZE:-2500}"
-    ENABLE_OLLAMA_AI="${ENABLE_OLLAMA_AI:-1}"
-    OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-    OLLAMA_MODEL_LEAD="${OLLAMA_MODEL_LEAD:-llama3.1:8b-instruct-q4_K_M}"
-    AI_MAX_LEADS="${AI_MAX_LEADS:-50}"
-    AI_MIN_SCORE="${AI_MIN_SCORE:-12}"
-    MIN_AI_RELEVANCE="${MIN_AI_RELEVANCE:-7}"
+    # AI layer (v3.1+): Claude-Max validation agent (recon_ai_review.sh), config below.
+    # The legacy Ollama pre-scorer (ENABLE_OLLAMA_AI/OLLAMA_*/AI_MAX_LEADS) was retired.
+    CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"
+    AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"
     PATH="$PATH"
   )
   if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
@@ -484,6 +480,14 @@ V3_DIGEST_INTERVAL="${V3_DIGEST_INTERVAL:-86400}"
 run_reporter()  { [[ -f "$V3_PY_DIR/reporter.py" ]] && run_scanner python3 "$V3_PY_DIR/reporter.py" >/dev/null 2>&1 || true; }
 run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 "$V3_PY_DIR/observability.py" >/dev/null 2>&1 || true; }
 
+# ---- Claude-Max validation agent (recon_ai_review.sh) ------------------------
+# Headless `claude -p` (Max, NO API) adversarially validates gate-CONFIRMED findings
+# (real / fp / needs-human) before they reach the review queue — the accuracy layer.
+# Runs as d0k (NOT run_scanner) because Claude Code auth is per-user (~/.claude).
+AI_REVIEW_SCRIPT="${AI_REVIEW_SCRIPT:-$(script_path recon_ai_review.sh)}"
+AI_REVIEW_INTERVAL="${AI_REVIEW_INTERVAL:-1800}"
+run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >/dev/null 2>&1 || true; }
+
 # ---- Stale P0/P1 re-validate (recon_restale.sh) ------------------------------
 # Re-queues high-value hosts not seen in N days so they flow back through
 # httpx + ES + triage. Not target-facing (only writes to inbox), runs as d0k.
@@ -607,6 +611,7 @@ run_discord_bot() {
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
+  supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &

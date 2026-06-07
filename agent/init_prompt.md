@@ -34,9 +34,10 @@ cat ~/recon/nuclei/confirmed.jsonl 2>/dev/null | jq -c '{host,template_id,severi
 # Takeover opportunities
 cat ~/recon/firstblood/takeovers_to_claim.tsv 2>/dev/null
 
-# AI-scored high-confidence leads
-jq -c 'select(.ai.ai_relevance_score >= 70) | {host,url,score,priority,payout_tier,program,ai_score:.ai.ai_relevance_score,safe_checks:.ai.safe_checks}' \
-  ~/recon/ai_review/ai_scored.jsonl 2>/dev/null | head -20
+# Claude-VALIDATED reportable findings (AI accuracy layer → SQLite verdicts)
+recon-ai real 2>/dev/null | head -20
+# or, raw: sqlite3 -readonly ~/recon/v3/findings.db \
+#   "SELECT host,vuln_class,ai_confidence,ai_reason FROM findings WHERE ai_verdict='real';"
 ```
 
 **3. Fetch the priority queue**

@@ -84,8 +84,6 @@ SUBMISSIONS_FILE="${SUBMISSIONS_FILE:-$HOME/.recon_submissions.jsonl}"
 _TRIAGE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCOPE_CHECK="${SCOPE_CHECK:-$_TRIAGE_SCRIPT_DIR/recon_scope_check.sh}"
 KEV_TARGETS="${KEV_TARGETS:-$HOME/recon/cve/kev_targets.jsonl}"
-AI_SCORE_SCRIPT="${AI_SCORE_SCRIPT:-$_TRIAGE_SCRIPT_DIR/recon_ai_score.sh}"
-AI_PACK_SCRIPT="${AI_PACK_SCRIPT:-$_TRIAGE_SCRIPT_DIR/recon_ai_pack.sh}"
 
 # Score bonuses (override via env if you want to retune)
 PAYS_BONUS="${PAYS_BONUS:-2}"
@@ -167,7 +165,7 @@ fetch_es_data() {
     if (( now_epoch - last_full >= TRIAGE_FULL_INTERVAL )); then mode="full"; else mode="incremental"; fi
   fi
 
-  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","ai_recommendation","ai_relevance_score","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect","bypass_confirmed","triage_gate_state","triage_gate_attempts","triage_gate_last_probe"]'
+  local _src='["host","url","scheme","port","status_code","title","tech","webserver","ip","cname","cdn_name","content_type","content_length","root_domain","first_seen","last_seen","triage_score","triage_priority","takeover_confirmed","portscan_open_ports","portscan_at","portscan_suspect","bypass_confirmed","triage_gate_state","triage_gate_attempts","triage_gate_last_probe"]'
   local query
   if [[ "$mode" == "incremental" ]]; then
     local last_run; last_run="$(cat "$LAST_RUN_FILE" 2>/dev/null || echo 0)"; [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
@@ -1202,35 +1200,12 @@ apply_cluster_and_submission() {
         . + { triage_p0_candidate: false }
       end) |
 
-    # AI score integration - uses ai_recommendation / ai_relevance_score fetched from ES,
-    # written by recon_ai_score.sh in the prior triage pass.
-    # ai_rec=skip: -10, ai_rec=test_now + score>=80: +3 bonus+confidence=high
-    # ai_score<40 on pattern_only: -2 additional penalty
-    map(
-      (.ai_recommendation // null) as $ai_rec |
-      ((.ai_relevance_score // null) | if . != null then . else null end) as $ai_score |
-      if $ai_rec == "skip" then
-        . + {score: (.score - 10),
-             signals: (.signals + ["penalty:ai-skip"]),
-             ai_rec: $ai_rec, ai_score: $ai_score}
-      elif ($ai_rec == "test_now" and ($ai_score // 0) >= 80) then
-        . + {score: (.score + 3),
-             signals: (.signals + ["bonus:ai-test-now"]),
-             confidence: "high",
-             ai_rec: $ai_rec, ai_score: $ai_score}
-      elif ($ai_rec == "manual_review") then
-        . + {score: (.score + 1),
-             signals: (.signals + ["bonus:ai-manual-review"]),
-             ai_rec: $ai_rec, ai_score: $ai_score}
-      elif ($ai_score != null and $ai_score < 40 and (.pattern_only // false)) then
-        . + {score: (.score - 2),
-             signals: (.signals + ["penalty:ai-low-pattern"]),
-             ai_rec: ($ai_rec // null), ai_score: $ai_score}
-      else
-        . + {ai_rec: ($ai_rec // null), ai_score: ($ai_score // null)}
-      end
-    ) |
-    # Drop anything AI penalised into non-viable territory
+    # NOTE: the legacy Ollama "ai_recommendation/ai_relevance_score" pre-scorer was
+    # retired in v3.1. AI no longer biases triage scoring at all. The accuracy layer
+    # is now the Claude-Max VALIDATION agent (scripts/recon_ai_review.sh), which judges
+    # evidence-gate-CONFIRMED findings in the SQLite state machine — post-detection,
+    # not pre-score. Triage scoring is purely deterministic signal math again.
+    # Drop anything penalised into non-viable territory
     map(select(.score > 0)) |
 
     map(. + {
@@ -1248,10 +1223,9 @@ apply_cluster_and_submission() {
         else 4 end
       )
     }) |
-    # Sort: best tier first, then AI priority, then score desc.
+    # Sort: best tier first, then score desc.
     sort_by([
       .tier_rank,
-      (.ai_rec // "zz" | if . == "test_now" then 0 elif . == "manual_review" then 1 elif . == "watch" then 2 else 3 end),
       -.score
     ]) |
     .[]
@@ -1301,9 +1275,7 @@ update_es_scores() {
       "triage_ignored":             (.triage_ignored // false),
       "triage_ignored_reason":      (.triage_ignored_reason // null),
       "triage_confidence":          (.confidence // "low"),
-      "triage_pattern_only":        (.pattern_only // false),
-      "ai_rec":                     (.ai_rec // null),
-      "ai_score":                   (.ai_score // null)
+      "triage_pattern_only":        (.pattern_only // false)
     }}
   ' "$in" > "$tmp"
 
@@ -1445,21 +1417,11 @@ mark_triage_seen() {
   log "mark_triage_seen: $total_in input → stamped $ok (fail=$fail)"
 }
 
-run_ai_review_layer() {
-  local in="$1"
-  [[ "${ENABLE_OLLAMA_AI:-1}" == "1" ]] || return 0
-  # Guard on -f (file exists), NOT -x: these are invoked via `bash "$SCRIPT"`
-  # below, which does not need the execute bit. Editing a script over the
-  # \\wsl.localhost UNC path strips +x, and an -x guard here would then SILENTLY
-  # skip the whole AI layer (observed 2026-06-03). Same hardening as SCOPE_CHECK.
-  [[ -f "$AI_SCORE_SCRIPT" ]] || { warn "AI score script missing: $AI_SCORE_SCRIPT"; return 0; }
-  log "AI review layer enabled"
-  BASE_DIR="$BASE_DIR" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" ES_USER="$ES_USER" \
-    bash "$AI_SCORE_SCRIPT" "$in" || warn "AI scoring failed"
-  if [[ -f "$AI_PACK_SCRIPT" ]]; then
-    BASE_DIR="$BASE_DIR" bash "$AI_PACK_SCRIPT" || warn "AI packet build failed"
-  fi
-}
+# run_ai_review_layer: RETIRED in v3.1. The Ollama pre-scorer (recon_ai_score.sh /
+# recon_ai_pack.sh) and its ~/recon/ai_review packet queue are gone. The AI accuracy
+# layer is now scripts/recon_ai_review.sh — a Claude-Max validation agent that judges
+# evidence-gate-CONFIRMED findings in SQLite (post-detection), run by the daemon's
+# ai-review loop. Nothing to invoke from triage.
 
 # =============================================================================
 # Markdown report
@@ -1702,7 +1664,6 @@ main() {
   # from a prior run. Refreshes scope fields from the enriched verdict.
   # Primitive-safe (portscan_critical / bypass_confirmed / takeover_confirmed kept).
   demote_dropped_docs "$raw" "$enriched2" "$scored"
-  run_ai_review_layer "$scored"
 
   local total p0 p1 p2 elite high kev
   total="$(wc -l < "$scored" | tr -d ' ')"
