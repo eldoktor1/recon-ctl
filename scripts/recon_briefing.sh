@@ -16,8 +16,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true
 BASE_DIR="${BASE_DIR:-$HOME/recon}"; STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"; INDEX_NAME="${INDEX_NAME:-recon_alive}"
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
 WORKLIST="${IDOR_WORKLIST:-$BASE_DIR/idor_worklist.jsonl}"
+BRIEF_FILTER="${BRIEF_FILTER:-$REPO_DIR/tools/brief_filter.py}"
 BRIEF_DIR="${BRIEF_DIR:-$BASE_DIR/briefings}"
 BRIEFING_HOUR="${BRIEFING_HOUR:-18}"     # local hour to deliver (default 6pm)
 FORCE="${BRIEFING_FORCE:-0}"
@@ -39,6 +41,25 @@ leads="$(grep -aE '"status":"to-test"' "$WORKLIST" 2>/dev/null \
            | sort_by(-.rank) | .[0:12]' 2>/dev/null || echo '[]')"
 nlead="$(printf '%s' "$leads" | jq 'length' 2>/dev/null || echo 0)"
 
+# --- 1b) dup-risk + shared-tenant SAFETY triage (promote / hold / suppress) ---
+# Collapses product-class repeats (same endpoint on N hosts = standard shipped API
+# = dup) and suppresses shared-tenant landmines (cross-tenant test on a per-customer
+# console you don't own = third-party data). Keeps winnable, SAFE leads on top.
+show="$leads"; nsupp=0; supp_reasons=""; held="[]"
+if [[ -f "$BRIEF_FILTER" ]] && [[ "${nlead:-0}" -gt 0 ]]; then
+  filtered="$(printf '%s' "$leads" \
+    | EP_STORE="$BASE_DIR/js_recon/endpoints.jsonl" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" \
+      python3 "$BRIEF_FILTER" 2>/dev/null || echo '')"
+  if [[ -n "$filtered" ]] && printf '%s' "$filtered" | jq -e . >/dev/null 2>&1; then
+    show="$(printf '%s' "$filtered" | jq -c '.promote')"
+    held="$(printf '%s' "$filtered" | jq -c '.hold')"
+    nsupp="$(printf '%s' "$filtered" | jq -r '.suppressed_count // 0')"
+    supp_reasons="$(printf '%s' "$filtered" | jq -r '(.suppressed_reasons // {}) | to_entries | map("\(.value)× \(.key)") | join(", ")')"
+  fi
+fi
+nshow="$(printf '%s' "$show" | jq 'length' 2>/dev/null || echo 0)"
+nheld="$(printf '%s' "$held" | jq 'length' 2>/dev/null || echo 0)"
+
 # --- 2) findings ready to SUBMIT: Claude-real + verified-live-secrets ---
 subs="[]"
 if [[ -f "$V3_DB" ]]; then
@@ -58,28 +79,39 @@ fi
 [[ -n "$subs" ]] || subs="[]"
 nsub="$(printf '%s' "$subs" | jq 'length' 2>/dev/null || echo 0)"
 
-if [[ "${nlead:-0}" -eq 0 && "${nsub:-0}" -eq 0 ]]; then
-  log "nothing actionable to brief today"; touch "$sent"; exit 0
+if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 ]]; then
+  [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
+                            || log "nothing actionable to brief today"
+  touch "$sent"; exit 0
 fi
 
 # --- compile the card + durable .md ---
 md="$BRIEF_DIR/tonight_$today.md"
 {
   printf '# 🌙 TONIGHT — %s\n\n' "$today"
-  printf '## 🎯 Test these (BAC/IDOR — the money class) — %s lead(s)\n' "$nlead"
-  printf '%s' "$leads" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)\(.endpoint)`\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  printf '## 🎯 Test these (BAC/IDOR — the money class) — %s winnable lead(s)\n' "$nshow"
+  printf '%s' "$show" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)\(.endpoint)`\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  if [[ "${nheld:-0}" -gt 0 ]]; then
+    printf '\n\n## 🟡 If time (medium dup-risk) — %s\n' "$nheld"
+    printf '%s' "$held" | jq -r '.[] | "- [\(.impact)] \(.vuln_type) `\(.host)\(.endpoint)` — \(.hold_reason // "")"' 2>/dev/null
+  fi
+  if [[ "${nsupp:-0}" -gt 0 ]]; then
+    printf '\n\n## 🔕 Suppressed — %s lead(s): %s\n' "$nsupp" "$supp_reasons"
+    printf '_(product-class duplicates and shared-tenant/third-party-data landmines — not worth your evening, kept here for audit)_\n'
+  fi
   printf '\n\n## ✅ Ready to submit (validated) — %s\n' "$nsub"
   printf '%s' "$subs" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
   printf '\n\n_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
-log "🌙 briefing compiled · 🎯 $nlead IDOR lead(s) · ✅ $nsub to-submit → $md"
+log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed ($supp_reasons) · ✅ $nsub to-submit → $md"
 
 # --- deliver to Discord (#review) ---
 rh="$(discord_hook review 2>/dev/null || true)"
 if [[ -n "$rh" ]]; then
-  card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR):**\n' "$today")"
-  card+="$(printf '%s' "$leads" | jq -r '.[] | "• **\(.impact)** \(.vuln_type) `\(.host)\(.endpoint)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1300)"
+  card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nshow")"
+  card+="$(printf '%s' "$show" | jq -r '.[] | "• **\(.impact)** \(.vuln_type) `\(.host)\(.endpoint)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1200)"
+  [[ "${nsupp:-0}" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s suppressed: %s_' "$nsupp" "$supp_reasons")"
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 400)"
   discord_post "$rh" "$(jq -nc --arg c "${card:0:1950}" '{content:$c}')" >/dev/null 2>&1 \
