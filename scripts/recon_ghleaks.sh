@@ -50,7 +50,11 @@ for dom in "${domains[@]}"; do
 
   # A) asset discovery: subdomains mentioned in GitHub (feeds freshness)
   if command -v github-subdomains >/dev/null 2>&1; then
-    n="$(timeout 90 github-subdomains -d "$dom" -t "$TOKEN" 2>/dev/null | grep -aiE "\.${dom//./\\.}$" | anew "$GH_SUBS_OUT" 2>/dev/null | grep -c . || echo 0)"
+    # grep -c already prints 0 (and exits 1) when there are no matches; the old
+    # `|| echo 0` appended a SECOND 0 -> n="0\n0" -> [[ -gt ]] arithmetic error.
+    # `|| true` swallows the exit without printing a duplicate count.
+    n="$(timeout 90 github-subdomains -d "$dom" -t "$TOKEN" 2>/dev/null | grep -aiE "\.${dom//./\\.}$" | anew "$GH_SUBS_OUT" 2>/dev/null | grep -c . || true)"
+    n="${n//[^0-9]/}"   # belt-and-suspenders: keep digits only
     [[ "${n:-0}" -gt 0 ]] && { newsubs=$((newsubs+n)); log "   🔎 $dom — $n new subdomain(s) from GitHub → $GH_SUBS_OUT"; }
   fi
 
