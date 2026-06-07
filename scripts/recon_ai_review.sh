@@ -306,6 +306,35 @@ consensus() {
   fi
 }
 
+# ---- Claude-AUTHORED report (quality -> reports -> rewards) -----------------------------
+REPORT_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string"},"severity":{"type":"string","enum":["Critical","High","Medium","Low","Informational"]},"cvss_score":{"type":"number","minimum":0,"maximum":10},"cvss_vector":{"type":"string"},"impact":{"type":"string"},"poc_steps":{"type":"array","maxItems":10,"items":{"type":"string"}},"dedup_assessment":{"type":"string"},"reward_likelihood":{"type":"number","minimum":0,"maximum":1},"recommended_action":{"type":"string","enum":["submit","hold-needs-more"]}},"required":["title","severity","impact","poc_steps","recommended_action"]}'
+
+# author_report <model> -> JSON report packet (or empty). Globals: f, EV_DIR, HAS_SHOT, FINAL_R
+author_report() {
+  local model="$1" out pr shotline=""
+  pr="$(cat "$EV_DIR/pr.txt" 2>/dev/null || true)"
+  local -a targs
+  if [[ "$HAS_SHOT" == "1" ]]; then targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk); shotline="A screenshot ./screenshot.jpg is in your working dir — view it as evidence."; else targs=(--tools ""); fi
+  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(cat <<EOF
+You are writing a bug-bounty report for a CONFIRMED, panel-validated finding. Produce a
+high-quality, HONEST report packet. CRITICAL: do NOT overclaim severity — an overclaimed
+report gets closed N/A and damages researcher signal. Rate severity to what a triager would
+ACTUALLY accept given ONLY the evidence below. PoC steps must be reproducible and read-only
+(the PoC is "this responds/leaks without auth", never a data harvest). Assess duplicate and
+reward likelihood honestly; set recommended_action='submit' only if genuinely report-worthy,
+else 'hold-needs-more'.
+
+$shotline
+PROBE EVIDENCE (real responses):
+${pr:-  (none)}
+FINDING + ASSET CONTEXT (JSON):
+$f
+PANEL VERDICT + REASONING: $FINAL_R
+EOF
+)" --model "$model" "${targs[@]}" --no-session-persistence --json-schema "$REPORT_SCHEMA" --output-format json </dev/null 2>/dev/null )"
+  printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null
+}
+
 _lt() { awk "BEGIN{exit !(($1)<($2))}"; }   # float less-than (exit 0 if $1<$2)
 
 reviewed=0; real=0; fp=0; human=0; escalated=0; withshot=0
@@ -344,6 +373,14 @@ while IFS= read -r fjson; do
   consensus    # Claude is the brain: primary investigates (multimodal+probe) -> adversarial panel adjudicates
   v="$FINAL_V"; c="$FINAL_C"; r="$FINAL_R"
   [[ "${RAN_PANEL:-0}" == "1" ]] && escalated=$((escalated+1))
+  # Claude AUTHORS the report for a real finding (quality -> rewards), before evidence is cleaned
+  if [[ "$v" == "real" ]]; then
+    rep="$(author_report "$CONSENSUS_MODEL")"
+    if [[ -n "$rep" && "$rep" != "null" ]]; then
+      V3_DB="$V3_DB" python3 "$STATE_PY" set-report "$fid" "$rep" >/dev/null 2>&1 || true
+      log "        ↳ 📝 report authored ($(printf '%s' "$rep" | jq -r '"\(.severity) · \(.recommended_action) · reward~\(.reward_likelihood // "?")"' 2>/dev/null))"
+    fi
+  fi
   rm -rf "$EV_DIR" 2>/dev/null || true
 
   V3_DB="$V3_DB" python3 "$STATE_PY" ai-verdict "$fid" "$v" "$c" "$r" >/dev/null 2>&1 || true
