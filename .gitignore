@@ -41,3 +41,6 @@ recon_recovery_pack/
 *.pid
 *.lock
 tools/__pycache__/
+
+# github-subdomains / scanner stray outputs in repo root
+/*.txt

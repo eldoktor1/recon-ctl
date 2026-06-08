@@ -53,7 +53,11 @@ for dom in "${domains[@]}"; do
     # grep -c already prints 0 (and exits 1) when there are no matches; the old
     # `|| echo 0` appended a SECOND 0 -> n="0\n0" -> [[ -gt ]] arithmetic error.
     # `|| true` swallows the exit without printing a duplicate count.
-    n="$(timeout 90 github-subdomains -d "$dom" -t "$TOKEN" 2>/dev/null | grep -aiE "\.${dom//./\\.}$" | anew "$GH_SUBS_OUT" 2>/dev/null | grep -c . || true)"
+    # github-subdomains ALSO writes a <domain>.txt to CWD (default -o) — run it in a scratch
+    # dir so it doesn't litter the repo root; we read its STDOUT (the pipe) regardless.
+    ghtmp="$(mktemp -d)"
+    n="$( ( cd "$ghtmp" && timeout 90 github-subdomains -d "$dom" -t "$TOKEN" 2>/dev/null ) | grep -aiE "\.${dom//./\\.}$" | anew "$GH_SUBS_OUT" 2>/dev/null | grep -c . || true)"
+    rm -rf "$ghtmp" 2>/dev/null || true
     n="${n//[^0-9]/}"   # belt-and-suspenders: keep digits only
     [[ "${n:-0}" -gt 0 ]] && { newsubs=$((newsubs+n)); log "   🔎 $dom — $n new subdomain(s) from GitHub → $GH_SUBS_OUT"; }
   fi
