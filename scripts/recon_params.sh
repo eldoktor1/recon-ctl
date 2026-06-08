@@ -60,7 +60,7 @@ fi
 PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-30}"
 PARAM_PARALLEL="${PARAM_PARALLEL:-8}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited)
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
-PARAMS_ZERO_COOLDOWN_HOURS="${PARAMS_ZERO_COOLDOWN_HOURS:-6}"
+PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so they don't hog the cycle (was a 6h re-crawl that starved new-host discovery)
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-1200}"
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
@@ -114,8 +114,12 @@ crawl_host() {
   fi
   log "  $host — ${raw_n:-0} param URLs"
   if [[ "${raw_n:-0}" -eq 0 ]]; then
-    local zero_secs=$(( ${PARAMS_ZERO_COOLDOWN_HOURS:-6} * 3600 ))
-    printf '%s\t%s\n' "$(( now - PARAMS_COOLDOWN_DAYS*86400 + zero_secs ))" "$host" > "$hd/scanned"
+    # param-POOR host (API/staging/SPA, no query-string surface): FUTURE-shift the scanned
+    # stamp so it stays in cooldown for PARAMS_ZERO_COOLDOWN_DAYS. The old code shifted it
+    # into the PAST (6h re-crawl), so high-score param-less hosts got re-crawled every cycle
+    # and starved out new-host discovery — that's why the catalog plateaued. Now the budget
+    # goes to hosts that actually yield params.
+    printf '%s\t%s\n' "$(( now + (PARAMS_ZERO_COOLDOWN_DAYS - PARAMS_COOLDOWN_DAYS)*86400 ))" "$host" > "$hd/scanned"
     return 0
   fi
   if [[ -x "$QSREPLACE" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
