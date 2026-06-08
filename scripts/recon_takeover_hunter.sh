@@ -749,14 +749,17 @@ probe_host() {
       fi
       ;;
     MEDIUM)
-      # Write to WATCH file — periodic recheck
-      # Fix 7: add last_verified epoch column
+      # Write to WATCH file — periodic recheck. DEDUP: a host that stays MEDIUM is re-probed
+      # every cycle and would otherwise append a NEW line each time, ballooning the WATCH file
+      # with duplicates (seen: 3.6k lines / 187 distinct hosts). Only add if not already watched.
       ( flock -x 202
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-          "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
-          "$now_epoch" \
-          >> "$WATCH_FILE"
-        printf '%s\t%s\t%s\tWATCH\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+        if ! grep -qF "$(printf '\t%s\t' "$host")" "$WATCH_FILE" 2>/dev/null; then
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$now_iso" "$host" "$svc" "$cname" "$confidence" "$stages_str" "$diff" "$notes" \
+            "$now_epoch" \
+            >> "$WATCH_FILE"
+          printf '%s\t%s\t%s\tWATCH\t%s\n' "$now_iso" "$host" "$svc" "$confidence" >> "$EVENT_LOG"
+        fi
       ) 202>"${WATCH_FILE}.lock"
       log "  ⚠ MEDIUM watching: $host ($svc, $stages_str)"
 
