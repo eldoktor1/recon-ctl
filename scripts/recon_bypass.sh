@@ -120,7 +120,11 @@ query="$(jq -nc \
         {range: {triage_score: {gte: $min_score}}}
       ],
       must_not: [
-        {range: {bypass_at: {gte: $cutoff}}}
+        {range: {bypass_at: {gte: $cutoff}}},
+        {term: {triage_out_of_scope: true}},
+        {wildcard: {host: "*.corp.*"}},
+        {wildcard: {host: "*intranet*"}},
+        {wildcard: {host: "*dev-internal*"}}
       ]
     }},
     sort: [{triage_score: {order: "desc"}}]

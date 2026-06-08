@@ -789,8 +789,15 @@ apply_scope_kev_enrichment() {
        elif ($kev_needs_verify == "version-or-surface-unconfirmed") then $kev_unverified_bonus
        else $kev_bonus end) as $kev_b |
 
+      # HARD out-of-scope (doctrine): internal/corp infra (*.corp.*, intranet, dev-internal)
+      # is out of scope regardless of program scope rules — must never reach ANY active stage
+      # (bypass/params/nday/gate). Program scope can mark a .corp. host in_scope (it sits under
+      # an in-scope apex); this override forces out_of_scope so the active lanes skip it.
+      (($r.host // "") | test("\\.corp\\.|(^|\\.)intranet(\\.|$)|(^|[.-])dev-internal([.-]|$)"; "i")) as $hard_oos |
+      (($s.out_of_scope // false) or $hard_oos) as $is_oos |
+
       # Out-of-scope penalty
-      (if ($s.out_of_scope // false) then $oos_penalty else 0 end) as $oos_b |
+      (if $is_oos then $oos_penalty else 0 end) as $oos_b |
 
       ($r.score + $tier_bonus + $pays_b + $kev_b + $oos_b) as $eff |
 
@@ -798,7 +805,7 @@ apply_scope_kev_enrichment() {
         score: $eff,
         base_score_pre_brain: $r.score,
         in_scope:        ($s.in_scope     // false),
-        out_of_scope:    ($s.out_of_scope // false),
+        out_of_scope:    $is_oos,
         pays:            ($s.pays         // false),
         program:         ($s.program      // null),
         platform:        ($s.platform     // null),
