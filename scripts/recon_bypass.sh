@@ -127,7 +127,8 @@ query="$(jq -nc \
         {wildcard: {host: "*dev-internal*"}},
         {wildcard: {host: "*.k8s.*"}},
         {wildcard: {host: "*.internal.*"}},
-        {wildcard: {host: "*.cluster.local"}}
+        {wildcard: {host: "*.cluster.local"}},
+        {wildcard: {host: "*.found.io"}}
       ]
     }},
     sort: [{triage_score: {order: "desc"}}]

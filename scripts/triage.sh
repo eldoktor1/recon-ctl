@@ -793,7 +793,7 @@ apply_scope_kev_enrichment() {
       # is out of scope regardless of program scope rules — must never reach ANY active stage
       # (bypass/params/nday/gate). Program scope can mark a .corp. host in_scope (it sits under
       # an in-scope apex); this override forces out_of_scope so the active lanes skip it.
-      (($r.host // "") | test("\\.corp\\.|(^|[.-])intranet([.-]|$)|(^|[.-])dev-internal([.-]|$)|\\.k8s\\.|\\.internal\\.|\\.cluster\\.local"; "i")) as $hard_oos |
+      (($r.host // "") | test("\\.corp\\.|intranet|(^|[.-])dev-internal([.-]|$)|\\.k8s\\.|\\.internal\\.|\\.cluster\\.local|\\.found\\.io"; "i")) as $hard_oos |
       (($s.out_of_scope // false) or $hard_oos) as $is_oos |
 
       # Out-of-scope penalty
