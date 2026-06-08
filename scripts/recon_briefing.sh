@@ -33,12 +33,14 @@ if [[ "$FORCE" != "1" ]]; then
   [[ -f "$sent" ]] && exit 0                              # already delivered today
 fi
 
-# --- 1) IDOR/BAC worklist: top leads to test (rank = impact weight + confidence) ---
+# --- 1) IDOR/BAC worklist: rank then feed a WIDE pool to the filter. We must filter
+# BEFORE capping — if 88% of the worklist is product-class/shared-tenant noise, a
+# pre-filter .[0:12] would be all noise and crowd out the genuine leads ranked #13+. -->
 leads="$(grep -aE '"status":"to-test"' "$WORKLIST" 2>/dev/null \
   | jq -c '. ' 2>/dev/null \
   | jq -s 'unique_by(.host+.endpoint)
            | map(. + {rank: (({"critical":4,"high":3,"medium":2,"low":1}[.impact]) // 0) + (.confidence // 0)})
-           | sort_by(-.rank) | .[0:12]' 2>/dev/null || echo '[]')"
+           | sort_by(-.rank) | .[0:80]' 2>/dev/null || echo '[]')"
 nlead="$(printf '%s' "$leads" | jq 'length' 2>/dev/null || echo 0)"
 
 # --- 1b) dup-risk + shared-tenant SAFETY triage (promote / hold / suppress) ---
@@ -51,8 +53,8 @@ if [[ -f "$BRIEF_FILTER" ]] && [[ "${nlead:-0}" -gt 0 ]]; then
     | EP_STORE="$BASE_DIR/js_recon/endpoints.jsonl" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" \
       python3 "$BRIEF_FILTER" 2>/dev/null || echo '')"
   if [[ -n "$filtered" ]] && printf '%s' "$filtered" | jq -e . >/dev/null 2>&1; then
-    show="$(printf '%s' "$filtered" | jq -c '.promote')"
-    held="$(printf '%s' "$filtered" | jq -c '.hold')"
+    show="$(printf '%s' "$filtered" | jq -c '.promote | .[0:12]')"
+    held="$(printf '%s' "$filtered" | jq -c '.hold | .[0:8]')"
     nsupp="$(printf '%s' "$filtered" | jq -r '.suppressed_count // 0')"
     supp_reasons="$(printf '%s' "$filtered" | jq -r '(.suppressed_reasons // {}) | to_entries | map("\(.value)× \(.key)") | join(", ")')"
   fi
