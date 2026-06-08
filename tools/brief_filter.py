@@ -168,7 +168,28 @@ def classify(leads):
     }
 
 
+def classify_host(host):
+    """Host-level verdict (no endpoint needed) — used by the idor analyzer to skip
+    per-customer tenant consoles BEFORE spending Claude tokens. A host is a
+    shared-tenant console when its leftmost label is a machine-generated UUID/hash
+    AND it has many siblings under one wildcard apex (=> each sibling is a different
+    owner; cross-tenant testing = third-party data, over the hard line)."""
+    host = (host or "").strip().lower()
+    labels = host.split(".")
+    leftmost = labels[0] if labels else ""
+    apex = ".".join(labels[1:]) if len(labels) > 2 else host
+    random_label = label_is_random(leftmost)
+    siblings = es_sibling_count(apex) if random_label else 0
+    shared = bool(random_label and siblings >= TENANT_MANY)
+    return {"host": host, "shared_tenant": shared, "siblings": siblings,
+            "apex": apex, "random_label": random_label}
+
+
 def main():
+    # host-classification mode: `brief_filter.py --host <fqdn>` -> JSON verdict
+    if len(sys.argv) >= 3 and sys.argv[1] == "--host":
+        print(json.dumps(classify_host(sys.argv[2])))
+        return
     try:
         leads = json.load(sys.stdin)
     except Exception:

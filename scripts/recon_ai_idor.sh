@@ -20,8 +20,11 @@ log()  { printf '[%s AI-IDOR] %s\n'      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 warn() { printf '[%s AI-IDOR WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true
 BASE_DIR="${BASE_DIR:-$HOME/recon}"; STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"; INDEX_NAME="${INDEX_NAME:-recon_alive}"
+BRIEF_FILTER="${BRIEF_FILTER:-$REPO_DIR/tools/brief_filter.py}"
 EP_STORE="${JS_ENDPOINT_STORE:-$BASE_DIR/js_recon/endpoints.jsonl}"
 WORKLIST="${IDOR_WORKLIST:-$BASE_DIR/idor_worklist.jsonl}"
 SEEN="${IDOR_SEEN:-$STATE_DIR/idor_analyzed_hosts.txt}"
@@ -52,6 +55,20 @@ timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK" 
 
 total_leads=0
 for host in "${hosts[@]}"; do
+  # ---- SHARED-TENANT SAFETY GATE (source-level) ----
+  # Skip per-customer tenant consoles (UUID label + many siblings under one wildcard,
+  # e.g. <uuid>.unifi-hosting.ui.com — 4600+ of them). Each is a different owner, so any
+  # BAC/IDOR test = third-party data (over the hard line). Don't spend Claude on them,
+  # don't worklist them, don't post them. The operator can test consoles they own by hand.
+  if [[ -f "$BRIEF_FILTER" ]]; then
+    hv="$(ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" python3 "$BRIEF_FILTER" --host "$host" 2>/dev/null)"
+    if [[ -n "$hv" ]] && [[ "$(printf '%s' "$hv" | jq -r '.shared_tenant // false' 2>/dev/null)" == "true" ]]; then
+      sib="$(printf '%s' "$hv" | jq -r '.siblings // 0' 2>/dev/null)"
+      printf '%s\n' "$host" >> "$SEEN"
+      log "   🔕 $host — shared-tenant console (1 of ~$sib under one wildcard); skipped (third-party data, not safely testable)"
+      continue
+    fi
+  fi
   prog="$(jq -r --arg h "$host" 'select(.host==$h)|.program' "$EP_STORE" 2>/dev/null | awk 'NF{print;exit}')"
   eps="$(jq -r --arg h "$host" 'select(.host==$h)|.endpoint' "$EP_STORE" 2>/dev/null | awk 'NF && !s[$0]++' | head -n "$IDOR_EP_CAP")"
   necount="$(printf '%s' "$eps" | grep -c . 2>/dev/null)"
@@ -94,8 +111,19 @@ EOF
   printf '%s' "$cands" | jq -r '.[] | "        ↳ [\(.impact)|\(.confidence)] \(.vuln_type): \(.endpoint)"' 2>/dev/null \
     | while IFS= read -r l; do log "$l"; done
 
-  # high-value leads -> #review for tonight
-  hot="$(printf '%s' "$cands" | jq -c '[.[]|select((.impact=="critical" or .impact=="high") and .confidence>=0.6)]' 2>/dev/null)"
+  # high-value leads -> #review for tonight — FILTERED so product-class duplicates and
+  # shared-tenant landmines never pollute the live feed (worklist still keeps all, for audit).
+  postable="$cands"
+  if [[ -f "$BRIEF_FILTER" ]]; then
+    fl="$(printf '%s' "$cands" | jq -c --arg h "$host" 'map(. + {host:$h})' 2>/dev/null \
+          | EP_STORE="$EP_STORE" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" python3 "$BRIEF_FILTER" 2>/dev/null)"
+    if [[ -n "$fl" ]] && printf '%s' "$fl" | jq -e . >/dev/null 2>&1; then
+      postable="$(printf '%s' "$fl" | jq -c '(.promote + .hold)')"
+      drop="$(printf '%s' "$fl" | jq -r '.suppressed_count // 0')"
+      [[ "${drop:-0}" -gt 0 ]] && log "   🔕 $host — $drop lead(s) suppressed from #review (dup/shared-tenant)"
+    fi
+  fi
+  hot="$(printf '%s' "$postable" | jq -c '[.[]|select((.impact=="critical" or .impact=="high") and .confidence>=0.6)]' 2>/dev/null)"
   if [[ "$(printf '%s' "$hot" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]]; then
     rh="$(discord_hook review 2>/dev/null || true)"
     if [[ -n "$rh" ]]; then
