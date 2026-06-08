@@ -61,7 +61,7 @@ PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-30}"
 PARAM_PARALLEL="${PARAM_PARALLEL:-8}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited)
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
 PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so they don't hog the cycle (was a 6h re-crawl that starved new-host discovery)
-PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-1200}"
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-5000}"   # was 1200: too shallow once the 30d zero-param cooldown parks the top hosts → cycles starved to 1-5; reach deeper for un-cooled candidates
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
@@ -189,6 +189,7 @@ cmd_collect() {
        "$WORK/cand_div.tsv" \
   | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' \
   | grep -vE '^(api|apis|graphql|grpc|gql|mqtt|push|device|devices|iot|broker|smtp|imap|pop3?|mx[0-9]*|ns[0-9]+|dns)[.-]' \
+  | grep -vE '^(auth|login|signin|sso|oauth|oidc|idp|saml|adfs|keycloak|prometheus|alertmanager|grafana|metrics|daemon|repo|repos|registry|artifactory|nexus)[.-]' \
   > "$WORK/cand.tsv"
   rm -f "$WORK/cand_div.tsv"
 
