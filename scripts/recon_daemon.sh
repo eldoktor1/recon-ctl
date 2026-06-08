@@ -472,15 +472,15 @@ PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
 PARAMS_INTERVAL="${PARAMS_INTERVAL:-1800}"
 PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-3600}"
 run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
-# Active-probe the catalog: prove canary REFLECTION (xss) and SQL-error DIFFERENTIAL (sqli)
-# on PAYING targets -> writes params/verify_<cls>.jsonl leads that feed xss-confirm /
-# param-confirm. Without this the catalog fills but the confirmers starve. Safe primitives
-# (canary GET, "'" error-signature), pays-gated + paced in recon_params.sh, Mullvad-gated.
+# Active-probe the catalog for canary REFLECTION -> writes params/verify_xss.jsonl, the leads
+# xss-confirm consumes (headless marker-exec). Without this the catalog fills but xss-confirm
+# starves. Only `verify xss` here: param-confirm already does the SQLi/SSTI/redirect probes
+# directly off the catalog (and db_confirms), so `verify sqli` would duplicate that work and
+# orphan verify_sqli.jsonl. Safe primitive (canary GET), pays-gated + paced, Mullvad-gated.
 run_params_verify() {
   v21_killed params && return 0
   [[ -f "$PARAMS_SCRIPT" ]] || return 0
-  run_scanner bash "$PARAMS_SCRIPT" verify xss  || true
-  run_scanner bash "$PARAMS_SCRIPT" verify sqli || true
+  run_scanner bash "$PARAMS_SCRIPT" verify xss || true
 }
 
 # ---- Port scanner (recon_portscan.sh) ----------------------------------------
