@@ -392,12 +392,15 @@ while IFS= read -r fjson; do
             '{claude_verdict:$v, claude_confidence:($c|tonumber? // 0.5), claude_reason:$r, claude_reviewed_at:$t, claude_verify_model:$m}')"
     es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --argjson d "$doc" '{doc:$d}')" >/dev/null 2>&1 || true
   fi
-  # v3 Discord: ping the human ONLY on a verdict that needs a decision (real /
-  # needs-human). fp is auto-dismissed silently. This is THE human-review trigger.
-  if [[ "$v" == "real" || "$v" == "needs-human" ]]; then
+  # v3 Discord: ping #review LIVE only on a CONFIRMED `real` verdict — the rare,
+  # actionable "review & submit" event worth interrupting the operator. `fp` is
+  # auto-dismissed silently; `needs-human` is no longer a live ping (it's a "maybe",
+  # not actionable right now) — it's batched into the nightly briefing instead. This
+  # keeps real-time #review reserved for things that actually warrant attention now.
+  if [[ "$v" == "real" ]]; then
     rh="$(discord_hook review 2>/dev/null || true)"
     if [[ -n "$rh" ]]; then
-      [[ "$v" == "real" ]] && tag="✅ REAL — review & submit" || tag="🔍 NEEDS-HUMAN — investigate"
+      tag="✅ REAL — review & submit"
       discord_post "$rh" "$(jq -nc --arg t "$tag" --arg h "$host" --arg vc "${vclass:-?}" --arg c "$c" --arg m "$model_used" --arg r "$r" \
         '{content:("**"+$t+"**\n`"+$h+"`  ["+$vc+"]  conf="+$c+"  ("+$m+")\n"+$r+"\n→ APPROVE / DISMISS / INVESTIGATE — human-gated, never auto-submitted")}')" >/dev/null 2>&1 || true
     fi

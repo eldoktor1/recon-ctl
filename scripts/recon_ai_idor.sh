@@ -111,27 +111,10 @@ EOF
   printf '%s' "$cands" | jq -r '.[] | "        ↳ [\(.impact)|\(.confidence)] \(.vuln_type): \(.endpoint)"' 2>/dev/null \
     | while IFS= read -r l; do log "$l"; done
 
-  # high-value leads -> #review for tonight — FILTERED so product-class duplicates and
-  # shared-tenant landmines never pollute the live feed (worklist still keeps all, for audit).
-  postable="$cands"
-  if [[ -f "$BRIEF_FILTER" ]]; then
-    fl="$(printf '%s' "$cands" | jq -c --arg h "$host" 'map(. + {host:$h})' 2>/dev/null \
-          | EP_STORE="$EP_STORE" ES_URL="$ES_URL" INDEX_NAME="$INDEX_NAME" python3 "$BRIEF_FILTER" 2>/dev/null)"
-    if [[ -n "$fl" ]] && printf '%s' "$fl" | jq -e . >/dev/null 2>&1; then
-      postable="$(printf '%s' "$fl" | jq -c '(.promote + .hold)')"
-      drop="$(printf '%s' "$fl" | jq -r '.suppressed_count // 0')"
-      [[ "${drop:-0}" -gt 0 ]] && log "   🔕 $host — $drop lead(s) suppressed from #review (dup/shared-tenant)"
-    fi
-  fi
-  hot="$(printf '%s' "$postable" | jq -c '[.[]|select((.impact=="critical" or .impact=="high") and .confidence>=0.6)]' 2>/dev/null)"
-  if [[ "$(printf '%s' "$hot" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]]; then
-    rh="$(discord_hook review 2>/dev/null || true)"
-    if [[ -n "$rh" ]]; then
-      msg="$(printf '%s' "$hot" | jq -r --arg h "$host" --arg p "${prog:-?}" \
-        '"🎯 **BAC/IDOR leads — \($h)** ['+'"'+'$p'+'"'+']\n" + ([.[]|"• **\(.impact)** \(.vuln_type) `\(.endpoint)` (conf \(.confidence))\n   why: \(.why)\n   test: \(.test)"]|join("\n"))' 2>/dev/null)"
-      [[ -n "$msg" ]] && discord_post "$rh" "$(jq -nc --arg c "${msg:0:1900}" '{content:$c}')" >/dev/null 2>&1 || true
-    fi
-  fi
+  # NO live ping. IDOR leads are SPECULATIVE (conf~0.6 guesses needing a 2-account
+  # test) — they accumulate in the worklist and are filtered + ranked into the SINGLE
+  # nightly briefing. A part-time hunter reads ONE card at 6:30pm, not a live drip of
+  # maybes. Real-time #review is reserved for CONFIRMED (Claude-`real`) findings only.
 done
 tail -n 5000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
 log "🧠 ai-idor done · 🎯 $total_leads BAC/IDOR lead(s) → $WORKLIST (your evening worklist)"

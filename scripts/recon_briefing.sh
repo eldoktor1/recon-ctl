@@ -81,7 +81,26 @@ fi
 [[ -n "$subs" ]] || subs="[]"
 nsub="$(printf '%s' "$subs" | jq 'length' 2>/dev/null || echo 0)"
 
-if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 ]]; then
+# --- 3) needs-human verdicts: Claude couldn't settle it — batched here (no live ping) ---
+needh="[]"
+if [[ -f "$V3_DB" ]]; then
+  needh="$(V3_DB="$V3_DB" python3 - <<'PY' 2>/dev/null || echo '[]'
+import os,sqlite3,json
+try:
+    c=sqlite3.connect(os.environ["V3_DB"]); c.row_factory=sqlite3.Row
+    rows=[dict(r) for r in c.execute(
+      "SELECT host,vuln_class,COALESCE(ai_confidence,confidence) cf,COALESCE(ai_reason,'') reason "
+      "FROM findings WHERE ai_verdict='needs-human' AND state IN ('confirmed','reported') "
+      "ORDER BY cf DESC LIMIT 8")]
+    print(json.dumps(rows))
+except Exception: print('[]')
+PY
+)"
+fi
+[[ -n "$needh" ]] || needh="[]"
+nneed="$(printf '%s' "$needh" | jq 'length' 2>/dev/null || echo 0)"
+
+if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
                             || log "nothing actionable to brief today"
   touch "$sent"; exit 0
@@ -103,10 +122,14 @@ md="$BRIEF_DIR/tonight_$today.md"
   fi
   printf '\n\n## ✅ Ready to submit (validated) — %s\n' "$nsub"
   printf '%s' "$subs" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
+  if [[ "${nneed:-0}" -gt 0 ]]; then
+    printf '\n\n## 🔍 Needs a human eye (Claude unsure) — %s\n' "$nneed"
+    printf '%s' "$needh" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
+  fi
   printf '\n\n_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
-log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed ($supp_reasons) · ✅ $nsub to-submit → $md"
+log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed · ✅ $nsub to-submit · 🔍 $nneed needs-human → $md"
 
 # --- deliver to Discord (#review) ---
 rh="$(discord_hook review 2>/dev/null || true)"
@@ -116,6 +139,7 @@ if [[ -n "$rh" ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s suppressed: %s_' "$nsupp" "$supp_reasons")"
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 400)"
+  [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"; }
   discord_post "$rh" "$(jq -nc --arg c "${card:0:1950}" '{content:$c}')" >/dev/null 2>&1 \
     && log "🌙 briefing posted to #review" || log "discord post failed (card saved to $md)"
 fi
