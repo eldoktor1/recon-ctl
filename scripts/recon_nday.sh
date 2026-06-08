@@ -26,6 +26,12 @@ CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || C
 CLAUDE_MODEL="${CLAUDE_NDAY_MODEL:-sonnet}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-150}"
 NDAY_HOSTS="${NDAY_HOSTS:-12}"
+SAFE_PROBE="${SAFE_PROBE:-$SCRIPT_DIR/recon_safe_probe.sh}"
+NDAY_AUTOCONFIRM="${NDAY_AUTOCONFIRM:-1}"   # 1 = run Claude's safe verify_probe via the harness → auto-confirm
+V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
+# second-pass schema: given the real probe response, is the CVE actually confirmed?
+CONFIRM_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"confirmed":{"type":"boolean"},"reason":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["confirmed","reason","confidence"]}'
+score_for() { case "$1" in critical) echo 90;; high) echo 75;; medium) echo 55;; *) echo 40;; esac; }
 es() { curl -fsS -m 25 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 
 mkdir -p "$STATE_DIR" "$(dirname "$WORKLIST")"; touch "$SEEN"
@@ -33,7 +39,7 @@ exec 9>"$STATE_DIR/nday.lock"; flock -n 9 || { warn "already running"; exit 0; }
 [[ -n "$CLAUDE_BIN" && -x "$CLAUDE_BIN" ]] || { warn "claude CLI not found — skipping"; exit 0; }
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 
-SCHEMA='{"type":"object","additionalProperties":false,"properties":{"likely_vulnerable":{"type":"boolean"},"cve":{"type":"string"},"reason":{"type":"string"},"exploit_available":{"type":"boolean"},"verify_method":{"type":"string"},"impact":{"type":"string","enum":["critical","high","medium","low"]},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["likely_vulnerable","reason","verify_method","impact","confidence"]}'
+SCHEMA='{"type":"object","additionalProperties":false,"properties":{"likely_vulnerable":{"type":"boolean"},"cve":{"type":"string"},"reason":{"type":"string"},"exploit_available":{"type":"boolean"},"verify_method":{"type":"string"},"verify_probe":{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"method":{"type":"string","enum":["GET","HEAD","OPTIONS"]},"confirm_signal":{"type":"string"}},"required":["path","method","confirm_signal"]},"impact":{"type":"string","enum":["critical","high","medium","low"]},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["likely_vulnerable","reason","verify_method","impact","confidence"]}'
 
 # in-scope+paying assets with a KEV/breaking-vuln match, freshest first, not yet assessed
 q="$(jq -nc --argjson n "$NDAY_HOSTS" '{size:($n*4),
@@ -69,9 +75,17 @@ MATCHED CVE(s): ${cves:-unknown}
 
 Judge: is this host LIKELY actually vulnerable (running version plausibly in range for the
 CVE), or is it just a same-product tech-class match (FP)? Is a public exploit/PoC available?
-Give the single SAFEST way to verify it right now (a version banner, a specific path, a
-benign request — not exploitation). Rate impact + confidence. Set likely_vulnerable=false if
-the evidence is only a product-name match with no version signal.
+Rate impact + confidence. Set likely_vulnerable=false if the evidence is only a product-name
+match with no version signal.
+
+DESIGN THE SAFE CHECK (verify_probe): give the single best UNAUTHENTICATED, NON-DESTRUCTIVE
+request that would CONFIRM the version is in range — a path that returns a version
+banner/string, a fingerprintable endpoint, an OPTIONS/HEAD that reveals the build. It MUST be
+GET/HEAD/OPTIONS only, no creds, no exploitation — recon, not attack. Provide:
+  path           — the request path (e.g. "/magento_version", "/wp-includes/version.php"); "/" if just headers
+  method         — GET | HEAD | OPTIONS
+  confirm_signal — exactly what in the response confirms the in-range version (a regex/string/header)
+If no safe unauthenticated request can confirm the version, omit verify_probe entirely.
 EOF
 )"
   out="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$CLAUDE_MODEL" --tools "" \
@@ -80,19 +94,67 @@ EOF
   [[ -z "$so" || "$so" == "null" ]] && continue
   lv="$(printf '%s' "$so" | jq -r '.likely_vulnerable // false')"
   conf="$(printf '%s' "$so" | jq -r '.confidence // 0')"
-  if [[ "$lv" == "true" ]] && awk "BEGIN{exit !(${conf:-0}>=0.5)}"; then
-    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    # n-day leads share the worklist (so they reach the briefing) but are NOT IDOR:
-    # keep endpoint EMPTY and carry the CVE in its own field, so the briefing renders
-    # "host — CVE" cleanly instead of concatenating host+"CVE: ..." into a fake path.
+  if [[ "$lv" != "true" ]] || ! awk "BEGIN{exit !(${conf:-0}>=0.5)}"; then
+    log "   · $host — KEV FP (tech-class only, not in-range)"
+    continue
+  fi
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  cve_id="$(printf '%s' "$so" | jq -r '.cve // empty')"; [[ -z "$cve_id" ]] && cve_id="$cves"
+  impact="$(printf '%s' "$so" | jq -r '.impact')"
+
+  # ---- AUTO-CONFIRM LOOP: run Claude's safe verify_probe via the TRUSTED harness, then
+  # re-judge the real response. A confirm -> a CONFIRMED finding in the DB (-> ai-review ->
+  # real -> briefing "ready to submit"), racing the window. No confirm -> a worklist LEAD.
+  # The model NEVER executes: recon_safe_probe is GET/HEAD/OPTIONS, unauth, no creds, no
+  # redirect-follow, SSRF/metadata-guarded, scope+pays-gated, rate-limited, Mullvad-only. ----
+  confirmed=0
+  vp="$(printf '%s' "$so" | jq -c '.verify_probe // empty' 2>/dev/null)"
+  if [[ "$NDAY_AUTOCONFIRM" == "1" && -n "$vp" && "$vp" != "null" && -f "$SAFE_PROBE" ]]; then
+    ppath="$(printf '%s' "$vp" | jq -r '.path // empty')"
+    pmethod="$(printf '%s' "$vp" | jq -r '.method // "GET"')"
+    psignal="$(printf '%s' "$vp" | jq -r '.confirm_signal // empty')"
+    [[ "$ppath" != /* ]] && ppath="/$ppath"
+    purl="https://${host}${ppath}"
+    log "   🔎 $host — safe verify_probe: $pmethod $purl  (signal: ${psignal:0:60})"
+    pres="$(bash "$SAFE_PROBE" "$purl" "$pmethod" 2>/dev/null)"
+    if [[ -n "$pres" ]]; then
+      cprompt="$(cat <<CEOF
+You designed a safe probe to confirm $cve_id on $host. The TRUSTED harness ran it and returned
+the REAL response below. Decide STRICTLY from this response whether the in-range vulnerable
+version is CONFIRMED — do not assume. confirm_signal you expected: ${psignal}
+PROBE: $pmethod $purl
+RESPONSE (status/headers/body, size-capped): $pres
+Set confirmed=true ONLY if the response actually shows the in-range/vulnerable version or the
+definitive fingerprint. A generic 200/404, a login page, a WAF block, or no version signal =
+confirmed=false (still a lead, not a confirmed finding).
+CEOF
+)"
+      cout="$(timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$cprompt" --model "$CLAUDE_MODEL" --tools "" \
+              --no-session-persistence --json-schema "$CONFIRM_SCHEMA" --output-format json </dev/null 2>/dev/null)"
+      cso="$(printf '%s' "$cout" | jq -c '.structured_output // empty' 2>/dev/null)"
+      if [[ -n "$cso" && "$cso" != "null" && "$(printf '%s' "$cso" | jq -r '.confirmed // false')" == "true" ]]; then
+        confirmed=1
+        cc="$(printf '%s' "$cso" | jq -r '.confidence // 0.6')"
+        creason="$(printf '%s' "$cso" | jq -r '.reason')"
+        ev="$(jq -nc --arg cve "$cve_id" --arg sig "$psignal" --arg u "$purl" --arg m "$pmethod" \
+              --argjson resp "${pres:-{}}" --arg r "$creason" \
+              '{probe:"nday-safe-verify",cve:$cve,confirm_signal:$sig,url:$u,method:$m,response:$resp,judge:$r}' 2>/dev/null)"
+        STATE_PY="$SCRIPT_DIR/../engine/state.py" V3_DB="$V3_DB" \
+          db_confirm "$host" "$purl" "$prog" "n-day" "cve-$cve_id" "$(score_for "$impact")" "$cc" "$ev" 2>/dev/null || true
+        leads=$((leads+1))
+        log "   💥 N-DAY CONFIRMED · $host · $cve_id · $impact/$cc → findings DB (→ ai-review → briefing)"
+      fi
+    fi
+  fi
+
+  if [[ "$confirmed" -eq 0 ]]; then
+    # not auto-confirmed (no safe probe, or probe didn't prove it) -> worklist LEAD for the human
     printf '%s' "$so" | jq -c --arg h "$host" --arg p "$prog" --arg c "$cves" --arg t "$ts" \
       '{host:$h,program:$p,endpoint:"",cve:(.cve // $c),vuln_type:"n-day-cve",
         why:.reason,test:.verify_method,impact:.impact,confidence:.confidence,
         exploit_available:(.exploit_available//false),at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
     leads=$((leads+1))
-    log "   🏁 LIKELY VULN · $host · ${cves:-?} · $(printf '%s' "$so" | jq -r '.impact')/$(printf '%s' "$so" | jq -r '.confidence') → worklist"
-  else
-    log "   · $host — KEV FP (tech-class only, not in-range)"
+    log "   🏁 LIKELY VULN (lead) · $host · ${cves:-?} · $impact/$conf → worklist"
   fi
 done
 tail -n 8000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
