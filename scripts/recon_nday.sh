@@ -82,8 +82,11 @@ EOF
   conf="$(printf '%s' "$so" | jq -r '.confidence // 0')"
   if [[ "$lv" == "true" ]] && awk "BEGIN{exit !(${conf:-0}>=0.5)}"; then
     ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    # n-day leads share the worklist (so they reach the briefing) but are NOT IDOR:
+    # keep endpoint EMPTY and carry the CVE in its own field, so the briefing renders
+    # "host — CVE" cleanly instead of concatenating host+"CVE: ..." into a fake path.
     printf '%s' "$so" | jq -c --arg h "$host" --arg p "$prog" --arg c "$cves" --arg t "$ts" \
-      '{host:$h,program:$p,endpoint:("CVE: "+(.cve // $c)),vuln_type:"n-day-cve",
+      '{host:$h,program:$p,endpoint:"",cve:(.cve // $c),vuln_type:"n-day-cve",
         why:.reason,test:.verify_method,impact:.impact,confidence:.confidence,
         exploit_available:(.exploit_available//false),at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
     leads=$((leads+1))

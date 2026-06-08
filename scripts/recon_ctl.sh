@@ -2449,6 +2449,7 @@ usage() {
 case "${1:-}" in
   start)        cmd_start ;;
   stop)         cmd_stop ;;
+  verify|v)     shift; bash "$(script_path recon_verify_host.sh)" "$@" ;;
   maintenance|maint) shift; cmd_maintenance "$@" ;;
   status|st)    cmd_status ;;
   rate)         shift; cmd_rate "$@" ;;

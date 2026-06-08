@@ -112,6 +112,14 @@ fi
 [[ -n "$vleads" ]] || vleads="[]"
 nvln="$(printf '%s' "$vleads" | jq 'length' 2>/dev/null || echo 0)"
 
+# split promoted leads: genuine BAC/IDOR (endpoint = path) vs n-day-cve (CVE, no path) —
+# they render differently; otherwise host+endpoint concatenates into garbage like
+# "technik.bild.deCVE: CVE-2024-34102".
+show_idor="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") != "n-day-cve")]' 2>/dev/null || echo '[]')"
+show_nday="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") == "n-day-cve")]' 2>/dev/null || echo '[]')"
+nidor="$(printf '%s' "$show_idor" | jq 'length' 2>/dev/null || echo 0)"
+nnday="$(printf '%s' "$show_nday" | jq 'length' 2>/dev/null || echo 0)"
+
 if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
                             || log "nothing actionable to brief today"
@@ -122,11 +130,17 @@ fi
 md="$BRIEF_DIR/tonight_$today.md"
 {
   printf '# 🌙 TONIGHT — %s\n\n' "$today"
-  printf '## 🎯 Test these (BAC/IDOR — the money class) — %s winnable lead(s)\n' "$nshow"
-  printf '%s' "$show" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)\(.endpoint)`\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  printf '## 🎯 Test these (BAC/IDOR — the money class) — %s winnable lead(s)\n' "$nidor"
+  printf '%s' "$show_idor" | jq -r 'def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
+    .[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(loc)`\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  if [[ "${nnday:-0}" -gt 0 ]]; then
+    printf '\n\n## ⚡ n-day CVE candidates (version-reasoned) — %s\n' "$nnday"
+    printf '%s' "$show_nday" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.host) — \(.cve // .endpoint // "?")\n- **why:** \(.why)\n- **verify:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  fi
   if [[ "${nheld:-0}" -gt 0 ]]; then
     printf '\n\n## 🟡 If time (medium dup-risk) — %s\n' "$nheld"
-    printf '%s' "$held" | jq -r '.[] | "- [\(.impact)] \(.vuln_type) `\(.host)\(.endpoint)` — \(.hold_reason // "")"' 2>/dev/null
+    printf '%s' "$held" | jq -r 'def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
+      .[] | "- [\(.impact)] \(.vuln_type) `\(loc)` — \(.hold_reason // "")"' 2>/dev/null
   fi
   if [[ "${nsupp:-0}" -gt 0 ]]; then
     printf '\n\n## 🔕 Suppressed — %s lead(s): %s\n' "$nsupp" "$supp_reasons"
@@ -151,8 +165,10 @@ log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 
 rh="$(discord_hook digest 2>/dev/null || true)"
 [[ -n "$rh" ]] || rh="$(discord_hook review 2>/dev/null || true)"   # fallback if #digest unset
 if [[ -n "$rh" ]]; then
-  card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nshow")"
-  card+="$(printf '%s' "$show" | jq -r '.[] | "• **\(.impact)** \(.vuln_type) `\(.host)\(.endpoint)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1100)"
+  card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nidor")"
+  card+="$(printf '%s' "$show_idor" | jq -r 'def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
+    .[] | "• **\(.impact)** \(.vuln_type) `\(loc)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
+  [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
   [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Verified vuln leads (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | "• \(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
