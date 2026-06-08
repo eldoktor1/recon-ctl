@@ -101,6 +101,16 @@ triage_score). And we **measure** it: `state.py ai-accuracy` / `recon-ai accurac
 human-decided precision of `real` verdicts (accepted vs dismissed) — the only ground truth.
 Never pass `--bare` (forces API-key auth, bypasses the Max OAuth login).
 
+## Notification policy (a 9-5 hunter reads ONE card, not a live drip)
+Real-time pings are **CONFIRMED only** — a Claude-`real` finding (`#review`) or a confirmed
+takeover (`#takeovers`). `fp`/`needs-human` and speculative IDOR/n-day LEADS never interrupt.
+Everything speculative is filtered (`tools/brief_filter.py`: product-class-dup + shared-tenant
+safety), ranked, and batched into ONE nightly **#digest** card (`recon_briefing.sh`, 6:30pm:
+BAC/IDOR to test + n-day CVE candidates + ready-to-submit + needs-human + verified vuln-leads;
+absorbs the old 5:30 lead-digest). `#ops` = action-only (VPN / burn / halt / killswitch).
+On demand, **`recon-verify list|<#>|<host>`** runs the full Claude verify (multimodal + safe
+probes) on any digest lead so the operator can deep-check before spending an evening on it.
+
 ## Documented false-positive patterns (never score as CONFIRMED)
 - **KEV tech-class match without a confirmed in-range version** (Spring actuator,
   Confluence, Jira, F5, MOVEit, AEM, Magento, Drupal≥8, …) → LEAD, not P0. Verify
@@ -119,6 +129,16 @@ Never pass `--bare` (forces API-key auth, bypasses the Max OAuth login).
   `reflected-not-exploitable` (LEAD).
 - **Dangling CNAME to a LIVE ELB/CloudFront is not a takeover** — live apps 404 at
   root all the time. Verify unclaimed / NXDOMAIN first.
+- **Product-class endpoint = duplicate, not a finding.** The same endpoint appearing on
+  many hosts (e.g. the UniFi-OS `/proxy/users/...` routes on 27+ of 4600 consoles) is a
+  shipped-product standard API, near-certain dup. `tools/brief_filter.py` measures
+  endpoint fan-out and suppresses these. (proven: the first IDOR wave was 88% UniFi noise.)
+- **Shared-tenant console = third-party data (HARD LINE, not just an FP).** A host whose
+  leftmost label is a high-entropy UUID with thousands of siblings under one wildcard
+  (`<uuid>.unifi-hosting.ui.com`) is a per-customer tenant. Any cross-tenant test on one
+  you don't own = accessing someone else's data. The idor analyzer skips these at intake;
+  only test instances you personally own. SPA-shell 200s (a route returning the app's
+  `index.html`, same as `/`) are **not** unauth leaks — probe content-type before claiming.
 
 ## Scope discipline (mandatory before any target work)
 - `recon-scope` EVERY host before claiming/reporting. Confirm `pays=true`.

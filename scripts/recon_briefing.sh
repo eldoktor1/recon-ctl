@@ -156,7 +156,8 @@ md="$BRIEF_DIR/tonight_$today.md"
     printf '\n\n## 🧪 Verified vuln leads (KEV / exposure / bypass) — %s\n' "$nvln"
     printf '%s' "$vleads" | jq -r '.[] | "- **\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
   fi
-  printf '\n\n_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
+  printf '\n\n_Deep-check any lead before you spend time on it:_ `recon-verify <host>` _(Claude + safe probes)._\n'
+  printf '_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
 log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed · ✅ $nsub to-submit · 🔍 $nneed needs-human · 🧪 $nvln vuln-leads → $md"

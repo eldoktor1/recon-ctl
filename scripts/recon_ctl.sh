@@ -2381,6 +2381,7 @@ usage() {
 
   printf "${B}── SCOPE ───────────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-scope${R} <host>             Check host against all program scopes\n"
+  printf "  ${G}recon-verify${R} list|<#>|<host>   Claude-verify a digest lead (safe unauth probes, FP-kill)\n"
   printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
