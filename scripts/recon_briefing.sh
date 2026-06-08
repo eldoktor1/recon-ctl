@@ -100,7 +100,19 @@ fi
 [[ -n "$needh" ]] || needh="[]"
 nneed="$(printf '%s' "$needh" | jq 'length' 2>/dev/null || echo 0)"
 
-if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 ]]; then
+# --- 4) verified VULN leads (KEV/exposure/bypass) — reuse the digest selector's
+# FP-filtered, version-aware, deduped PROMOTE set so this one card replaces the
+# separate 5:30 lead-digest. Read-only emit; bounded so a slow run can't hang the card. ---
+vleads="[]"
+DIGEST_SELECTOR="${DIGEST_SELECTOR:-$SCRIPT_DIR/recon_digest_leads.sh}"
+if [[ -f "$DIGEST_SELECTOR" ]]; then
+  vleads="$(timeout 150 bash "$DIGEST_SELECTOR" emit 2>/dev/null \
+    | jq -c '[.promote[] | {host, cls, what, check, prog, url, score, cves}] | sort_by(-(.score // 0)) | .[0:10]' 2>/dev/null || echo '[]')"
+fi
+[[ -n "$vleads" ]] || vleads="[]"
+nvln="$(printf '%s' "$vleads" | jq 'length' 2>/dev/null || echo 0)"
+
+if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
                             || log "nothing actionable to brief today"
   touch "$sent"; exit 0
@@ -126,21 +138,27 @@ md="$BRIEF_DIR/tonight_$today.md"
     printf '\n\n## 🔍 Needs a human eye (Claude unsure) — %s\n' "$nneed"
     printf '%s' "$needh" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
   fi
+  if [[ "${nvln:-0}" -gt 0 ]]; then
+    printf '\n\n## 🧪 Verified vuln leads (KEV / exposure / bypass) — %s\n' "$nvln"
+    printf '%s' "$vleads" | jq -r '.[] | "- **\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
+  fi
   printf '\n\n_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
-log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed · ✅ $nsub to-submit · 🔍 $nneed needs-human → $md"
+log "🌙 briefing compiled · 🎯 $nshow winnable · 🟡 $nheld hold · 🔕 $nsupp suppressed · ✅ $nsub to-submit · 🔍 $nneed needs-human · 🧪 $nvln vuln-leads → $md"
 
-# --- deliver to Discord (#review) ---
-rh="$(discord_hook review 2>/dev/null || true)"
+# --- deliver to Discord (#digest — the single nightly card; #review is live-confirmed only) ---
+rh="$(discord_hook digest 2>/dev/null || true)"
+[[ -n "$rh" ]] || rh="$(discord_hook review 2>/dev/null || true)"   # fallback if #digest unset
 if [[ -n "$rh" ]]; then
   card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nshow")"
-  card+="$(printf '%s' "$show" | jq -r '.[] | "• **\(.impact)** \(.vuln_type) `\(.host)\(.endpoint)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1200)"
-  [[ "${nsupp:-0}" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s suppressed: %s_' "$nsupp" "$supp_reasons")"
+  card+="$(printf '%s' "$show" | jq -r '.[] | "• **\(.impact)** \(.vuln_type) `\(.host)\(.endpoint)` (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1100)"
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
-  card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 400)"
-  [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"; }
+  card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
+  [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Verified vuln leads (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | "• \(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
+  [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 300)"; }
+  [[ "${nsupp:-0}" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s lead(s) suppressed: %s_' "$nsupp" "$supp_reasons")"
   discord_post "$rh" "$(jq -nc --arg c "${card:0:1950}" '{content:$c}')" >/dev/null 2>&1 \
-    && log "🌙 briefing posted to #review" || log "discord post failed (card saved to $md)"
+    && log "🌙 briefing posted to #digest" || log "discord post failed (card saved to $md)"
 fi
 touch "$sent"
