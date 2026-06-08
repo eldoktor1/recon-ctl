@@ -124,7 +124,10 @@ query="$(jq -nc \
         {term: {triage_out_of_scope: true}},
         {wildcard: {host: "*.corp.*"}},
         {wildcard: {host: "*intranet*"}},
-        {wildcard: {host: "*dev-internal*"}}
+        {wildcard: {host: "*dev-internal*"}},
+        {wildcard: {host: "*.k8s.*"}},
+        {wildcard: {host: "*.internal.*"}},
+        {wildcard: {host: "*.cluster.local"}}
       ]
     }},
     sort: [{triage_score: {order: "desc"}}]
