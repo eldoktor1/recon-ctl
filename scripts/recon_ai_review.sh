@@ -134,6 +134,13 @@ reflected-but-encoded values, a marketing/login page behind a scary-sounding tem
 anything not exploitable as described. Mark "needs-human" ONLY if genuinely ambiguous AND
 a safe probe cannot resolve it.
 
+SUBDOMAIN TAKEOVER — special rule: mark "real" ONLY when the CNAME target genuinely NXDOMAINs
+(the backing resource is gone and the name is freely registerable). An HTTP fingerprint while
+the target still RESOLVES is NOT confirmable — Heroku "No such app", Fastly "unknown domain", a
+provider 404, an Azure app that still resolves: these mean *possibly* unclaimed, NOT takeable.
+Real claimability requires REGISTERING the name (which we never do) and most providers now
+verify ownership or reserve old names. Default such cases to "needs-human", never "real".
+
 ${shot_block}${probe_block}${results_block}
 PAST OUTCOMES on similar stacks (lessons — if a similar case was fp, lean fp; if real,
 that raises plausibility; reason for yourself, do not blindly copy):
@@ -373,6 +380,25 @@ while IFS= read -r fjson; do
   consensus    # Claude is the brain: primary investigates (multimodal+probe) -> adversarial panel adjudicates
   v="$FINAL_V"; c="$FINAL_C"; r="$FINAL_R"
   [[ "${RAN_PANEL:-0}" == "1" ]] && escalated=$((escalated+1))
+
+  # ---- TAKEOVER GUARD (doctrine): never auto-`real` unless the CNAME target NXDOMAINs ----
+  # A takeover is only confirmable when the backing resource is GONE -> the CNAME target
+  # NXDOMAINs -> the name is freely registerable. An HTTP fingerprint while the target still
+  # RESOLVES (Heroku "No such app", Fastly "unknown domain", a provider 404) is NOT a confirmed
+  # takeover: claimability requires REGISTERING the name (unprovable without exploitation; many
+  # providers now block it / verify ownership). Cap those at needs-human so the operator checks
+  # registerability by hand. (proven FP: railing.meraki.com Heroku "No such app", conf 0.95.)
+  if [[ "$sclass" == "takeover" && "$v" == "real" ]]; then
+    tcname="$(dig +short CNAME "$host" 2>/dev/null | head -1)"
+    if [[ -n "$tcname" ]]; then
+      tstat="$(dig "${tcname%.}" 2>/dev/null | grep -oE 'status: [A-Z]+' | head -1)"
+      if [[ "$tstat" != *NXDOMAIN* ]]; then
+        v="needs-human"; c="0.5"
+        r="TAKEOVER GUARD: CNAME target ${tcname%.} RESOLVES (not NXDOMAIN) — HTTP fingerprint ≠ registerable; claimability needs a human registerability check, not auto-real. [orig: ${r}]"
+        log "        ↳ ⚠ takeover capped real→needs-human (${tcname%.} resolves, not NXDOMAIN)"
+      fi
+    fi
+  fi
   # Claude AUTHORS the report for a real finding (quality -> rewards), before evidence is cleaned
   if [[ "$v" == "real" ]]; then
     rep="$(author_report "$CONSENSUS_MODEL")"
