@@ -70,7 +70,10 @@ fi
 [[ -n "$fails" ]] || fails="[]"
 
 # recent daemon errors/warnings
-derr="$(tail -n 250 "$LOG_DIR/recon_daemon.log" 2>/dev/null | grep -iE 'error|fail|halt|ban|forbidden|429|403' | grep -viE 'no error|0 error' | tail -12 | sed 's/"/'"'"'/g')"
+# Harvest genuine errors only. Exclude SUCCESS/operational lines that merely contain the
+# word "fail": TRIAGE stamps "(fail=0)" on every successful batch, which otherwise floods
+# the error telemetry and buries real failures (monitor flagged this itself).
+derr="$(tail -n 250 "$LOG_DIR/recon_daemon.log" 2>/dev/null | grep -iE 'error|fail|halt|ban|forbidden|429|403' | grep -viE 'no error|0 error|fail=0|mark_triage_seen|demote_dropped|success' | tail -12 | sed 's/"/'"'"'/g')"
 
 telemetry="$(jq -nc \
   --arg now "$now_iso" --arg vpn "$vpn" --arg halt "$halt" --arg maint "$maint" --arg gpause "$gpause" \

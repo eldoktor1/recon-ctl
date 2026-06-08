@@ -169,7 +169,11 @@ cname_is_aws_elb() {
 # verification before any custom domain is served — so a dangling CNAME + provider error
 # page is NEVER claimable by an outsider. These are the FP factory (Fastly/Firebase/
 # CloudFront/Akamai/...) and must never mint a takeover finding.
-TKO_NOTVULN="${TKO_NOTVULN:-fastly firebase aws_cloudfront acquia freshdesk hubspot feedpress fly_io desk_com statuspage gcp_appengine zendesk akamai sendgrid mailchimp dreamhost kinsta instapage keycdn squarespace gcs google_sites gitlab azure_trafficmanager intercom}"
+# wpengine: paid managed-WP hosting — its generic "site couldn't be found" 404 fires on
+# thousands of LIVE customer installs that resolve (not NXDOMAIN) and are claim-via-account
+# (ownership-gated, not freely registerable). HTTP-fingerprint-only = mass FP (21k WATCH
+# entries, all X.wpengine.com). Excluded like fastly/firebase; a genuine one is a human LEAD.
+TKO_NOTVULN="${TKO_NOTVULN:-fastly firebase aws_cloudfront acquia freshdesk hubspot feedpress fly_io desk_com statuspage gcp_appengine zendesk akamai sendgrid mailchimp dreamhost kinsta instapage keycdn squarespace gcs google_sites gitlab azure_trafficmanager intercom wpengine}"
 # Services whose HTTP error fingerprint is itself authoritative-unclaimed (the resource
 # name is provably free WITHOUT needing NXDOMAIN): S3 "NoSuchBucket", Beanstalk. For
 # everyone else, confirmation REQUIRES NXDOMAIN on the CNAME target.
