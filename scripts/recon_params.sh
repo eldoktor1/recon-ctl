@@ -301,10 +301,12 @@ cmd_verify() {
   [[ -x "$QSREPLACE" ]] || { warn "qsreplace not found: $QSREPLACE"; exit 1; }
 
   local resp
+  # scope discipline: only probe PAYING catalog targets (payout_tier != none), freshest first
   resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
     \"size\": $n,
     \"_source\": [\"url\",\"program\",\"payout_tier\",\"true_fresh\"],
-    \"query\": {\"term\": {\"vuln_classes\": \"$cls\"}},
+    \"query\": {\"bool\": {\"filter\": [{\"term\": {\"vuln_classes\": \"$cls\"}}],
+                          \"must_not\": [{\"term\": {\"payout_tier\": \"none\"}}]}},
     \"sort\": [{\"true_fresh\": {\"order\": \"desc\"}}, {\"cataloged_at\": {\"order\": \"desc\"}}]
   }" 2>/dev/null)"
 
@@ -344,6 +346,10 @@ cmd_verify() {
       sqli) probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "'" 2>/dev/null)" ;;
     esac
     [[ -z "$probe_url" ]] && continue
+
+    # anti-burn: min-gap + jitter between probes so the single Mullvad egress IP isn't
+    # hammered (the loop spans many hosts; this keeps the aggregate request rate polite).
+    sleep "0.$(( RANDOM % 6 + 2 ))"
 
     local body
     body="$(curl -sS -m10 -k -L --max-redirs 2 -A "$ua" "$probe_url" 2>/dev/null | head -c 65536)"

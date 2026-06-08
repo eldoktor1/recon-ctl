@@ -470,7 +470,18 @@ run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT"
 # per-class files for `recon_ctl params <class>`. Target-facing → run_scanner.
 PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
 PARAMS_INTERVAL="${PARAMS_INTERVAL:-1800}"
+PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-3600}"
 run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
+# Active-probe the catalog: prove canary REFLECTION (xss) and SQL-error DIFFERENTIAL (sqli)
+# on PAYING targets -> writes params/verify_<cls>.jsonl leads that feed xss-confirm /
+# param-confirm. Without this the catalog fills but the confirmers starve. Safe primitives
+# (canary GET, "'" error-signature), pays-gated + paced in recon_params.sh, Mullvad-gated.
+run_params_verify() {
+  v21_killed params && return 0
+  [[ -f "$PARAMS_SCRIPT" ]] || return 0
+  run_scanner bash "$PARAMS_SCRIPT" verify xss  || true
+  run_scanner bash "$PARAMS_SCRIPT" verify sqli || true
+}
 
 # ---- Port scanner (recon_portscan.sh) ----------------------------------------
 # Targeted sweep of ~120 purposeful ports on P1+ in-scope paying hosts that
@@ -673,6 +684,7 @@ run_discord_bot() {
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
+  supervise_loop "params-verify"  "PARAMS_VERIFY_INTERVAL" run_params_verify  &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
