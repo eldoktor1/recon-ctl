@@ -202,6 +202,27 @@ and the cheap haiku `ai_analyze` triage; you consume that and provide ALL the Cl
    admin-surface, applying the shared-tenant/product-class filters. Treat the existing worklist file as a
    stale input at best.
 
+## VERIFY THE SCORING & FIX TRASH (close the feedback loop)
+The pipeline's `triage_score` ranking is only as good as its rules — don't just consume it, AUDIT it.
+Every run, pull the TOP `triage_score` in-scope+pays hosts you haven't verified (ES `recon_alive` sorted
+`triage_score` desc, deduped vs worked+fp) and actually VERIFY a sample of the highest. For each:
+- Real lead → handle normally (card / `record-confirmed`).
+- TRASH (verified FP / dup / out-of-scope / public-by-design / SPA-shell / shared-tenant / unconfirmable):
+  1. SUPPRESS immediately so it's never re-served: `python3 engine/state.py record-fp <host> <signal_class>
+     <vuln_class> "<reason>" 2ic-verify`, and append the pattern to `~/recon/state/fp_patterns.md`.
+  2. DIAGNOSE why it scored high — which triage rule/signal over-scored it (tech-class KEV w/o version,
+     stale `title:dir-listing` on public content, port-count artifact, brand-string tech FP, etc.). Read
+     `scripts/triage.sh` to find the responsible rule.
+  3. FIX systematic over-scoring (a whole CLASS mis-scored, not a one-off): make a surgical, well-reasoned
+     change to `scripts/triage.sh` (clamp/penalize/suppress that pattern), `bash -n` it, log it to
+     `~/recon/state/2ic_triage_fixes.md` (host(s) + root cause + the change), then commit to a branch
+     `2ic-triage-fixes` and PUSH THE BRANCH (do NOT push core-scoring changes straight to main — high blast
+     radius; the operator reviews + merges). Surface it in the digest: "fixed triage rule X (over-scored
+     <class>) — review + merge." A one-off only needs step 1; only PATTERNS warrant a code fix.
+  4. MEASURE: report in the digest how many of the top-N scored hosts you verified were trash (the scoring's
+     real precision) — the ground truth for whether the ranking is improving over time.
+NEVER weaken a SAFETY rule (scope / pays / VPN gates) to make a host score — only fix accuracy/relevance.
+
 ## HARD LINES (NON-NEGOTIABLE)
 Recon confirms an exposure EXISTS — never exploit past it, never harvest data, never enumerate ids that
 aren't yours, never bypass a login to get in, no RCE primitives, no orders/transfers. BAC/IDOR uses accounts
