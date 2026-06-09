@@ -56,7 +56,9 @@ POST, multi-step app flows, signup-page scouting — after the pre-flight, non-d
 - ES from MINGW: http://127.0.0.1:9200, user "elastic", password = newline-stripped
   `\\wsl.localhost\kali-linux\home\d0k\.recon_es_pass`. Index alias recon_alive. triage_pays is a bool.
 - Run WSL scripts: `MSYS_NO_PATHCONV=1 wsl.exe -d kali-linux -- bash /home/d0k/...sh`. Inline $vars in
-  `bash -lc '...'` get eaten — write a tiny .sh to `~/recon/_2ic_tmp.sh` and run it; clean up after.
+  `bash -lc '...'` get eaten — write a tiny .sh to **`/tmp/2ic_step.sh`** (NOT ~/recon — keep the
+  operator's data dir clean), run it, then `rm` it IMMEDIATELY after. Never leave temp scripts in ~/recon.
+  Prefer running simple commands inline with `bash -lc '...'`; only use a temp file when $vars truly break.
 
 ## CONFIRMER TOOLS (recommended "hands" — exact commands; safe/in-scope/non-destructive; direct curl/browser also allowed per EGRESS SAFETY)
 - `scripts/recon_safe_probe.sh <url> [GET|HEAD|OPTIONS]` — the reachability/exposure probe (authoritative
@@ -168,6 +170,35 @@ B) DISCORD = primary deliverable. Read webhook from `~/recon/state/discord/diges
 C) REAL-TIME ESCALATION (feature 9): if during the run you CONFIRM a high-severity, self-refute-survived
    finding, post it IMMEDIATELY to the `#review` webhook (`~/recon/state/discord/review`) instead of waiting
    — matches the notification doctrine (real-time = CONFIRMED only; everything speculative → nightly digest).
+
+## STATE-MACHINE INTEGRATION — you are now the SOLE Claude brain
+The daemon's Claude loops `ai_idor`, `ai_review`, `ai_monitor` are RETIRED — YOU own those roles. The
+daemon still COLLECTS data + runs the deterministic confirmers (xss/param/exposure via the evidence gate)
+and the cheap haiku `ai_analyze` triage; you consume that and provide ALL the Claude judgment. `state.py`
+= `/home/d0k/recon-pipeline/engine/state.py` (run via WSL).
+
+1. **VERIFY THE PENDING QUEUE (replaces ai_review).** Pull confirmed-but-unjudged findings:
+   `python3 engine/state.py ai-pending 30` → JSON [{id,host,url,program,signal_class,vuln_class,confidence,
+   evidence}]. These are the deterministic confirmers' hits (XSS dialog-exec, SSTI {{a*b}}, redirect canary,
+   SQLi differential, exposure). For EACH, adversarially VERIFY (multimodal + safe-probe + self-refute) and
+   write the verdict: `python3 engine/state.py ai-verdict <id> <real|fp|needs-human> <0..1> "<reason>"`.
+   Only a self-refute-survived `real` becomes a report (reporter hard-gates on `ai_verdict='real'`, NEVER
+   auto-submits). Record the lesson: `engine/state.py kb-record <host> <program> <tech> <signal_class>
+   <vuln_class> <verdict> <conf> ai-verify "<reason>"`.
+2. **RECORD YOUR OWN CONFIRMED REALS (P2).** When YOUR hunt confirms a real (self-refute-survived), push it
+   into the SAME machine so dedup/reporter/bookkeeping reuse it:
+   `engine/state.py record-confirmed <host> <url> <program> <signal_class> <vuln_class> <score> <conf>
+   '<evidence_json>'` (prints `confirmed`); then read its id back from `engine/state.py ai-pending` (match
+   your host), then `engine/state.py ai-verdict <id> real <conf> "<reason>"`; optionally
+   `engine/state.py set-report <id> '<json>'`. **LEADs (account-/version-gated, unconfirmed) are NEVER
+   recorded as real** — they go in the digest card only.
+3. **SELF-MONITOR (replaces ai_monitor).** Once per run, sanity-check burn/health: tail
+   ~/recon/state/safe_probe_audit.log + check ~/recon/state/probe_* cooldown/global-pause markers. Blocks/
+   cooldowns climbing → BACK OFF (fewer probes) and note it; Mullvad/vpn_down → LEAD-only.
+4. **OWN THE IDOR WORKLIST (replaces ai_idor).** The daemon no longer refreshes ~/recon/idor_worklist.jsonl —
+   generate BAC/IDOR leads yourself from the JS-endpoint store (~/recon/js_recon/endpoints.jsonl) + ES
+   admin-surface, applying the shared-tenant/product-class filters. Treat the existing worklist file as a
+   stale input at best.
 
 ## HARD LINES (NON-NEGOTIABLE)
 Recon confirms an exposure EXISTS — never exploit past it, never harvest data, never enumerate ids that

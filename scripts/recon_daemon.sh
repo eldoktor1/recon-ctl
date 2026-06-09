@@ -517,13 +517,11 @@ V3_DIGEST_INTERVAL="${V3_DIGEST_INTERVAL:-86400}"
 run_reporter()  { [[ -f "$V3_PY_DIR/reporter.py" ]] && run_scanner python3 "$V3_PY_DIR/reporter.py" >/dev/null 2>&1 || true; }
 run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 "$V3_PY_DIR/observability.py" >/dev/null 2>&1 || true; }
 
-# ---- Claude-Max validation agent (recon_ai_review.sh) ------------------------
-# Headless `claude -p` (Max, NO API) adversarially validates gate-CONFIRMED findings
-# (real / fp / needs-human) before they reach the review queue — the accuracy layer.
-# Runs as d0k (NOT run_scanner) because Claude Code auth is per-user (~/.claude).
-AI_REVIEW_SCRIPT="${AI_REVIEW_SCRIPT:-$(script_path recon_ai_review.sh)}"
-AI_REVIEW_INTERVAL="${AI_REVIEW_INTERVAL:-1800}"
-run_ai_review() { [[ -f "$AI_REVIEW_SCRIPT" ]] && bash "$AI_REVIEW_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# NOTE: the ai-review / ai-monitor / ai-idor daemon loops were RETIRED — the 2IC routine agent
+# (~/.claude scheduled routine) is now the sole Claude brain: it verifies the ai-pending queue,
+# records confirmed reals into state.py, self-monitors, and owns the IDOR worklist. The daemon keeps
+# only the cheap haiku ai-analyze triage (feeds the deterministic gate). recon_ai_review.sh is kept
+# as a FILE for the on-demand `recon-verify` command.
 
 # ---- Claude-Max ANALYSIS agent (recon_ai_analyze.sh) ------------------------
 # Headless Claude (Haiku — bulk/cheap, match-model-to-task) reads in-scope assets,
@@ -534,25 +532,13 @@ AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
-# ---- Claude-Max MONITOR / GUIDANCE pass (recon_ai_monitor.sh) ----------------
-# Claude's oversight role: reads LOCAL telemetry (burn signals, verdict precision,
-# failures/halts, daemon errors, VPN) and emits a health + guidance assessment to #ops.
-# Read-only reasoning, NO target traffic. Runs as d0k. Watches for getting rate-limited/banned.
-AI_MONITOR_SCRIPT="${AI_MONITOR_SCRIPT:-$(script_path recon_ai_monitor.sh)}"
-AI_MONITOR_INTERVAL="${AI_MONITOR_INTERVAL:-3600}"
-run_ai_monitor() { [[ -f "$AI_MONITOR_SCRIPT" ]] && bash "$AI_MONITOR_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
-
 # ---- UNIQUE pillars (v3.7): go where the crowd doesn't ----------------------
 # recon_jsintel  — mine each host's JS for the HIDDEN API surface + verify LIVE secrets
 #                  (trufflehog). Target-facing -> d0k, VPN-gated. Writes endpoint feedstock.
-# recon_ai_idor  — Claude reasons over that surface -> ranked BAC/IDOR worklist (the most-
-#                  rewarded class; reasoning only, the human exploits with 2 accounts).
+#                  (the BAC/IDOR worklist is now owned by the 2IC routine, not a daemon loop.)
 JSINTEL_SCRIPT="${JSINTEL_SCRIPT:-$(script_path recon_jsintel.sh)}"
 JSINTEL_INTERVAL="${JSINTEL_INTERVAL:-3600}"
 run_jsintel() { [[ -f "$JSINTEL_SCRIPT" ]] && bash "$JSINTEL_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
-AI_IDOR_SCRIPT="${AI_IDOR_SCRIPT:-$(script_path recon_ai_idor.sh)}"
-AI_IDOR_INTERVAL="${AI_IDOR_INTERVAL:-3600}"
-run_ai_idor() { [[ -f "$AI_IDOR_SCRIPT" ]] && bash "$AI_IDOR_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 # recon_briefing — the 6:30pm "TONIGHT" worklist (IDOR leads to test + findings to submit).
 BRIEFING_SCRIPT="${BRIEFING_SCRIPT:-$(script_path recon_briefing.sh)}"
 BRIEFING_INTERVAL="${BRIEFING_INTERVAL:-3600}"
@@ -691,10 +677,7 @@ run_discord_bot() {
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
-  supervise_loop "ai-review"      "AI_REVIEW_INTERVAL"     run_ai_review      &
-  supervise_loop "ai-monitor"     "AI_MONITOR_INTERVAL"    run_ai_monitor     &
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
-  supervise_loop "ai-idor"        "AI_IDOR_INTERVAL"       run_ai_idor        &
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &

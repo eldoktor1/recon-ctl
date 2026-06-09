@@ -181,3 +181,8 @@ probes) on any digest lead so the operator can deep-check before spending an eve
 - Daemon control: `recon-start` / `start_recon_safe.sh` only. Live-restart safe — the
   daemon stays up; edits take effect next cycle.
 - Do NOT touch reconrun-owned `firstblood/` permissions.
+- DEBLOAT ALWAYS: when retiring a feature, REMOVE its code/vars/functions/menus/unused scripts — never
+  leave commented-out cruft or dead loops. Write temp scripts to `/tmp` (never the data dir) and `rm`
+  them after; prefer inline commands. (2026-06-08: the in-daemon Claude loops `ai_idor`/`ai_review`/
+  `ai_monitor` were retired — the 2IC routine agent is the sole Claude brain; `ai_analyze` haiku triage
+  stays. `recon_ai_review.sh` kept only for the on-demand `recon-verify`.)
