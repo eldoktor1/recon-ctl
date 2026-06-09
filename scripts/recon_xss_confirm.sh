@@ -37,8 +37,15 @@ es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json'
 # Live scope guard (authoritative at probe time): a host is "game" only if it is
 # CURRENTLY in-scope + paying + not out-of-scope — never trust stale catalog scope.
 in_scope_now() {
-  [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" 2>/dev/null | jq -r \
-     '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+  # AUTHORITATIVE scope DB (recon_scope_check.sh) — not stale ES triage_* (matches recon_safe_probe.sh).
+  local _sc="$SCRIPT_DIR/recon_scope_check.sh"
+  if [[ -f "$_sc" ]]; then
+    [[ "$(bash "$_sc" "$1" 2>/dev/null | jq -r \
+       '((.in_scope//false)==true) and ((.pays//false)==true) and ((.out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+  else
+    [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" 2>/dev/null | jq -r \
+       '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+  fi
 }
 
 mkdir -p "$STATE_DIR"

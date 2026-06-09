@@ -59,10 +59,20 @@ mkdir -p "$RL_DIR" "$STATE_DIR" 2>/dev/null || true
 # host + LIVE scope gate (authoritative at probe time — never trust a stale catalog)
 host="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')"
 [[ -n "$host" && "$host" != "$url" ]] || emit '{"ok":false,"error":"could-not-parse-host"}'
-if [[ -f "$NETRC" ]] && command -v jq >/dev/null 2>&1; then
+# LIVE scope+pays gate — AUTHORITATIVE via recon_scope_check.sh (the scope DB), NOT stale
+# ES triage_* fields. ES triage can lag/disagree with the program catalog (proven: jedi.ripe.net
+# read in_scope+pays in ES but pays:false authoritatively, so the old gate wrongly allowed it).
+# Fail-closed: if the authoritative resolver is present we REQUIRE its verdict; ES is only a
+# fallback when the resolver is absent.
+SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
+if [[ -f "$SCOPE_CHECK" ]] && command -v jq >/dev/null 2>&1; then
+  ins="$(bash "$SCOPE_CHECK" "$host" 2>/dev/null | jq -r \
+     '((.in_scope//false)==true) and ((.pays//false)==true) and ((.out_of_scope//false)!=true)' 2>/dev/null)"
+  [[ "$ins" == "true" ]] || emit "$(jerr --arg h "$host" '{ok:false,error:"out-of-scope-or-nonpaying",host:$h}')"
+elif [[ -f "$NETRC" ]] && command -v jq >/dev/null 2>&1; then
   ins="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r \
      '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)"
-  [[ "$ins" == "true" ]] || emit "$(jerr --arg h "$host" '{ok:false,error:"out-of-scope-or-nonpaying",host:$h}')"
+  [[ "$ins" == "true" ]] || emit "$(jerr --arg h "$host" '{ok:false,error:"out-of-scope-or-nonpaying-es-fallback",host:$h}')"
 fi
 
 # per-finding probe budget (anti-runaway for the agentic loop)
