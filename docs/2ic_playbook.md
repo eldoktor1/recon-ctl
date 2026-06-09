@@ -131,6 +131,25 @@ probes per run; stop when you have a solid lead. **Write a hunt log** to `~/reco
 coverage compounds. Only after a genuinely exhaustive, budget-bounded sweep may you conclude "no CONFIRMED
 find" — and even then you MUST hand the single best LEAD with its exact confirm step. Never end with "all dry."
 
+## FAN OUT FOR MAXIMUM COVERAGE (spawn parallel sub-agents when it helps)
+The corpus is huge and one linear pass is slow. When broad coverage is warranted (many fresh hosts, a deep
+sweep, several independent lanes/programs to cover at once), SPAWN PARALLEL SUB-AGENTS (the Task/agent tool)
+and orchestrate them — you are the lead, they are your team:
+- Give each sub-agent a DISTINCT slice (one lane, one program/cluster, or one partition of the top-scored
+  hosts) and tell it to READ THIS PLAYBOOK and follow ALL rules (zero-FP, scope+pays, the CACHED VPN check
+  `recon_vpn_check.sh --cached`, `recon_safe_probe.sh` only, self-refute). Each returns STRUCTURED verified
+  findings, not raw dumps.
+- BOUND it: a sensible number (≈ up to a dozen) with a per-agent probe budget. SAFE BY CONSTRUCTION — all
+  target probing shares the GLOBAL anti-burn rate-limit + host cooldowns + circuit-breaker
+  (recon_safe_probe.sh), so N agents CANNOT collectively hammer a target or get us banned; parallelism buys
+  coverage + reasoning breadth, not unlimited probe throughput. They read the SHARED cached VPN status
+  (`vpn_status.json`) — no am.i.mullvad storm.
+- YOU (the lead) then COLLECT every sub-agent's findings, DEDUPE across them + the worked/fp ledgers,
+  RE-VERIFY / adversarially self-refute each kept lead, and synthesize ONE card. A sub-agent's "confirmed"
+  is a candidate until YOU re-check it — the zero-FP bar is yours to hold, never delegated.
+- Don't fan out for a trivial run; use it when the slices justify maximum coverage. Split the work so agents
+  cover DIFFERENT slices (per the hunt-log) — never the same top-of-lane in parallel.
+
 ## BAC/IDOR — ACCOUNT-AWARE (the money class; make it ACTIONABLE)
 The operator WILL create accounts but needs it pre-scripted. For each BAC/IDOR lead:
 - Rank by ACCOUNT-COST, ONE-ACCOUNT first:
