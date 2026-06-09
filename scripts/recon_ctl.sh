@@ -176,14 +176,25 @@ cmd_start() {
   # tunnel, so confirm egress is a Mullvad exit before starting any target-facing
   # recon. recon_vpnguard then keeps watching during the run.
   if [[ "${RECON_SKIP_VPN_CHECK:-0}" != "1" ]]; then
-    local mexit
-    mexit="$(timeout 8 curl -sS --max-time 7 https://am.i.mullvad.net/json 2>/dev/null | jq -r '.mullvad_exit_ip // "null"' 2>/dev/null)"
-    if [[ "$mexit" != "true" ]]; then
-      echo "REFUSING to start: egress is NOT a confirmed Mullvad exit (mullvad_exit_ip=$mexit)."
-      echo "Reconnect Mullvad and retry.  (override for testing: RECON_SKIP_VPN_CHECK=1)"
+    # am.i.mullvad rate-limits / has blips — RETRY before deciding, and distinguish
+    # "endpoint unreachable" (empty, NOT proof of a leak) from "actual leak" (false).
+    local mexit=""
+    for _vtry in 1 2 3 4 5; do
+      mexit="$(timeout 8 curl -sS --max-time 7 https://am.i.mullvad.net/json 2>/dev/null | jq -r '.mullvad_exit_ip // empty' 2>/dev/null)"
+      [[ -n "$mexit" ]] && break
+      sleep 2
+    done
+    if [[ "$mexit" == "true" ]]; then
+      echo "VPN OK — Mullvad exit confirmed."
+    elif [[ -z "$mexit" ]]; then
+      echo "REFUSING to start: could not REACH am.i.mullvad after 5 tries (verification endpoint down/rate-limited)."
+      echo "  This is NOT proof of a leak — Mullvad may well be UP. Verify your exit IP is a Mullvad IP, then:"
+      echo "    RECON_SKIP_VPN_CHECK=1 recon-start"
+      return 1
+    else
+      echo "REFUSING to start: egress is NOT a Mullvad exit (mullvad_exit_ip=$mexit) — possible LEAK. Reconnect Mullvad."
       return 1
     fi
-    echo "VPN OK — Mullvad exit confirmed."
   fi
   nohup bash "$DAEMON" >/dev/null 2>&1 &
   sleep 1
