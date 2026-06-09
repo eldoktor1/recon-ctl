@@ -215,7 +215,9 @@ and the cheap haiku `ai_analyze` triage; you consume that and provide ALL the Cl
    recorded as real** — they go in the digest card only.
 3. **SELF-MONITOR (replaces ai_monitor).** Once per run, sanity-check burn/health: tail
    ~/recon/state/safe_probe_audit.log + check ~/recon/state/probe_* cooldown/global-pause markers. Blocks/
-   cooldowns climbing → BACK OFF (fewer probes) and note it; Mullvad/vpn_down → LEAD-only.
+   cooldowns climbing → BACK OFF (fewer probes); Mullvad/vpn_down → LEAD-only. If burn risk / vpn_down /
+   a real halt is detected, post a ONE-LINE alert to #ops (`~/recon/state/discord/ops`) — ONLY when
+   something is actually wrong (no hourly health spam; that's why ai_monitor was retired).
 4. **OWN THE IDOR WORKLIST (replaces ai_idor).** The daemon no longer refreshes ~/recon/idor_worklist.jsonl —
    generate BAC/IDOR leads yourself from the JS-endpoint store (~/recon/js_recon/endpoints.jsonl) + ES
    admin-surface, applying the shared-tenant/product-class filters. Treat the existing worklist file as a
