@@ -446,8 +446,12 @@ score_raw() {
         action:"X-Original-URL, X-Forwarded-For 127.0.0.1 | /..;/ /%2e/ | OPTIONS/HEAD"} else empty end),
       (if .status_code == 403 then {pts:3, sig:"status:403", class:"auth-bypass", strength:"status",
         action:"Path: /%2e/path /path/. /path%20 /path..;/ | Header: X-Custom-IP-Authorization"} else empty end),
-      (if .status_code == 500 then {pts:2, sig:"status:500", class:"info-disclosure", strength:"status",
-        action:"Send malformed input → verbose stacks | Look for framework/path leaks"} else empty end),
+      # NOTE: a bare status:500 alone is NOT info-disclosure. Edge/CDN error pages (Akamai
+      # errors.edgesuite.net Internal-Server-Error, Fastly unknown-domain ghosts), gated
+      # sorry-page shells, and origin-down 500s all return a body-less 500 that leaks nothing.
+      # Real 500-based leaks are caught by the TITLE rules below (whoops/stack trace/exception/
+      # whitelabel/phpinfo) + the django/spring/laravel tech rules — with higher confidence. The
+      # blanket status:500 info-disclosure tag only polluted the lane (2IC round-26, 2026-06-09).
 
       # === TITLES ===
       (if title_match("index of /") then {pts:6, sig:"title:dir-listing", class:"data-leak", strength:"confirmed",
