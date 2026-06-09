@@ -36,10 +36,13 @@ leak / unknown / vpn_down → LEAD-ONLY, no probes, and say so. (The GUI `mullva
 authoritative. Re-check if egress could have changed mid-run.)
 CONSTRAINTS THAT REMAIN: NON-DESTRUCTIVE only; IN-SCOPE + paying only; UNAUTHENTICATED only (account
 creation and ANY logged-in request are the operator's — human-in-the-loop). Never touch VPN/nft config.
-RECOMMENDED for bulk HTTP recon: `recon_safe_probe.sh` — it layers an authoritative scope gate +
-rate-limit + SSRF/metadata guard + audit on top of Mullvad (defense in case target content tries to
-prompt-inject you). Use direct curl/browser for what the harness can't do — unauth GraphQL introspection
-POST, multi-step app flows, signup-page scouting — after the pre-flight, non-destructive, in-scope.
+USE WHATEVER TOOL IS MOST EFFECTIVE — you are NOT limited to the pipeline scripts. Direct curl, nuclei,
+custom scripts, the confirmer workers, the browser, anything you judge useful. The limits are on
+BEHAVIOUR, not tools: every request stays NON-DESTRUCTIVE and IN-SCOPE+paying (verify scope yourself per
+host), Mullvad-confirmed, and POLITE (rate-limit yourself, respect host cooldowns/backoff — never get us
+banned). `recon_safe_probe.sh` is OFFERED, not required — it enforces all of that for free (scope gate +
+global rate-limit + SSRF guard + audit), so it's the easy default for bulk HTTP; but reach for any other
+tool when it fits the job, you just carry the same guarantees yourself.
 
 ## SKILLS & CAPABILITIES (use the full toolbox — you have all of these)
 - RESEARCH (server-side fetches; no IP exposure): the `deep-research` skill for program-scope nuance,
@@ -62,9 +65,9 @@ POST, multi-step app flows, signup-page scouting — after the pre-flight, non-d
   operator's data dir clean), run it, then `rm` it IMMEDIATELY after. Never leave temp scripts in ~/recon.
   Prefer running simple commands inline with `bash -lc '...'`; only use a temp file when $vars truly break.
 
-## CONFIRMER TOOLS (recommended "hands" — exact commands; safe/in-scope/non-destructive; direct curl/browser also allowed per EGRESS SAFETY)
-- `scripts/recon_safe_probe.sh <url> [GET|HEAD|OPTIONS]` — the reachability/exposure probe (authoritative
-  scope gate, Mullvad-only). Primary verifier.
+## TOOLS AVAILABLE (helpers, NOT required — use these OR any other tool you judge effective)
+- `scripts/recon_safe_probe.sh <url> [GET|HEAD|OPTIONS]` — convenience reachability/exposure probe with
+  scope gate + rate-limit + audit baked in (the easy default; not mandatory).
 - `scripts/recon_scope_check.sh <host>` — authoritative scope DB (local, no traffic): in_scope/pays/tier.
 - `tools/xss_confirm_worker.py <url>` — headless-Chromium marker EXECUTION (real XSS, not reflection).
 - `tools/param_confirm_worker.py <url>` — SSTI `{{a*b}}` / open-redirect canary / SQLi error-differential.
@@ -137,13 +140,15 @@ sweep, several independent lanes/programs to cover at once), SPAWN PARALLEL SUB-
 and orchestrate them — you are the lead, they are your team:
 - Give each sub-agent a DISTINCT slice (one lane, one program/cluster, or one partition of the top-scored
   hosts) and tell it to READ THIS PLAYBOOK and follow ALL rules (zero-FP, scope+pays, the CACHED VPN check
-  `recon_vpn_check.sh --cached`, `recon_safe_probe.sh` only, self-refute). Each returns STRUCTURED verified
-  findings, not raw dumps.
-- BOUND it: a sensible number (≈ up to a dozen) with a per-agent probe budget. SAFE BY CONSTRUCTION — all
-  target probing shares the GLOBAL anti-burn rate-limit + host cooldowns + circuit-breaker
-  (recon_safe_probe.sh), so N agents CANNOT collectively hammer a target or get us banned; parallelism buys
-  coverage + reasoning breadth, not unlimited probe throughput. They read the SHARED cached VPN status
-  (`vpn_status.json`) — no am.i.mullvad storm.
+  `recon_vpn_check.sh --cached`, polite non-destructive in-scope probing with ANY tool, self-refute). Each
+  returns STRUCTURED verified findings, not raw dumps.
+- BOUND it + DON'T GET US BANNED: a sensible number (≈ up to a dozen) with a per-agent probe budget. The
+  free anti-burn guarantee (shared global rate-limit + cooldowns + circuit-breaker) only holds when probing
+  goes through `recon_safe_probe.sh` — so if sub-agents use OTHER tools, YOU must preserve it manually:
+  PARTITION the work by host/program so no single target is hit by more than one agent, cap each agent's
+  budget, and tell each to self-rate-limit + honor backoff. Parallelism buys coverage + reasoning breadth,
+  not unlimited probe throughput. They read the SHARED cached VPN status (`vpn_status.json`) — no
+  am.i.mullvad storm.
 - YOU (the lead) then COLLECT every sub-agent's findings, DEDUPE across them + the worked/fp ledgers,
   RE-VERIFY / adversarially self-refute each kept lead, and synthesize ONE card. A sub-agent's "confirmed"
   is a candidate until YOU re-check it — the zero-FP bar is yours to hold, never delegated.
@@ -248,6 +253,7 @@ NEVER weaken a SAFETY rule (scope / pays / VPN gates) to make a host score — o
 Recon confirms an exposure EXISTS — never exploit past it, never harvest data, never enumerate ids that
 aren't yours, never bypass a login to get in, no RCE primitives, no orders/transfers. BAC/IDOR uses accounts
 the researcher owns only; account creation + authenticated requests are the operator's, never the agent's.
-Autonomous verification = SAFE, UNAUTH, non-destructive via the listed tools ONLY, Mullvad-only, fail-closed.
+Autonomous verification: use ANY tool you judge effective — the bar is SAFE + UNAUTHENTICATED +
+NON-DESTRUCTIVE + IN-SCOPE + Mullvad-confirmed + polite (don't get banned), never a specific script.
 VDP/non-paying (pays=false) and internal/corp infra are out. Never overclaim — honest severity always
 (overclaiming gets reports closed N/A and dings researcher signal).
