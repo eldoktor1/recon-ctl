@@ -28,8 +28,6 @@ LOG_DIR="$BASE_DIR/logs"
 FLAG="$STATE_DIR/vpn_down"               # presence = egress blocked / pipeline paused
 STREAK_FILE="$STATE_DIR/.vpnguard_streak"
 SCANNER_USER="${SCANNER_USER:-reconrun}"
-CHECK_URL="${VPN_CHECK_URL:-https://am.i.mullvad.net/json}"
-TIMEOUT="${VPN_CHECK_TIMEOUT:-12}"
 # A CONFIRMED leak (am.i.mullvad reached, says you're NOT on Mullvad — i.e. the
 # VPN actually dropped) is authoritative → trip almost immediately.
 LEAK_THRESHOLD="${VPN_LEAK_THRESHOLD:-1}"
@@ -49,19 +47,11 @@ log() { printf '[%s VPNGUARD] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2;
 # single slow response under scan load doesn't read as "unknown".
 check_mullvad() {
   command -v jq >/dev/null 2>&1 || { echo unknown; return; }
-  local resp m attempt
-  for attempt in 1 2 3; do
-    resp="$(timeout "$TIMEOUT" curl -sS --max-time "$(( TIMEOUT > 2 ? TIMEOUT - 1 : TIMEOUT ))" "$CHECK_URL" 2>/dev/null)" || resp=""
-    if [[ -n "$resp" ]]; then
-      m="$(printf '%s' "$resp" | jq -r '.mullvad_exit_ip // "null"' 2>/dev/null)"
-      case "$m" in
-        true)  echo ok;   return ;;
-        false) echo leak; return ;;
-      esac
-    fi
-    sleep 2
-  done
-  echo unknown
+  # Delegate to the ONE cached multi-method checker (recon_vpn_check.sh): near-zero am.i.mullvad calls
+  # (local known-IP cache; am.i.mullvad only when the exit IP changes; org/ASN fallback). Writes vpn_status.json.
+  local sd; sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  STATE_DIR="$STATE_DIR" bash "$sd/recon_vpn_check.sh" >/dev/null 2>&1
+  case "$?" in 0) echo ok ;; 1) echo leak ;; *) echo unknown ;; esac
 }
 
 # Kill everything that egresses (NOT the daemon master or this guard, so the

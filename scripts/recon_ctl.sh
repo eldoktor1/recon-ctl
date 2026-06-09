@@ -176,25 +176,15 @@ cmd_start() {
   # tunnel, so confirm egress is a Mullvad exit before starting any target-facing
   # recon. recon_vpnguard then keeps watching during the run.
   if [[ "${RECON_SKIP_VPN_CHECK:-0}" != "1" ]]; then
-    # am.i.mullvad rate-limits / has blips — RETRY before deciding, and distinguish
-    # "endpoint unreachable" (empty, NOT proof of a leak) from "actual leak" (false).
-    local mexit=""
-    for _vtry in 1 2 3 4 5; do
-      mexit="$(timeout 8 curl -sS --max-time 7 https://am.i.mullvad.net/json 2>/dev/null | jq -r '.mullvad_exit_ip // empty' 2>/dev/null)"
-      [[ -n "$mexit" ]] && break
-      sleep 2
-    done
-    if [[ "$mexit" == "true" ]]; then
-      echo "VPN OK — Mullvad exit confirmed."
-    elif [[ -z "$mexit" ]]; then
-      echo "REFUSING to start: could not REACH am.i.mullvad after 5 tries (verification endpoint down/rate-limited)."
-      echo "  This is NOT proof of a leak — Mullvad may well be UP. Verify your exit IP is a Mullvad IP, then:"
-      echo "    RECON_SKIP_VPN_CHECK=1 recon-start"
-      return 1
-    else
-      echo "REFUSING to start: egress is NOT a Mullvad exit (mullvad_exit_ip=$mexit) — possible LEAK. Reconnect Mullvad."
-      return 1
-    fi
+    # Single cached multi-method egress check — does NOT hammer am.i.mullvad (local known-IP cache;
+    # am.i.mullvad only on a NEW exit IP; org/ASN fallback when it's down). See recon_vpn_check.sh.
+    STATE_DIR="$STATE_DIR" bash "$SCRIPT_DIR/recon_vpn_check.sh" >/dev/null 2>&1
+    case "$?" in
+      0) echo "VPN OK — Mullvad egress confirmed." ;;
+      1) echo "REFUSING to start: egress is a LEAK (not a Mullvad exit). Reconnect Mullvad."; return 1 ;;
+      *) echo "REFUSING to start: could not CONFIRM Mullvad egress (verification endpoints unreachable — NOT proof of a leak)."
+         echo "  Verify your exit IP, then override: RECON_SKIP_VPN_CHECK=1 recon-start"; return 1 ;;
+    esac
   fi
   nohup bash "$DAEMON" >/dev/null 2>&1 &
   sleep 1

@@ -28,9 +28,11 @@ Bash tool, WSL, AND browser tools (VERIFIED 2026-06-08: MINGW and WSL both exit 
 So you may VERIFY HOWEVER IS MOST EFFECTIVE — direct curl from the Bash tool, the WSL confirmer workers,
 the pipeline scripts, browser tools — you are NOT restricted to the pipeline scripts.
 UNIVERSAL FAIL-CLOSED GUARD (the operator must NEVER be exposed on their real IP): BEFORE any
-target-facing traffic, run `curl -sS https://am.i.mullvad.net/json` and require `.mullvad_exit_ip==true`,
-AND verify there is no `~/recon/state/vpn_down` marker. If either fails or you are unsure → LEAD-ONLY,
-no probes, and say so. (The GUI `mullvad status` can wrongly say "Disconnected"; am.i.mullvad is
+target-facing traffic, run the CACHED checker `bash /home/d0k/recon-pipeline/scripts/recon_vpn_check.sh
+--cached` (exit 0 = Mullvad-confirmed · 1 = leak · 2 = unknown), or read `~/recon/state/vpn_status.json`
+(`.mullvad==true`). **Do NOT curl am.i.mullvad directly — it rate-limits**; the checker hits it ONLY on a
+NEW exit IP, then caches (the rest is local). Also confirm no `~/recon/state/vpn_down` marker. If exit≠0 /
+leak / unknown / vpn_down → LEAD-ONLY, no probes, and say so. (The GUI `mullvad status` can lie; the checker is
 authoritative. Re-check if egress could have changed mid-run.)
 CONSTRAINTS THAT REMAIN: NON-DESTRUCTIVE only; IN-SCOPE + paying only; UNAUTHENTICATED only (account
 creation and ANY logged-in request are the operator's — human-in-the-loop). Never touch VPN/nft config.
