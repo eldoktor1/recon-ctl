@@ -14,8 +14,9 @@ Elasticsearch, and only then feed safe review and scoring.
    `~/recon/vuln/vuln_feed.jsonl`.
 3. The same script matches non-`T3` records to local ES tech fingerprints and
    writes `~/recon/vuln/vuln_targets.jsonl`.
-4. `recon_brain.sh` refreshes the vuln feed before triage.
-5. The daemon runs `vuln-feed` automatically every hour by default.
+4. The daemon runs `vuln-feed` automatically every hour by default (the primary, automated
+   path). `recon_brain.sh full|quick` can also refresh the feed before triage, but it is a
+   MANUAL one-shot orchestrator — it is not part of the automated daemon pipeline.
 
 ## Inputs
 

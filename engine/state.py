@@ -345,8 +345,13 @@ def record_ai_verdict(conn, finding_id: int, verdict: str, confidence: float, re
         row = conn.execute("SELECT host,signal_class,vuln_class,state FROM findings WHERE id=?", (finding_id,)).fetchone()
         _audit(conn, finding_id, "ai-verdict", row["state"] if row else None, verdict, f"conf={confidence}: {reason[:120]}")
     if verdict == "fp" and row is not None:
-        # adversarially-disproven -> dismiss + remember the signature so we never re-surface it
-        transition(conn, finding_id, "dismissed", expect="confirmed", last_error=f"AI fp: {reason[:160]}")
+        # adversarially-disproven -> dismiss + remember the signature so we never re-surface it.
+        # Retract from WHATEVER non-terminal state it is in: a re-judged FP must be pulled out
+        # of the review queue too (state='reported'), not only out of 'confirmed'. EDGES already
+        # permits reported->dismissed; hard-coding expect='confirmed' made the dismiss a silent
+        # no-op for already-reported findings (stranding known FPs in the operator submit queue).
+        if row["state"] in ("confirmed", "reported"):
+            transition(conn, finding_id, "dismissed", expect=row["state"], last_error=f"AI fp: {reason[:160]}")
         record_fp(conn, fp_signature(row["host"], row["signal_class"], row["vuln_class"]),
                   reason=f"claude-validation: {reason[:160]}", source="ai-validation")
 
@@ -511,7 +516,7 @@ def _main(argv):
         print("report-set")
     else:
         print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed|"
-              "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy}", file=sys.stderr); return 2
+              "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy|set-report}", file=sys.stderr); return 2
     return 0
 
 

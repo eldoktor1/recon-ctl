@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS false_positive_signatures (
     id          INTEGER PRIMARY KEY,
     signature   TEXT NOT NULL UNIQUE,
     reason      TEXT,
-    source      TEXT,                  -- recon-ignore | dismissed | gate-exhausted
+    source      TEXT,                  -- recon-ignore | dismissed | gate-exhausted | ai-validation
     hit_count   INTEGER NOT NULL DEFAULT 0,   -- times re-encountered and suppressed
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     last_seen_at TEXT

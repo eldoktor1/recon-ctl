@@ -38,15 +38,21 @@ if [[ -f "$LOCK_FILE" ]]; then
   fi
 fi
 
-# ── 2. VPN gate — never enumerate targets without Mullvad ─────────────────
-vpn_resp="$(timeout 8 curl -sS --max-time 7 https://am.i.mullvad.net/json 2>/dev/null || true)"
-mullvad_exit="$(printf '%s' "$vpn_resp" | jq -r '.mullvad_exit_ip // "null"' 2>/dev/null || echo "null")"
-if [[ "$mullvad_exit" != "true" ]]; then
-  log "ABORT — VPN not on Mullvad (mullvad_exit_ip=$mullvad_exit). Connect VPN and retry manually."
+# ── 2. VPN gate — never enumerate targets without Mullvad (cached multi-method check) ─────
+# Fail-closed via the ONE cached checker (recon_vpn_check.sh): rc 0 = Mullvad-confirmed;
+# any other rc (leak / unconfirmed) aborts. Uses the local known-IP cache so it does NOT
+# hammer am.i.mullvad.
+_bulk_vpn="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/recon_vpn_check.sh"
+if [[ -f "$_bulk_vpn" ]]; then
+  vpn_word="$(STATE_DIR="$STATE_DIR" bash "$_bulk_vpn" 2>/dev/null)"; vpn_rc=$?
+else
+  vpn_word="no-checker"; vpn_rc=2
+fi
+if [[ "$vpn_rc" -ne 0 ]]; then
+  log "ABORT — Mullvad egress not confirmed ($vpn_word). Connect VPN and retry manually."
   exit 1
 fi
-exit_host="$(printf '%s' "$vpn_resp" | jq -r '.mullvad_exit_ip_hostname // "?"' 2>/dev/null)"
-log "VPN OK (exit=$exit_host)"
+log "VPN OK ($vpn_word)"
 
 # ── 3. ES gate — bulk is useless if ES is down ────────────────────────────
 _bulk_net="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/recon_net.sh"

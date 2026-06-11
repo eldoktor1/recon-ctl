@@ -1145,7 +1145,7 @@ cmd_ai() {
       else
         echo "  claude CLI: ❌ not found — deterministic confidence fallback in effect"
       fi
-      echo "  model:      ${CLAUDE_MODEL:-sonnet}    batch: ${AI_REVIEW_BATCH:-15}/cycle"
+      echo "  model:      ${CLAUDE_MODEL:-sonnet}    on-demand verify batch: ${AI_REVIEW_BATCH:-15}  (daemon ai-review loop retired; 2IC routine + recon-verify own validation)"
       if [[ ! -f "$DB" ]]; then echo "  db:         ❌ $DB (not found — evidence gate has not run yet)"; return 0; fi
       echo "  db:         $DB"
       local stats
@@ -1207,18 +1207,6 @@ cmd_ai() {
       printf "  showing: %s  |  total Claude-worth leads in ES: %s\n" "$an_n" "$an_total"
       ;;
 
-    # ---- monitor: latest Claude pipeline health/guidance assessment ----
-    monitor|health)
-      hdr "Claude monitor — latest pipeline health + guidance"
-      local mf="${AI_MONITOR_OUT:-$BASE_DIR/state/ai_monitor_latest.json}"
-      [[ -f "$mf" ]] || { echo "  (no assessment yet — ai-monitor has not run)"; return 0; }
-      jq -r '"  at: \(.at // "?")",
-             "  health: \(.health)   ·   burn-risk: \(.burn_risk)",
-             "  \(.summary)",
-             (if (.guidance//[])|length>0 then "  guidance:", ((.guidance[])|"    🧭 \(.)") else empty end),
-             (if (.anomalies//[])|length>0 then "  anomalies:", ((.anomalies[])|"    ⚠️  \(.)") else empty end)' "$mf" 2>/dev/null || cat "$mf"
-      ;;
-
     # ---- accuracy: Claude layer self-audit (is it actually working?) ----
     accuracy|audit)
       hdr "Claude accuracy — self-audit (human disposition of 'real' verdicts)"
@@ -1265,7 +1253,6 @@ cmd_ai() {
       echo "  top [N]             all findings in verdict order"
       echo "  analysis            Claude-analysis leads worth verifying (from ES)"
       echo "  accuracy            self-audit: 'real'-verdict precision + verdict mix"
-      echo "  monitor             latest pipeline health + guidance (burn-risk watch)"
       echo "  detail <host>       full verdict + evidence for one host"
       ;;
   esac
@@ -1293,9 +1280,9 @@ cmd_view() {
 
   # ── Fire all ES queries in parallel ───────────────────────────────────────
   { _es_count_q '{"match_all":{}}' > "$tmp/es_total"; } &
-  { timeout 5 curl -sS --max-time 4 https://am.i.mullvad.net/json 2>/dev/null \
-      | jq -r 'if .mullvad_exit_ip then "✅ "+.mullvad_exit_ip_hostname else "❌ NOT MULLVAD ("+.ip+")" end' 2>/dev/null \
-      || echo "⏱ timeout"; } > "$tmp/vpn" &
+  { STATE_DIR="$STATE_DIR" bash "$SCRIPT_DIR/recon_vpn_check.sh" --cached >/dev/null 2>&1
+    jq -r 'if .mullvad==true then "✅ "+.ip elif .mullvad==false then "❌ NOT MULLVAD ("+.ip+")" else "❓ unconfirmed" end' \
+      "$STATE_DIR/vpn_status.json" 2>/dev/null || echo "❓ unknown"; } > "$tmp/vpn" &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_signals\"],\"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_priority\":\"P0\"}},{\"term\":{\"triage_true_fresh\":true}},{\"term\":{\"triage_pays\":true}}]}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/fresh_p0"; } &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_true_fresh\",\"triage_classes\"],\"query\":{\"term\":{\"triage_priority\":\"P0\"}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/all_p0"; } &
   { _es_search "{\"size\":$n_top,\"_source\":[\"host\",\"triage_priority\",\"triage_score\",\"triage_payout_tier\",\"triage_program\",\"triage_kev_signal\"],\"query\":{\"term\":{\"triage_kev_match\":true}},\"sort\":[{\"triage_score\":{\"order\":\"desc\"}}]}" > "$tmp/kev"; } &

@@ -13,9 +13,11 @@ first to fresh surface.** Every new lane must answer "how is this not what every
 The UNIQUE pillars (all additive — nothing that works was removed):
 - **JS-intel** (`recon_jsintel.sh`) — mine each host's JS for the HIDDEN API surface +
   trufflehog `--only-verified` LIVE secrets (kills the 53%-FP token-shaped noise).
-- **IDOR/BAC money pillar** (`recon_ai_idor.sh`) — Claude reasons over that surface →
+- **IDOR/BAC money pillar** (owned by the **2IC routine agent**, not a daemon loop) — Claude
+  reasons over the jsintel endpoint surface (`~/recon/js_recon/endpoints.jsonl` + ES) →
   ranked broken-access-control/IDOR worklist with the 2-account test (the most-rewarded
-  class; reasoning only, human exploits with their own accounts).
+  class; reasoning only, human exploits with their own accounts). (The old `recon_ai_idor.sh`
+  daemon loop was retired 2026-06-08 — the routine subsumes it.)
 - **n-day racing** (`recon_nday.sh`) — Claude version-reasons KEV/CVE matches to KILL the
   tech-class FP and surface only genuine in-range candidates, in the race window.
 - **GitHub leaks** (`recon_ghleaks.sh`) — code-search → trufflehog-verify live leaked
@@ -87,12 +89,13 @@ banned: min-gap + jitter, per-host and global rolling-window caps, a host COOLDO
 429/403/503, and a global CIRCUIT-BREAKER that pauses ALL probing after repeated blocks
 (`PROBE_*` env). The article's politeness rule, enforced in code.
 
-**MONITOR (Claude's 3rd role).** `recon_ai_monitor.sh` (hourly daemon loop) reads LOCAL
-telemetry only — burn signals (probe blocks/cooldowns/global-pause), verdict precision,
-failures/halts, daemon errors, VPN — and emits a skeptical health + burn_risk + guidance
-assessment to `#ops` / `recon-ai monitor`. It guides and watches every process; it issues
-NO target traffic. So Claude now spans the pipeline: ANALYZE (aim) → VERIFY+probe (confirm)
-→ MONITOR (oversee).
+**MONITOR (Claude's 3rd role) — owned by the 2IC routine agent.** Once per run the 2IC
+routine sanity-checks LOCAL telemetry only — burn signals (probe blocks/cooldowns/global-
+pause), verdict precision, failures/halts, daemon errors, VPN — and posts an alert to `#ops`
+ONLY when something is actually wrong (no hourly health spam). It guides and watches; it
+issues NO target traffic. So Claude spans the pipeline: ANALYZE (aim) → VERIFY+probe
+(confirm) → MONITOR (oversee). (The standalone `recon_ai_monitor.sh` hourly daemon loop was
+retired 2026-06-08 — the routine subsumes it; there is no `ai_monitor_latest.json` anymore.)
 
 Output is **schema-validated** (`--json-schema` → `.structured_output`; no regex scraping;
 unparseable ⇒ safe `needs-human`). It **escalates to the big model on genuine ambiguity OR a

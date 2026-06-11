@@ -392,7 +392,7 @@ supervise_loop() {
     # vpnguard logs its own state changes; logging every 20s here is pure noise.
     # Scanner loops get threads/rate context; lightweight loops get nothing extra.
     case "$name" in
-      validate|validate-fast|discovery|scope-watch|nuclei-v21|bounty-scan|deep-scan|active-checks|js-scanner|cloudrecon|dast|params|vuln-feed)
+      validate|validate-fast|discovery|scope-watch|active-checks|js-scanner|cloudrecon|params|params-verify|portscan|bypass|evidence-gate|vuln-feed)
         log "[$name] starting (power=$POWER_STATE threads=$HTTPX_THREADS rate=$HTTPX_RATE)" ;;
       vpnguard) ;;
       *) log "[$name] starting" ;;
@@ -469,8 +469,8 @@ run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT"
 # hosts fresh-first, gf-classifies params, builds the recon_params ES index +
 # per-class files for `recon_ctl params <class>`. Target-facing → run_scanner.
 PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
-PARAMS_INTERVAL="${PARAMS_INTERVAL:-1800}"
-PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-3600}"
+PARAMS_INTERVAL="${PARAMS_INTERVAL:-120}"          # near-continuous: re-invoke ~2min after a whole-pool collect run finishes (always crawling)
+PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-300}"   # verify IN PARALLEL ~5min — confirmed params -> findings.db -> agent's ai-pending (verified-only reaches the agent)
 run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
 # Active-probe the catalog for canary REFLECTION -> writes params/verify_xss.jsonl, the leads
 # xss-confirm consumes (headless marker-exec). Without this the catalog fills but xss-confirm

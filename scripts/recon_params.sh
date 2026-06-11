@@ -57,11 +57,14 @@ fi
 # (0.05% of in-scope), starving the confirmers. Parallelise the per-host crawl PARAM_PARALLEL-wide
 # and raise hosts/cycle — per-host rate limits (KATANA_RL, gau jitter) are unchanged so we
 # buy throughput without becoming aggressive (the article's ban cautionary tale).
-PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-30}"
-PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited)
+# CONTINUOUS / UNCAPPED collection: crawl the whole eligible pool each run, parallel-pooled so the next
+# host queues the instant one finishes (or comes up empty). Stays SAFE/no-ban via PARAM_PARALLEL + per-host
+# KATANA_RL/gau jitter (unchanged), and leak-safe via the mid-crawl vpn_down check in the pool loop.
+PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-100000}"   # effectively uncapped — process all un-cooled candidates
+PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited) — politeness throttle, keep it
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
-PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so they don't hog the cycle (was a 6h re-crawl that starved new-host discovery)
-PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-3000}"   # was 1200: too shallow once the 30d zero-param cooldown parks the top hosts → cycles starved to 1-5; reach deeper for un-cooled candidates
+PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so a host with no params doesn't get re-crawled — the next host queues instead
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-20000}"   # reach DEEP so cycles never starve (always work to crawl); selection only — actual crawl is per-host rate-limited
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
@@ -228,6 +231,9 @@ cmd_collect() {
   # dir (no shared-file races). Per-host rate limits + gau jitter keep egress polite.
   local running=0
   while IFS=$'\t' read -r host url root program tier fresh fseen; do
+    # leak-safe on long/uncapped runs: abort the moment Mullvad drops (supervise_loop only
+    # re-checks between runs, so check per-host here too). 'next host queues' via the pool below.
+    [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-crawl — halting"; break; }
     crawl_host "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" "$WORK" &
     running=$((running+1))
     if (( running >= PARAM_PARALLEL )); then wait -n 2>/dev/null || wait; running=$((running-1)); fi

@@ -159,17 +159,22 @@ Safe final version.
 
 Purpose:
 
-    Hidden safe recon startup
+    Hourly + on-logon health check and auto-restart (NOT a one-shot startup)
 
 Expected action:
 
-    wscript.exe C:\recon\start_recon_hidden.vbs
+    wscript.exe C:\recon\recon_watchdog.vbs
 
 The VBS wrapper runs:
 
-    C:\Windows\System32\wsl.exe -d kali-linux -u d0k -- bash -lc "/home/d0k/recon-pipeline/tools/start_recon_safe.sh"
+    C:\Windows\System32\wsl.exe -d kali-linux -u d0k bash /home/d0k/recon-pipeline/tools/recon_watchdog.sh
 
-The VBS wrapper uses hidden mode, so no console box should appear.
+`recon_watchdog.sh` checks daemon/VPN/ES/queue/disk health and, if the daemon is
+DOWN and VPN+ES are both OK, restarts it via `tools/start_recon_safe.sh`. The VBS
+wrapper uses hidden mode (window style 0), so no console box should appear.
+
+(`C:\recon\start_recon_hidden.vbs` → `start_recon_safe.sh` exists for a manual
+hidden one-shot start, but it is NOT the action of any active scheduled task.)
 
 Check from PowerShell:
 
@@ -178,8 +183,8 @@ Check from PowerShell:
 Expected:
 
     Last Result: 0
-    Task To Run: wscript.exe C:\recon\start_recon_hidden.vbs
-    Scheduled Task State: Enabled
+    Task To Run: wscript.exe C:\recon\recon_watchdog.vbs
+    Scheduled Task State: Ready
 
 Do not configure `ReconWatchdog` to call `recon_daemon.sh` directly.
 

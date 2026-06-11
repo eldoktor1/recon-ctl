@@ -121,8 +121,12 @@ Round loop (keep going until a confirm OR the budget below is exhausted):
    If the version is genuinely in-range → real n-day candidate (human exploits).
 3. **403/401 access-control bypass** (`recon_bypass.sh` / the auth-bypass lane, 68k hosts): header/method/
    path-normalization tricks on protected admin/api hosts.
-4. **Param confirmers** at scale: batch `param_confirm_worker.py <url> <ssti|redirect|sqli>` across the
-   catalog (scope-check each — the catalog's payout_tier lies).
+4. **Params (VERIFIED-only — do NOT mine the raw catalog).** The daemon now collects + confirms params
+   CONTINUOUSLY in parallel (uncapped, polite, next-host-queues), and only CONFIRMED ones land in the state
+   machine. So you consume them via the **ai-pending queue** (state-machine step 1: `state.py ai-pending`) —
+   adversarially re-verify each confirmed SSTI/redirect/SQLi and set the verdict. Don't re-run
+   `param_confirm_worker.py` across raw candidates; that's the daemon's job, and raw catalog `payout_tier`
+   lies anyway. (You MAY still spot-confirm a specific param if a lead warrants it.)
 5. **Different programs / score tiers / freshness windows** each round — don't re-walk the same
    top-of-lane every day.
 6. **Deeper per-host investigation** on promising hosts: mine JS for the real API base, fetch+diff
