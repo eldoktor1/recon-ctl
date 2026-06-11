@@ -1180,6 +1180,24 @@ apply_cluster_and_submission() {
         uuid_capped: true
       }
     else . end) |
+    # Shared-tenant third-party-data HARD LINE (CLAUDE.md / fp_patterns). A host whose
+    # leftmost label is a UUID under the Ubiquiti per-customer wildcard
+    # *.unifi-hosting.ui.com is a per-customer tenant console; any cross-tenant test
+    # means reaching data that belongs to another tenant. These are NEVER a valid
+    # target (not merely low value), yet they fingerprint as "UniFi OS" admin panels
+    # plus open 8080/8443 and were flooding the top of the ranking (~94 percent of
+    # score>=18 in-scope+pays hosts). Mark them triage_ignored so they drop out of every
+    # worklist (all of which must_not triage_ignored), and zero the score as a floor.
+    # Suppresses accuracy/relevance only; never weakens a scope/pays gate.
+    map(if (.host | test("\\.unifi-hosting\\.ui\\.com$"; "i"))
+           and (.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i")) then
+      . + {
+        score: 0,
+        signals: (.signals + ["suppress:shared-tenant-thirdparty"]),
+        triage_ignored: true,
+        triage_ignored_reason: "shared-tenant per-customer console (uuid.unifi-hosting.ui.com) — third-party data, HARD LINE"
+      }
+    else . end) |
     # Unverified-KEV no-P0 cap (mirrors cap:pattern-only-no-p0). A host whose only
     # high-value evidence is a version/surface/plugin-unverified KEV fingerprint
     # (kev_unverified_sole, computed in apply_scope_kev_enrichment) is a LEAD, not a
