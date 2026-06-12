@@ -126,7 +126,12 @@ def _noise_text(ld):
 _PUBLIC_TOKEN_RE = re.compile(
     r'(supabase\s*anon|anon[\s_-]*key|\bpk_(live|test)_|stripe\s+publishable|publishable\s+key|'
     r'firebase\s*(web\s*)?config|\bAIza[0-9A-Za-z_\-]{10,}|oauth\s*client[\s_-]*id|google\s*(browser\s*)?api\s*key)', re.I)
-_THIRD_PARTY_RE = re.compile(r'(third[\s-]*party|not\s+owned|unaffiliated|fork(ed)?\s+(of|repo)|someone\s+else.?s\s+repo)', re.I)
+# third-party / unowned-repo markers — covers the real adjudication phrasing seen in the
+# verified-secret-github stream: "THIRD-PARTY", "3rd-party", "NOT FanDuel's own repo",
+# "not Statuspage repo", "public OSS repo", "Trickest ... NOT Personios own repo/surface".
+_THIRD_PARTY_RE = re.compile(
+    r"(third[\s-]*party|\b3rd[\s-]*party\b|not\s+owned|unaffiliated|fork(ed)?\s+(of|repo)|"
+    r"someone\s+else.?s\s+repo|public\s+oss\s+repo|not\s+[\w'’]+(\s+own)?\s+(repo|surface))", re.I)
 _SECRETISH_RE   = re.compile(r'(secret|token|leak|trufflehog|credential|api[\s_-]?key|password)', re.I)
 _SPA_SHELL_RE   = re.compile(r'(spa[\s-]*shell|index\.html|returns?\s+the\s+app|app\s+shell|client[\s-]*side\s+route|same\s+as\s+/)', re.I)
 _KEV_RE         = re.compile(r'\b(kev|cve-\d{4}-\d+|n-?day)\b', re.I)
