@@ -59,10 +59,12 @@ Set-Content -Path $vbs -Value $cmd -Encoding ASCII
 schtasks /Create /TN "ReconHostThermal" /SC ONLOGON /RL LIMITED /F /TR ("wscript.exe `"$vbs`"") | Out-Null
 schtasks /Run /TN "ReconHostThermal" | Out-Null
 Write-Host "Registered + started ReconHostThermal (logon-persistent, ~45s cadence)." -ForegroundColor Green
-Write-Host "The producer launches HWiNFO HIDDEN only while recon is scanning, and closes it when"
-Write-Host "recon stops (gated on the vpn_status.json heartbeat) -- HWiNFO is never left open 24/7."
+Write-Host "The producer keeps HWiNFO running HIDDEN in the background AT ALL TIMES (set-and-forget)"
+Write-Host "and recycles it every ~11h to dodge free HWiNFO's 12h shared-memory limit, so the temp is"
+Write-Host "always queryable and the laptop is protected even when recon is idle."
 Write-Host ""
-Write-Host "ONE-TIME HWiNFO setup so its launches are silent + expose the sensor (do this once):" -ForegroundColor Yellow
+Write-Host "ONE-TIME HWiNFO setup so it's silent + exposes the sensor (do this once):" -ForegroundColor Yellow
 Write-Host "  run HWiNFO -> 'Sensors-only'; Settings: enable 'Shared Memory Support',"
-Write-Host "  'Minimize Main Window on startup', 'Minimize Sensors on startup', 'Minimize to Tray';"
-Write-Host "  DISABLE 'Auto Start' (the producer launches it on demand). Then close HWiNFO."
+Write-Host "  'Minimize Main Window on startup', 'Minimize Sensors on startup', 'Minimize to Tray'."
+Write-Host "  Leave 'Auto Start' OFF (the producer launches + keeps it running, and can recycle it"
+Write-Host "  for the 12h limit). Then close HWiNFO."
