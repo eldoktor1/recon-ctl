@@ -109,6 +109,95 @@ def endpoint_path(lead):
     return ep
 
 
+# ---- structural FP-CLASS rules (generalize past the host+class fp-signature table) ---
+# The state.py false_positive_signatures table is keyed on host+signal+vuln, so a BRAND-NEW
+# host exhibiting an OLD noise class is not auto-suppressed. These rules promote the stable,
+# documented FP classes from CLAUDE.md ("Documented false-positive patterns") into structural
+# checks that fire on ANY host with zero prior host-specific signature. Conservative by design
+# (fires only on clear signals — a wrong suppression is worse than one extra lead). Each rule
+# returns (class, action, reason): action 'suppress' = kill at render; 'downgrade' = keep but
+# relabel as an unverified LEAD (never present it as "verified").
+_NOISE_TEXT_FIELDS = ("cls", "vuln_class", "vuln_type", "signal_class", "what", "check",
+                      "why", "test", "reason", "title", "note")
+
+def _noise_text(ld):
+    return " ".join(str(ld.get(k, "")) for k in _NOISE_TEXT_FIELDS if ld.get(k) is not None).lower()
+
+_PUBLIC_TOKEN_RE = re.compile(
+    r'(supabase\s*anon|anon[\s_-]*key|\bpk_(live|test)_|stripe\s+publishable|publishable\s+key|'
+    r'firebase\s*(web\s*)?config|\bAIza[0-9A-Za-z_\-]{10,}|oauth\s*client[\s_-]*id|google\s*(browser\s*)?api\s*key)', re.I)
+_THIRD_PARTY_RE = re.compile(r'(third[\s-]*party|not\s+owned|unaffiliated|fork(ed)?\s+(of|repo)|someone\s+else.?s\s+repo)', re.I)
+_SECRETISH_RE   = re.compile(r'(secret|token|leak|trufflehog|credential|api[\s_-]?key|password)', re.I)
+_SPA_SHELL_RE   = re.compile(r'(spa[\s-]*shell|index\.html|returns?\s+the\s+app|app\s+shell|client[\s-]*side\s+route|same\s+as\s+/)', re.I)
+_KEV_RE         = re.compile(r'\b(kev|cve-\d{4}-\d+|n-?day)\b', re.I)
+_VERSION_OK_RE  = re.compile(r'(version\s+confirmed|confirmed\s+in[\s-]*range|running\s+version\s+\d|in-?range\s+version)', re.I)
+_PORTS_RE       = re.compile(r'(>?\s*[6-9]\d*\+?\s*(open\s*)?critical\s*ports|scan\s*artifact|every\s*port\s*(open|acks|responds))', re.I)
+
+
+def noise_class(ld):
+    """Detect a documented recurring FP/noise class. Returns (klass, action, reason) or None."""
+    t = _noise_text(ld)
+
+    # 1) public-by-design token — a "secret" that is MEANT to be public
+    if _PUBLIC_TOKEN_RE.search(t):
+        return ("public-by-design-token", "suppress",
+                "public-by-design token (Supabase anon / Stripe pk_ / Firebase web config / "
+                "OAuth client_id / Google browser API key) — not a secret")
+
+    # 2) third-party-repo secret — leaked in a repo the program does not own
+    if _THIRD_PARTY_RE.search(t) and _SECRETISH_RE.search(t):
+        return ("third-party-repo-secret", "suppress",
+                "secret found in a third-party / unowned repo — not the program's asset")
+
+    # 3) >6 "critical" ports on one host = CDN/scan artifact (CDNs ACK every port)
+    pc = ld.get("portscan_critical")
+    if pc is None:
+        pc = ld.get("critical_ports", ld.get("open_critical"))
+    try:
+        pc = int(pc)
+    except (TypeError, ValueError):
+        pc = 0
+    if pc > 6 or _PORTS_RE.search(t):
+        return (">6-critical-ports-scan-artifact", "suppress",
+                f"{pc if pc > 6 else '>6'} 'open' critical ports on one host = CDN/scan artifact, not real exposure")
+
+    # 4) SPA-shell 200 on all routes — route returns the app index.html, same as /
+    if ld.get("spa_shell") is True or _SPA_SHELL_RE.search(t):
+        return ("spa-shell-200-all-routes", "suppress",
+                "SPA-shell 200 (route returns the app index.html, same as /) — not an unauth leak")
+
+    # 5) tech-class KEV/CVE without a CONFIRMED in-range version -> LEAD, never "verified"
+    is_kev = bool(ld.get("cves") or ld.get("cve")) or bool(_KEV_RE.search(t))
+    version_confirmed = bool(ld.get("version_confirmed") or ld.get("kev_verified")) or bool(_VERSION_OK_RE.search(t))
+    if is_kev and not version_confirmed:
+        return ("tech-class-kev-no-version", "downgrade",
+                "KEV/CVE tech-class match without a confirmed in-range version — LEAD, not verified")
+
+    return None
+
+
+def filter_noise(leads):
+    """Batch any briefing stream through the class rules. Returns keep / suppressed split;
+    'downgrade' leads stay in keep but carry _noise_* annotations so the renderer relabels
+    them as unverified LEADs. Used by recon_briefing.sh at render across ALL streams."""
+    keep, suppressed, reasons = [], [], {}
+    for ld in leads:
+        nc = noise_class(ld)
+        if nc is None:
+            keep.append(ld)
+            continue
+        klass, action, reason = nc
+        ld = dict(ld)
+        ld["_noise_class"], ld["_noise_action"], ld["_noise_reason"] = klass, action, reason
+        if action == "suppress":
+            reasons[klass] = reasons.get(klass, 0) + 1
+            suppressed.append(ld)
+        else:  # downgrade -> kept, relabeled by the renderer
+            keep.append(ld)
+    return {"keep": keep, "suppressed": suppressed,
+            "suppressed_count": len(suppressed), "suppressed_reasons": reasons}
+
+
 def classify(leads):
     fan = load_fanout()
     sib_cache = {}
@@ -116,6 +205,16 @@ def classify(leads):
     reasons = {}
 
     for ld in leads:
+        # structural FP-class first: a documented noise class kills/downgrades on ANY host
+        # before the per-host fan-out/tenant logic even runs (zero prior signature needed).
+        nc = noise_class(ld)
+        if nc is not None and nc[1] == "suppress":
+            ld = dict(ld); ld["verdict"] = "suppress"
+            ld["_noise_class"] = nc[0]; ld["suppress_reason"] = nc[2]
+            reasons[nc[0]] = reasons.get(nc[0], 0) + 1
+            suppressed.append(ld)
+            continue
+
         host = (ld.get("host") or "").strip().lower()
         ep = endpoint_path(ld)
         labels = host.split(".")
@@ -189,6 +288,19 @@ def main():
     # host-classification mode: `brief_filter.py --host <fqdn>` -> JSON verdict
     if len(sys.argv) >= 3 and sys.argv[1] == "--host":
         print(json.dumps(classify_host(sys.argv[2])))
+        return
+    # FP-class mode: `brief_filter.py --noise` reads a JSON array on stdin and returns
+    # {keep, suppressed, suppressed_count, suppressed_reasons} using the structural class
+    # rules only (no ES/fan-out). The briefing pipes its submit/needs-human/vuln-lead
+    # streams through this so a known noise class is killed/relabeled on a brand-new host.
+    if len(sys.argv) >= 2 and sys.argv[1] == "--noise":
+        try:
+            leads = json.load(sys.stdin)
+        except Exception:
+            leads = []
+        if not isinstance(leads, list):
+            leads = []
+        print(json.dumps(filter_noise(leads)))
         return
     try:
         leads = json.load(sys.stdin)
