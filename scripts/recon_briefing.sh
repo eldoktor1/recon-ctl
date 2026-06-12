@@ -190,15 +190,24 @@ if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nne
   touch "$sent"; exit 0
 fi
 
+# --- noted hosts: flag (do NOT suppress) leads I've already worked. Set of every host +
+# root_domain that has a permanent note, so the renderer can prefix 📝 on touched leads. ---
+NOTES_FILE="${NOTES_FILE:-$STATE_DIR/host_notes.jsonl}"
+NOTED='[]'
+[[ -s "$NOTES_FILE" ]] && NOTED="$(jq -r '.host // empty, .root_domain // empty' "$NOTES_FILE" 2>/dev/null | sort -u | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
+[[ -n "$NOTED" ]] || NOTED='[]'
+
 # --- compile the card + durable .md ---
 md="$BRIEF_DIR/tonight_$today.md"
 {
   printf '# 🌙 TONIGHT — %s\n\n' "$today"
   printf '## 🎯 Test these (BAC/IDOR — the money class) — %s winnable lead(s)\n' "$nidor"
-  printf '%s' "$show_idor" | jq -r '
+  printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
     def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
+    def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
+    def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
     .[] |
-    "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)`"
+    "\n### " + mark + "[\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)`"
     + (if (.route_count // 1) > 1
          then "\n- **routes to test (\(.route_count)):** " + ((.routes // []) | map("`"+.+"`") | join(", "))
          else "\n- **endpoint:** `\(loc)`" end)
@@ -243,8 +252,10 @@ rh="$(discord_hook digest 2>/dev/null || true)"
 [[ -n "$rh" ]] || rh="$(discord_hook review 2>/dev/null || true)"   # fallback if #digest unset
 if [[ -n "$rh" ]]; then
   card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nidor")"
-  card+="$(printf '%s' "$show_idor" | jq -r '.[] |
-    "• **\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
+  card+="$(printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
+    def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
+    def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
+    .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"

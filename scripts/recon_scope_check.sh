@@ -226,7 +226,18 @@ EOF
     ;;
 
   *)
-    # Single host fallthrough
-    echo "$1" | batch_match | to_json
+    # Single host fallthrough (+ has_notes: signals "I've worked this host/root-domain before")
+    _sc_out="$(echo "$1" | batch_match | to_json)"
+    _sc_notes="${NOTES_FILE:-$HOME/recon/state/host_notes.jsonl}"
+    _sc_hn=false
+    if [[ -s "$_sc_notes" ]] && command -v jq >/dev/null 2>&1; then
+      _sc_rd="$(awk -F. '{ if (NF>=2) printf "%s.%s",$(NF-1),$NF; else printf "%s",$0 }' <<<"$1")"
+      jq -e --arg h "$1" --arg rd "$_sc_rd" 'select(.host==$h or .root_domain==$rd)' "$_sc_notes" >/dev/null 2>&1 && _sc_hn=true
+    fi
+    if command -v jq >/dev/null 2>&1 && [[ -n "$_sc_out" ]]; then
+      printf '%s' "$_sc_out" | jq -c --argjson hn "$_sc_hn" '. + {has_notes:$hn}'
+    else
+      printf '%s\n' "$_sc_out"
+    fi
     ;;
 esac

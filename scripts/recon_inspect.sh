@@ -34,6 +34,7 @@ ES_PASS="${ES_PASS:-$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || 
 INDEX="${INDEX_NAME:-recon_alive}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
+source "$SCRIPT_DIR/recon_notes.sh" 2>/dev/null || true   # note_get for the 📝 Notes section
 setup_es_netrc
 SCOPE_CHECK="${SCOPE_CHECK:-$SCRIPT_DIR/recon_scope_check.sh}"
 [[ -f "$SCOPE_CHECK" ]] || SCOPE_CHECK="$HOME/recon_scope_check.sh"
@@ -83,6 +84,10 @@ if command -v curl >/dev/null 2>&1; then
   fi
 fi
 
+# Permanent notes (worked-knowledge) for this host + its root_domain
+notes_json="$(note_get "$host" 2>/dev/null | jq -s -c '.' 2>/dev/null || echo '[]')"
+[[ -n "$notes_json" ]] || notes_json='[]'
+
 if [[ "$JSON_MODE" -eq 1 ]]; then
   jq -n \
     --arg host "$host" \
@@ -90,7 +95,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --argjson scope "$([[ -n "$scope" ]] && echo "$scope" || echo null)" \
     --argjson kev "$kev_match" \
     --argjson probe "$probe_json" \
-    '{host:$host, es:$es, scope:$scope, kev:$kev, probe:$probe}'
+    --argjson notes "$notes_json" \
+    '{host:$host, es:$es, scope:$scope, kev:$kev, probe:$probe, notes:$notes}'
   exit 0
 fi
 
@@ -111,6 +117,15 @@ if [[ "$ignore_entry" != "null" && -n "$ignore_entry" ]]; then
   ig_expires="$(printf '%s' "$ignore_entry" | jq -r '.expires_at // "?"' 2>/dev/null)"
   printf "\n  ${Y}⚠️  HOST IS IGNORED (TTL active until %s) — reason: %s${N}\n" "$ig_expires" "$ig_reason"
   printf "  ${Y}Results suppressed from fresh/fetch queries. Use 'recon-ignore' to re-add.${N}\n"
+fi
+
+# 📝 Notes — the primary "have I worked this host before?" surface (host + root-domain level)
+hdr "📝 Notes"
+nnotes="$(printf '%s' "$notes_json" | jq 'length' 2>/dev/null || echo 0)"
+if [[ "${nnotes:-0}" -eq 0 ]]; then
+  kv "notes" "none (host not worked before)"
+else
+  printf '%s' "$notes_json" | jq -r '.[] | "  [\(.created_at[0:10])] (\(.source))" + (if .program then " ["+.program+"]" else "" end) + " " + .note' 2>/dev/null
 fi
 
 hdr "Scope"
