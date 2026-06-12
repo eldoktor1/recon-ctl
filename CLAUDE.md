@@ -151,6 +151,17 @@ probes) on any digest lead so the operator can deep-check before spending an eve
 - Internal/corp infrastructure (`*.corp.*`, intranet, `dev-internal`) is out of scope
   even when something is exposed.
 
+## Worked-knowledge: notes vs ignores
+`ignored.jsonl` = a TEMPORARY 7-day penalty (a host willingly benched; resurfaces when the
+TTL lapses). `host_notes.jsonl` = PERMANENT worked-knowledge keyed to host/root-domain
+(`{host,root_domain,program,note,source,created_at}`, deduped on (host,note), NEVER TTL'd).
+Every ignore-WITH-reason also persists a note (no reason ⇒ no note); the pipeline's
+auto-ignores (`triage_ignored_reason`) backfill as `source:triage`. `recon-inspect` /
+`recon-scope` (`has_notes`) / `recon-briefing` (📝) surface notes so a host I've touched
+announces itself the moment it resurfaces, and the 2IC routine reads them to stop re-ranking
+angles a note already killed. Add/view with `recon-note <host> ["text"]`. Notes never expire;
+ignores do.
+
 ## Submission discipline
 - Lead with the most severe **ACCURATE** framing. Don't overclaim — overclaimed
   severity gets reports closed N/A and dings researcher signal. (Real case: an unauth
