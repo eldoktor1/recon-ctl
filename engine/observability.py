@@ -23,9 +23,122 @@ except Exception:
 
 DIGEST_DIR = os.path.expanduser(os.environ.get("V3_DIGESTS", "~/recon/v3/digests"))
 
+# ---- per-lane yield self-audit (so no lane fails silently) -------------------
+ES_URL            = os.environ.get("ES_URL", "http://127.0.0.1:9200")
+OBS_YIELD_WINDOW_D = int(os.environ.get("OBS_YIELD_WINDOW_D", "14"))
+ENDPOINTS_STORE   = os.path.expanduser(os.environ.get("JS_ENDPOINT_STORE", "~/recon/js_recon/endpoints.jsonl"))
+IDOR_WORKLIST     = os.path.expanduser(os.environ.get("IDOR_WORKLIST", "~/recon/idor_worklist.jsonl"))
+# the param catalog feeds BOTH param_confirm (ssti/sqli/redirect/open-redirect) and xss_confirm (xss)
+_PARAM_OUT_CLASSES = ("ssti", "sqli", "redirect", "open-redirect", "xss", "reflected-xss")
+
 
 def _today():
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _es_count(index: str) -> int:
+    """ES doc count for a catalog index. -1 on unreachable/missing (caller must NOT
+    treat -1 as silent-zero — an unknown source is not proof of wasted resources)."""
+    import urllib.request, base64
+    try:
+        pw = open(os.path.expanduser("~/.recon_es_pass"), encoding="utf-8").read().strip()
+        tok = base64.b64encode(f"elastic:{pw}".encode()).decode()
+        req = urllib.request.Request(f"{ES_URL}/{index}/_count", headers={"Authorization": "Basic " + tok})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return int(json.load(r).get("count", -1))
+    except Exception:
+        return -1
+
+
+def _linecount(path: str) -> int:
+    """Lines in a JSONL store. 0 if the file is ABSENT (definitive zero production);
+    -1 only on a real read error (transient — don't false-alarm)."""
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return -1
+
+
+def _count_to_test(path: str) -> int:
+    """IDOR worklist depth = leads still status='to-test'. 0 if absent."""
+    if not os.path.exists(path):
+        return 0
+    try:
+        n = 0
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                if '"status":"to-test"' in line or '"status": "to-test"' in line:
+                    n += 1
+        return n
+    except Exception:
+        return -1
+
+
+def _file_age_days(path: str):
+    try:
+        return round((_dt.datetime.now().timestamp() - os.path.getmtime(path)) / 86400.0, 1)
+    except Exception:
+        return None
+
+
+def yield_audit(conn, window_d: int = OBS_YIELD_WINDOW_D) -> dict:
+    """Per-lane production self-audit over a rolling window. For every lane reports
+    confirmed produced vs reals (ai_verdict='real') vs fps. A lane that spent resources
+    (input source non-empty) yet produced 0 confirmed AND 0 real is SILENT-ZERO. The
+    VALUE-ENGINE lanes — jsintel endpoint production + the IDOR worklist depth — are
+    monitored first-class and flagged CRITICAL when zero, because the whole IDOR pillar
+    depends on them. No lane can fail silently again."""
+    cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=window_d)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _counts(where: str, params: tuple):
+        r = conn.execute(
+            "SELECT COUNT(*) c, COALESCE(SUM(ai_verdict='real'),0) r, COALESCE(SUM(ai_verdict='fp'),0) f "
+            "FROM findings WHERE created_at>=? AND " + where, (cutoff, *params)).fetchone()
+        return int(r["c"]), int(r["r"]), int(r["f"])
+
+    lanes = []
+
+    # 1) DB lanes that DID produce findings (per signal_class) — the "what's producing" view
+    for row in conn.execute(
+            "SELECT COALESCE(signal_class,'(none)') lane, COUNT(*) c, "
+            "COALESCE(SUM(ai_verdict='real'),0) r, COALESCE(SUM(ai_verdict='fp'),0) f "
+            "FROM findings WHERE created_at>=? GROUP BY signal_class ORDER BY c DESC", (cutoff,)):
+        lanes.append({"lane": row["lane"], "kind": "db", "input_label": "findings", "input": None,
+                      "confirmed": int(row["c"]), "real": int(row["r"]), "fp": int(row["f"]),
+                      "silent_zero": False, "critical": False})
+
+    # 2) input-fed lanes — these can fail INVISIBLY (no findings row to GROUP BY), the whole point
+    # params: ES recon_params catalog -> param_confirm + xss_confirm findings
+    cat = _es_count("recon_params")
+    ph = "(" + ",".join("?" * len(_PARAM_OUT_CLASSES)) + ")"
+    pc, pr, pf = _counts(f"signal_class IN {ph}", _PARAM_OUT_CLASSES)
+    lanes.append({"lane": "params", "kind": "catalog", "input_label": "recon_params catalog (ES)",
+                  "input": cat, "confirmed": pc, "real": pr, "fp": pf,
+                  "silent_zero": (cat > 0 and pc == 0 and pr == 0), "critical": False})
+
+    # jsintel: endpoints.jsonl production feeds the IDOR pillar (+ its verified-secret findings)
+    ep = _linecount(ENDPOINTS_STORE)
+    jc, jr, jf = _counts("vuln_class LIKE 'verified-secret%'", ())
+    lanes.append({"lane": "jsintel(endpoints)", "kind": "value-engine",
+                  "input_label": "endpoints.jsonl produced", "input": ep,
+                  "age_days": _file_age_days(ENDPOINTS_STORE),
+                  "confirmed": jc, "real": jr, "fp": jf,
+                  "silent_zero": (ep == 0), "critical": True})
+
+    # idor_worklist: to-test depth = the leads the operator/2IC will test (+ any BAC findings)
+    depth = _count_to_test(IDOR_WORKLIST)
+    ic, ir, idf = _counts("vuln_class IN ('broken-access-control','idor','bola')", ())
+    lanes.append({"lane": "idor_worklist", "kind": "value-engine",
+                  "input_label": "to-test leads", "input": depth,
+                  "age_days": _file_age_days(IDOR_WORKLIST),
+                  "confirmed": ic, "real": ir, "fp": idf,
+                  "silent_zero": (depth == 0), "critical": True})
+
+    silent = [l for l in lanes if l["silent_zero"]]
+    return {"window_d": window_d, "since": cutoff, "lanes": lanes, "silent_zero": silent}
 
 
 def collect(conn, day: str) -> dict:
@@ -88,6 +201,7 @@ def collect(conn, day: str) -> dict:
         "state_distribution": state_dist,
         "review_queue_awaiting_submit": review_queue,
         "ai_accuracy": S.ai_accuracy(conn),
+        "yield_audit": yield_audit(conn),
     }
 
 
@@ -144,6 +258,29 @@ def render(d: dict) -> str:
         L.append(f"- big-model escalations: {ai.get('escalations',0)}  ·  AI-learned FP signatures: "
                  f"{ai.get('fp_signatures_from_ai',0)}  ·  KB lessons: {ai.get('kb_lessons',0)} "
                  f"(retrieved {ai.get('kb_retrievals',0)}×)")
+    ya = d.get("yield_audit") or {}
+    if ya.get("lanes"):
+        L.append(f"\n## 🔬 Per-lane yield (last {ya['window_d']}d) — is each lane actually producing?")
+        sz = ya.get("silent_zero", [])
+        if sz:
+            L.append("- 🔴 **SILENT-ZERO** (resources spent, nothing out — fix or retire): " + ", ".join(
+                (("⚠️CRITICAL " if l["critical"] else "") +
+                 f"{l['lane']} ({l['input']} {l['input_label']}, 0 confirmed, 0 real)") for l in sz))
+        else:
+            L.append("- ✅ no silent-zero lanes")
+        L.append("")
+        L.append(f"    {'lane':<22} {'input':>8}  {'conf':>4} {'real':>4} {'fp':>4}  status")
+        for l in ya["lanes"]:
+            inp = "—" if l.get("input") is None else str(l["input"])
+            if l["silent_zero"]:
+                st = "🔴 SILENT-ZERO" + (" (CRITICAL)" if l["critical"] else "")
+            elif l["confirmed"] > 0 and l["real"] == 0:
+                st = "⚠️ no reals" + (" · CRITICAL lane" if l["critical"] else "")
+            else:
+                st = "ok" + (" · CRITICAL lane" if l["critical"] else "")
+            age = l.get("age_days")
+            age_s = f"  (src age {age}d)" if age is not None else ""
+            L.append(f"    {l['lane']:<22} {inp:>8}  {l['confirmed']:>4} {l['real']:>4} {l['fp']:>4}  {st}{age_s}")
     if d["dismiss_reasons"]:
         L.append("\n## Dismissals (why)")
         for r in d["dismiss_reasons"][:20]:
