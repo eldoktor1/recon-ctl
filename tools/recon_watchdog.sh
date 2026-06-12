@@ -188,7 +188,10 @@ THERMAL_C="${THERMAL_C:-97}"
 THERMAL_SUSTAIN_MIN="${THERMAL_SUSTAIN_MIN:-3}"
 THERMAL_STALE_SEC="${THERMAL_STALE_SEC:-300}"
 THERMAL_REALERT_H="${THERMAL_REALERT_H:-6}"
-if [[ -f "$THERMAL_FILE" ]]; then
+# Thermal only matters WHILE recon is scanning (that's when the host is under load and when
+# the producer runs HWiNFO). If the daemon is down, the producer has stopped HWiNFO + removed
+# the file, so gate on daemon_running -> idle is never a false "blind"/throttle alert.
+if [[ "$daemon_running" -eq 1 && -f "$THERMAL_FILE" ]]; then
   t_now="$(date +%s)"
   t_ts="$(jq -r '(.ts // 0)|floor' "$THERMAL_FILE" 2>/dev/null || echo 0)"
   t_pkg="$(jq -r '(.cpu_pkg_c // 0)|floor' "$THERMAL_FILE" 2>/dev/null || echo 0)"

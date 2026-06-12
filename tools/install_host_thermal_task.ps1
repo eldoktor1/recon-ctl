@@ -11,12 +11,17 @@
 #>
 $ErrorActionPreference = 'Stop'
 
+$HwinfoExe = if ($env:HWINFO_EXE) { $env:HWINFO_EXE } else { 'C:\Program Files\HWiNFO64\HWiNFO64.EXE' }
+
 function Test-Sensor {
+    # running sensor (best) ...
     if (Get-CimInstance -Namespace root/LibreHardwareMonitor -ClassName Sensor -ErrorAction SilentlyContinue) { return 'LibreHardwareMonitor (WMI)' }
     if (Get-CimInstance -Namespace root/OpenHardwareMonitor  -ClassName Sensor -ErrorAction SilentlyContinue) { return 'OpenHardwareMonitor (WMI)' }
     foreach ($n in @('Global\HWiNFO_SENS_SM2','HWiNFO_SENS_SM2')) {
-        try { $m = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($n); if ($m) { $m.Dispose(); return 'HWiNFO (shared memory)' } } catch {}
+        try { $m = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($n); if ($m) { $m.Dispose(); return 'HWiNFO (shared memory, running)' } } catch {}
     }
+    # ... or HWiNFO INSTALLED (the producer launches it on demand only while recon scans)
+    if (Test-Path $HwinfoExe) { return 'HWiNFO (installed; producer will run it on demand)' }
     return $null
 }
 
@@ -54,4 +59,10 @@ Set-Content -Path $vbs -Value $cmd -Encoding ASCII
 schtasks /Create /TN "ReconHostThermal" /SC ONLOGON /RL LIMITED /F /TR ("wscript.exe `"$vbs`"") | Out-Null
 schtasks /Run /TN "ReconHostThermal" | Out-Null
 Write-Host "Registered + started ReconHostThermal (logon-persistent, ~45s cadence)." -ForegroundColor Green
-Write-Host "It writes host_thermal.json to the WSL state dir; the watchdog consumes it."
+Write-Host "The producer launches HWiNFO HIDDEN only while recon is scanning, and closes it when"
+Write-Host "recon stops (gated on the vpn_status.json heartbeat) -- HWiNFO is never left open 24/7."
+Write-Host ""
+Write-Host "ONE-TIME HWiNFO setup so its launches are silent + expose the sensor (do this once):" -ForegroundColor Yellow
+Write-Host "  run HWiNFO -> 'Sensors-only'; Settings: enable 'Shared Memory Support',"
+Write-Host "  'Minimize Main Window on startup', 'Minimize Sensors on startup', 'Minimize to Tray';"
+Write-Host "  DISABLE 'Auto Start' (the producer launches it on demand). Then close HWiNFO."
