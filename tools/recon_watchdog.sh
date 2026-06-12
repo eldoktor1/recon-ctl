@@ -108,4 +108,70 @@ else
                                 || log "discord-bot down (daemon is also down)"
 fi
 
+# ── 8. 2IC routine liveness — the EXTERNAL watchdog the routine can't be ──────
+# The 2IC scheduled agent (cron 0 0-18 * * *) is the ONLY producer of reporter-gated
+# `real` rows (reporter.py gates state='confirmed' AND ai_verdict='real'). Its own
+# self-MONITOR runs INSIDE the routine, so it cannot detect its own host dying or being
+# unscheduled — then the reporter silently starves. This daemon-side check is that
+# independent watchdog: if the routine has gone SILENT (no run-marker) OR the
+# confirmed-pending backlog has built up, fire #ops ONCE (action-only, cooled down —
+# no health spam, per the CLAUDE.md notification policy).
+TWOIC_HUNT_LOG="$STATE_DIR/2ic_hunt_log.jsonl"
+TWOIC_BRIEF_DIR="$BASE_DIR/briefings"
+TWOIC_MAX_AGE_H="${WATCHDOG_2IC_MAX_AGE_H:-24}"      # silent this long => routine likely dead/unscheduled
+TWOIC_PENDING_MAX="${WATCHDOG_PENDING_MAX:-25}"      # confirmed-but-unjudged backlog ceiling
+TWOIC_REALERT_H="${WATCHDOG_2IC_REALERT_H:-6}"       # min hours between repeat #ops alerts (anti-spam)
+TWOIC_ALERT_MARK="$STATE_DIR/.watchdog_2ic_alerted"
+TWOIC_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
+now_s="$(date +%s)"
+
+# last 2IC activity = newest of the hunt log or any tonight-card (each run writes both)
+last_2ic=0
+for _f in "$TWOIC_HUNT_LOG" "$TWOIC_BRIEF_DIR"/2IC_tonight_*.md; do
+  [[ -f "$_f" ]] || continue
+  _m="$(stat -c %Y "$_f" 2>/dev/null || echo 0)"
+  [[ "$_m" -gt "$last_2ic" ]] && last_2ic="$_m"
+done
+age_h=$(( last_2ic > 0 ? (now_s - last_2ic) / 3600 : 9999 ))
+
+# confirmed-pending backlog: findings confirmed by the daemon but never AI-judged
+# (the 2IC verify drains these → 'real'/'fp'/'needs-human'); growth = verify not running.
+pending=0
+if [[ -f "$TWOIC_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+  pending="$(sqlite3 "$TWOIC_DB" "SELECT COUNT(*) FROM findings WHERE state='confirmed' AND ai_verdict IS NULL;" 2>/dev/null || echo 0)"
+fi
+[[ "$pending" =~ ^[0-9]+$ ]] || pending=0
+
+twoic_reason=""
+[[ "$age_h" -ge "$TWOIC_MAX_AGE_H" ]] && twoic_reason="2IC routine SILENT ${age_h}h (no run-marker; reporter starves — check the scheduled agent host + cron 0 0-18 * * *)"
+if [[ "$pending" -ge "$TWOIC_PENDING_MAX" ]]; then
+  [[ -n "$twoic_reason" ]] && twoic_reason="$twoic_reason; "
+  twoic_reason="${twoic_reason}confirmed-pending backlog=${pending} (>=${TWOIC_PENDING_MAX} awaiting AI verdict — 2IC verify not draining the ai-pending queue)"
+fi
+
+if [[ -n "$twoic_reason" ]]; then
+  log "2IC-LIVENESS ALERT: $twoic_reason"
+  last_alert="$(cat "$TWOIC_ALERT_MARK" 2>/dev/null || echo 0)"; [[ "$last_alert" =~ ^[0-9]+$ ]] || last_alert=0
+  if (( now_s - last_alert >= TWOIC_REALERT_H * 3600 )); then
+    ops_hook=""
+    command -v discord_hook >/dev/null 2>&1 && ops_hook="$(discord_hook ops 2>/dev/null || true)"
+    if [[ -n "$ops_hook" ]] && command -v discord_post >/dev/null 2>&1; then
+      twoic_msg="🚨 **2IC / REPORTER WATCHDOG** — $twoic_reason"
+      if discord_post "$ops_hook" "$(jq -nc --arg c "${twoic_msg:0:1900}" '{content:$c}')" >/dev/null 2>&1; then
+        echo "$now_s" > "$TWOIC_ALERT_MARK"; log "2IC-liveness alert posted to #ops"
+      else
+        log "2IC-liveness #ops post FAILED (will retry next cycle)"
+      fi
+    else
+      log "2IC-liveness: #ops webhook unset — alert not delivered (set ~/recon/state/discord/ops)"
+    fi
+  else
+    log "2IC-liveness alert suppressed (cooldown — last alert $(( (now_s - last_alert) / 3600 ))h ago, re-alert every ${TWOIC_REALERT_H}h)"
+  fi
+else
+  # healthy → clear the cooldown so the NEXT real outage alerts immediately
+  rm -f "$TWOIC_ALERT_MARK" 2>/dev/null || true
+  log "2IC-liveness OK (last run ${age_h}h ago, pending=$pending)"
+fi
+
 log "=== watchdog done ==="
