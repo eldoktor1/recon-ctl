@@ -77,7 +77,12 @@ tool when it fits the job, you just carry the same guarantees yourself.
 ## DAILY WORKFLOW
 1. RE-GROUND: read CLAUDE.md + memory (project_2ic_nightly_targetlist, reference_vpn_namespace_and_probing,
    feedback_dedup_worked_targets, feedback_enforcer_doctrine) + this playbook + the per-program dossier
-   (`~/recon/state/program_dossier.jsonl`) + FP-pattern note (`~/recon/state/fp_patterns.md`).
+   (`~/recon/state/program_dossier.jsonl`) + FP-pattern note (`~/recon/state/fp_patterns.md`) + the
+   PERMANENT host notes (`~/recon/state/host_notes.jsonl` — worked-knowledge per host/root-domain, never
+   expires). COMPOUND off them: if a candidate host has a note that an angle was tested-clean/exhausted,
+   DEPRIORITIZE that angle and aim at the noted future-EV classes instead (e.g. console.aiven.io =
+   xaccount-reads saturated → go for service-internals / RCE). Don't re-rank an angle a note already
+   killed. (`recon-note <host>` shows a host's notes; ignores are a 7d penalty, notes are forever.)
 2. MINE ES high-value lanes (base filter: triage_pays=true AND triage_in_scope=true, must_not
    triage_ignored=true): data-leak/dir-listing/object-store; injection + api-surface(tech:graphql);
    admin-surface status_code:200; info-disclosure (skip bare 500s + *.githubusercontent CDN misfires);
