@@ -11,6 +11,15 @@
 #>
 $ErrorActionPreference = 'Stop'
 
+# Must be elevated: /RL HIGHEST registration + killing the elevated HWiNFO both need admin.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "Run this from an ELEVATED PowerShell (Run as administrator)." -ForegroundColor Red
+    Write-Host "  HWiNFO needs admin for its sensor driver; the producer task is registered /RL HIGHEST"
+    Write-Host "  so it can launch + recycle HWiNFO silently. Re-open PowerShell as admin and re-run."
+    exit 3
+}
+
 $HwinfoExe = if ($env:HWINFO_EXE) { $env:HWINFO_EXE } else { 'C:\Program Files\HWiNFO64\HWiNFO64.EXE' }
 
 function Test-Sensor {
@@ -55,8 +64,19 @@ $vbs = Join-Path $dst 'host_thermal_producer.vbs'
 $cmd = 'CreateObject("Wscript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ' + $producerDst + '", 0, False'
 Set-Content -Path $vbs -Value $cmd -Encoding ASCII
 
-# reboot-persistent: run the hidden launcher at logon (the producer then loops internally ~45s)
-schtasks /Create /TN "ReconHostThermal" /SC ONLOGON /RL LIMITED /F /TR ("wscript.exe `"$vbs`"") | Out-Null
+# clean slate so the fresh ELEVATED producer owns a fresh HWiNFO (resets the 12h timer +
+# lets the producer recycle it). Kills any stale HWiNFO + producer left from a prior run.
+taskkill /F /IM HWiNFO64.EXE 2>$null | Out-Null
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -match 'host_thermal_producer' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Remove-Item -Force (Join-Path $env:TEMP 'recon_hwinfo_managed.pid') -ErrorAction SilentlyContinue
+
+# reboot-persistent + ELEVATED: HWiNFO needs admin for its sensor driver, and the producer must
+# run elevated to launch HWiNFO silently (no UAC) AND to recycle it for the 12h limit. /RL HIGHEST
+# on a logon task runs elevated WITHOUT a UAC prompt. (Registering it requires this installer be
+# run elevated.)
+schtasks /Create /TN "ReconHostThermal" /SC ONLOGON /RL HIGHEST /F /TR ("wscript.exe `"$vbs`"") | Out-Null
 schtasks /Run /TN "ReconHostThermal" | Out-Null
 Write-Host "Registered + started ReconHostThermal (logon-persistent, ~45s cadence)." -ForegroundColor Green
 Write-Host "The producer keeps HWiNFO running HIDDEN in the background AT ALL TIMES (set-and-forget)"
