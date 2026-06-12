@@ -69,7 +69,9 @@ else
 fi
 
 # ── 4. Restart daemon if all conditions met ────────────────────────────────
-if [[ "$daemon_running" -eq 0 ]]; then
+# WDOG_NO_RESTART=1 runs the health checks/alerts WITHOUT touching the daemon (maintenance
+# windows + safe testing of the alert sections).
+if [[ "$daemon_running" -eq 0 && "${WDOG_NO_RESTART:-0}" != "1" ]]; then
   if [[ "$vpn_ok" -eq 0 ]]; then
     log "NOT restarting — connect Mullvad first"
   elif [[ "$es_ok" -eq 0 ]]; then
@@ -172,6 +174,70 @@ else
   # healthy → clear the cooldown so the NEXT real outage alerts immediately
   rm -f "$TWOIC_ALERT_MARK" 2>/dev/null || true
   log "2IC-liveness OK (last run ${age_h}h ago, pending=$pending)"
+fi
+
+# ── 9. HOST THERMAL — Windows CPU silent-degradation guard (WSL2 is blind to host temp) ──
+# A Windows producer (tools/host_thermal_producer.ps1, task ReconHostThermal) writes
+# host_thermal.json {ts,cpu_pkg_c,cpu_throttling,throttle_sustained_sec,gpu_c,source} from
+# HWiNFO/LibreHardwareMonitor every ~45s. Alarm to #ops (action-only, anti-spam — same
+# pattern as the 2IC alert) when the host is thermally capping recon throughput, or when the
+# producer has gone dark (= we're blind). File ABSENT = thermal monitoring not set up -> skip
+# silently (no false alarms until the operator installs a sensor + the producer task).
+THERMAL_FILE="$STATE_DIR/host_thermal.json"
+THERMAL_C="${THERMAL_C:-97}"
+THERMAL_SUSTAIN_MIN="${THERMAL_SUSTAIN_MIN:-3}"
+THERMAL_STALE_SEC="${THERMAL_STALE_SEC:-300}"
+THERMAL_REALERT_H="${THERMAL_REALERT_H:-6}"
+if [[ -f "$THERMAL_FILE" ]]; then
+  t_now="$(date +%s)"
+  t_ts="$(jq -r '(.ts // 0)|floor' "$THERMAL_FILE" 2>/dev/null || echo 0)"
+  t_pkg="$(jq -r '(.cpu_pkg_c // 0)|floor' "$THERMAL_FILE" 2>/dev/null || echo 0)"
+  t_throt="$(jq -r '.cpu_throttling // false' "$THERMAL_FILE" 2>/dev/null || echo false)"
+  t_sus="$(jq -r '(.throttle_sustained_sec // 0)|floor' "$THERMAL_FILE" 2>/dev/null || echo 0)"
+  [[ "$t_ts" =~ ^[0-9]+$ ]] || t_ts=0
+  [[ "$t_pkg" =~ ^-?[0-9]+$ ]] || t_pkg=0
+  [[ "$t_sus" =~ ^[0-9]+$ ]] || t_sus=0
+  t_age=$(( t_now - t_ts ))
+  # consumer-side streak fallback (covers a producer that doesn't emit throttle_sustained_sec)
+  t_streak_f="$STATE_DIR/.thermal_throttle_streak"
+  if [[ "$t_throt" == "true" ]]; then t_streak=$(( $(cat "$t_streak_f" 2>/dev/null || echo 0) + 1 )); else t_streak=0; fi
+  echo "$t_streak" > "$t_streak_f" 2>/dev/null || true
+
+  t_cond=""; t_msg=""
+  if [[ "$t_age" -gt "$THERMAL_STALE_SEC" ]]; then
+    t_cond="stale"
+    t_msg="HOST THERMAL: producer STALE ${t_age}s (>$((THERMAL_STALE_SEC/60))min) — host CPU thermal monitoring is BLIND (HWiNFO/LibreHardwareMonitor producer dead? check the ReconHostThermal task)"
+  elif [[ "$t_throt" == "true" ]] && { [[ "$t_sus" -ge "$((THERMAL_SUSTAIN_MIN*60))" ]] || [[ "$t_streak" -ge "$THERMAL_SUSTAIN_MIN" ]]; }; then
+    t_cond="throttle"
+    t_min=$(( t_sus >= 60 ? t_sus/60 : t_streak ))
+    t_msg="HOST THERMAL: CPU throttling ${t_min}min (pkg ${t_pkg}°C) — recon throughput is being capped; clean fans / repaste / reduce load"
+  elif [[ "$t_pkg" -ge "$THERMAL_C" ]]; then
+    t_cond="temp"
+    t_msg="HOST THERMAL: CPU pkg ${t_pkg}°C >= ${THERMAL_C}°C — recon throughput at the thermal limit; clean fans / repaste / reduce load"
+  fi
+
+  if [[ -n "$t_cond" ]]; then
+    log "THERMAL ALERT ($t_cond): $t_msg"
+    t_mark="$STATE_DIR/.thermal_alerted_$t_cond"
+    t_last="$(cat "$t_mark" 2>/dev/null || echo 0)"; [[ "$t_last" =~ ^[0-9]+$ ]] || t_last=0
+    if (( t_now - t_last >= THERMAL_REALERT_H * 3600 )); then
+      t_hook=""; command -v discord_hook >/dev/null 2>&1 && t_hook="$(discord_hook ops 2>/dev/null || true)"
+      if [[ -n "$t_hook" ]] && command -v discord_post >/dev/null 2>&1; then
+        if discord_post "$t_hook" "$(jq -nc --arg c "${t_msg:0:1900}" '{content:$c}')" >/dev/null 2>&1; then
+          echo "$t_now" > "$t_mark"; log "THERMAL alert posted to #ops"
+        else
+          log "THERMAL #ops post FAILED (will retry next cycle)"
+        fi
+      else
+        log "THERMAL: #ops webhook unset — alert not delivered (set ~/recon/state/discord/ops)"
+      fi
+    else
+      log "THERMAL alert suppressed (cooldown — last $t_cond alert $(( (t_now - t_last) / 3600 ))h ago, re-alert every ${THERMAL_REALERT_H}h)"
+    fi
+  else
+    rm -f "$STATE_DIR"/.thermal_alerted_* 2>/dev/null || true   # recovered -> next event alerts at once
+    log "host-thermal OK (pkg ${t_pkg}°C, throttling=$t_throt, src age ${t_age}s)"
+  fi
 fi
 
 log "=== watchdog done ==="
