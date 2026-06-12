@@ -41,7 +41,13 @@ CREATE TABLE IF NOT EXISTS findings (
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     state_changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     verifying_since TEXT,                           -- set on entry to 'verifying'; NULL otherwise (crash-resume key)
-    ttl_at          TEXT                            -- candidate expiry → lead_exhausted
+    ttl_at          TEXT,                           -- candidate expiry → lead_exhausted
+    -- post-submission platform OUTCOME (the missing half of the learning loop, P4) -------
+    -- ai_verdict/state capture the PRE-submission disposition (operator submit/dismiss);
+    -- these capture what the PLATFORM ultimately decided after a human submitted.
+    resolution      TEXT,                           -- accepted | dup | na | info  (NULL = unresolved)
+    bounty          REAL NOT NULL DEFAULT 0,        -- awarded bounty (USD) when accepted
+    resolved_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_findings_state    ON findings(state);
 CREATE INDEX IF NOT EXISTS idx_findings_host     ON findings(host);

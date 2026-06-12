@@ -1261,6 +1261,27 @@ cmd_ai() {
 # ---------------------------------------------------------------------------
 # cmd_view — comprehensive pipeline dashboard (ES-based, all data live)
 # ---------------------------------------------------------------------------
+cmd_outcome() {
+  # Record the PLATFORM resolution of a submitted finding (the post-submission feedback
+  # loop): accepted | dup | na | info [+bounty]. Feeds state.py ai-accuracy + the learning
+  # stores (accepted=KB positive anchor; dup/na/info=FP signature = dedup signal).
+  local fid="${1:-}" res="${2:-}" bounty="${3:-0}"
+  local DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
+  local sp="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
+  if [[ -z "$fid" || -z "$res" ]]; then
+    echo "Usage: recon-outcome <finding_id> <accepted|dup|na|info> [bounty_usd]"
+    echo "  Records what the platform decided after you submitted, so the system learns:"
+    echo "    accepted      -> KB positive anchor (severity/dedup calibration)"
+    echo "    dup|na|info   -> FP signature (the same host+class won't re-surface)"
+    echo "  See the result mix:  recon-ai accuracy   (.submission_outcomes)"
+    return 1
+  fi
+  [[ -f "$DB" ]] || { echo "  db not found ($DB)"; return 1; }
+  local out; out="$(V3_DB="$DB" python3 "$sp" outcome "$fid" "$res" "$bounty" 2>&1)" \
+    || { echo "  ✗ $out"; return 1; }
+  echo "  ✓ recorded: $out"
+}
+
 cmd_view() {
   local n_top="${1:-10}"
   local B='\033[1m' R='\033[0m' C='\033[1;36m' G='\033[0;32m' Y='\033[1;33m' RD='\033[0;31m'
@@ -2475,6 +2496,7 @@ case "${1:-}" in
     esac
     ;;
   ai)           shift; cmd_ai "$@" ;;
+  outcome)      shift; cmd_outcome "$@" ;;
   view|dashboard) shift; cmd_view "$@" ;;
   js)           shift; cmd_js "$@" ;;
   ignored)      shift; cmd_ignored "$@" ;;

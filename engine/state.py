@@ -80,6 +80,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE findings ADD COLUMN ai_report TEXT")
         except sqlite3.OperationalError:
             pass
+    # post-submission outcome columns (the resolution feedback loop, added P4)
+    for _col, _ddl in (("resolution", "resolution TEXT"),
+                       ("bounty", "bounty REAL NOT NULL DEFAULT 0"),
+                       ("resolved_at", "resolved_at TEXT")):
+        if _col not in cols:
+            try:
+                conn.execute(f"ALTER TABLE findings ADD COLUMN {_ddl}")
+            except sqlite3.OperationalError:
+                pass
 
 
 def set_ai_report(conn, finding_id: int, report_json: str) -> None:
@@ -356,6 +365,52 @@ def record_ai_verdict(conn, finding_id: int, verdict: str, confidence: float, re
                   reason=f"claude-validation: {reason[:160]}", source="ai-validation")
 
 
+RESOLUTIONS = {"accepted", "dup", "na", "info"}
+
+
+def record_outcome(conn, finding_id: int, resolution: str, bounty: float = 0.0) -> dict:
+    """Record the PLATFORM resolution of a submitted finding — the missing half of the
+    feedback loop. ai_verdict/state capture the PRE-submission disposition; this captures
+    what the platform decided AFTER a human submitted: accepted | dup | na | info [+bounty].
+    Feeds ai-accuracy (post-submission precision + bounty) and the learning stores:
+      - accepted  -> KB 'real' lesson (positive anchor for dedup/severity calibration)
+      - dup/na/info -> FP signature (so the SAME host+class never re-surfaces = dedup
+        signal) + KB 'fp' lesson.
+    Idempotent per finding (re-recording overwrites the resolution)."""
+    resolution = (resolution or "").strip().lower()
+    if resolution not in RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {sorted(RESOLUTIONS)}")
+    row = conn.execute("SELECT host,program,signal_class,vuln_class,state FROM findings WHERE id=?",
+                       (finding_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no finding id={finding_id}")
+    now = _utc()
+    with conn:
+        conn.execute("BEGIN")
+        conn.execute("UPDATE findings SET resolution=?,bounty=?,resolved_at=?,updated_at=? WHERE id=?",
+                     (resolution, float(bounty or 0), now, now, finding_id))
+        _audit(conn, finding_id, "outcome", row["state"], resolution, f"bounty={bounty}")
+    # advance to the terminal 'submitted' state (a resolved finding WAS submitted), honoring EDGES
+    st = row["state"]
+    if st == "confirmed" and transition(conn, finding_id, "reported", expect="confirmed"):
+        st = "reported"
+    if st == "reported":
+        transition(conn, finding_id, "submitted", expect="reported")
+    # learning feedback
+    sig = fp_signature(row["host"], row["signal_class"], row["vuln_class"])
+    if resolution == "accepted":
+        kb_record(conn, host=row["host"], program=row["program"], signal_class=row["signal_class"],
+                  vuln_class=row["vuln_class"], verdict="real", confidence=1.0,
+                  reason=f"platform-accepted (bounty={bounty})", source="outcome")
+    else:
+        record_fp(conn, sig, reason=f"platform-{resolution}", source=f"outcome-{resolution}")
+        kb_record(conn, host=row["host"], program=row["program"], signal_class=row["signal_class"],
+                  vuln_class=row["vuln_class"], verdict="fp", confidence=1.0,
+                  reason=f"platform-{resolution} (closed {resolution})", source="outcome")
+    return {"finding_id": finding_id, "resolution": resolution, "bounty": float(bounty or 0),
+            "fp_signature": sig, "dedup_signal_recorded": resolution != "accepted"}
+
+
 def ai_accuracy(conn) -> dict:
     """Self-audit: is the Claude layer actually accurate? Computed from SQLite truth.
     The headline signal is HUMAN DISPOSITION of 'real' verdicts — of the findings Claude
@@ -374,9 +429,25 @@ def ai_accuracy(conn) -> dict:
     escalated = q("SELECT COUNT(*) c FROM findings WHERE ai_reason LIKE '%escalated:%'")[0]["c"]
     fp_ai = q("SELECT COUNT(*) c FROM false_positive_signatures WHERE source='ai-validation'")[0]["c"]
     kb = q("SELECT COUNT(*) c, COALESCE(SUM(hit_count),0) h FROM knowledge_base")[0]
+    # post-submission platform outcomes (the resolution feedback loop, P4) — the ground
+    # truth a HUMAN-decided 'real' ultimately earned (accepted vs dup/na/info + bounty).
+    try:
+        res = q("SELECT resolution, COUNT(*) c, COALESCE(SUM(bounty),0) b FROM findings "
+                "WHERE resolution IS NOT NULL GROUP BY resolution")
+        by_res = {r["resolution"]: r["c"] for r in res}
+        total_res = sum(by_res.values())
+        acc_res = by_res.get("accepted", 0)
+        total_bounty = round(sum(r["b"] for r in res), 2)
+    except Exception:
+        by_res, total_res, acc_res, total_bounty = {}, 0, 0, 0.0
     return {
         "reviewed_total": sum(d["count"] for d in dist.values()),
         "verdict_distribution": dist,
+        "submission_outcomes": {
+            "by_resolution": by_res, "total_resolved": total_res,
+            "accepted": acc_res, "duplicate": by_res.get("dup", 0),
+            "total_bounty_usd": total_bounty,
+            "post_submission_precision": round(acc_res / total_res, 3) if total_res else None},
         "real_disposition": {
             "accepted_submitted": accepted, "rejected_dismissed": rejected,
             "pending_human": pending,
@@ -514,9 +585,12 @@ def _main(argv):
     elif cmd == "set-report":        # set-report <id> <json>  (Claude-authored report packet)
         set_ai_report(conn, int(a[0]), a[1] if len(a) > 1 else "{}")
         print("report-set")
+    elif cmd == "outcome":           # outcome <finding_id> <accepted|dup|na|info> [bounty]
+        print(json.dumps(record_outcome(conn, int(a[0]), a[1] if len(a) > 1 else "",
+                                        float(a[2]) if len(a) > 2 else 0.0)))
     else:
         print("usage: state.py {init|resume|stats|check-fp|record-fp|record-confirmed|"
-              "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy|set-report}", file=sys.stderr); return 2
+              "ai-pending|ai-verdict|kb-record|kb-lookup|ai-accuracy|set-report|outcome}", file=sys.stderr); return 2
     return 0
 
 
