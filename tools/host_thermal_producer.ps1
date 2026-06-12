@@ -38,6 +38,9 @@ $HwinfoExe      = if ($env:HWINFO_EXE)               { $env:HWINFO_EXE }        
 $HeartbeatFile  = if ($env:RECON_HEARTBEAT_FILE)     { $env:RECON_HEARTBEAT_FILE }          else { '\\wsl.localhost\kali-linux\home\d0k\recon\state\vpn_status.json' }
 $HeartbeatSec   = if ($env:RECON_HEARTBEAT_SEC)      { [int]$env:RECON_HEARTBEAT_SEC }      else { 120 }
 $ManagedPidFile = if ($env:HWINFO_PIDFILE)           { $env:HWINFO_PIDFILE }                else { (Join-Path $env:TEMP 'recon_hwinfo_managed.pid') }
+# free HWiNFO disables Shared Memory after 12h of runtime — recycle OUR managed instance
+# before that so a multi-day recon session never goes blind (no HWiNFO Pro needed).
+$HwinfoMaxRunH  = if ($env:HWINFO_MAX_RUNTIME_H)     { [double]$env:HWINFO_MAX_RUNTIME_H }   else { 11 }
 
 function Test-ReconActive {
     try {
@@ -129,6 +132,17 @@ $script:throttleSince = $null
 function Invoke-Cycle {
     if (Test-ReconActive) {
         Start-ManagedHWiNFO
+        # recycle our managed HWiNFO before the free-version 12h shared-memory cutoff
+        if (Test-Path $ManagedPidFile) {
+            try {
+                $hpid = [int](Get-Content $ManagedPidFile -ErrorAction SilentlyContinue)
+                $hp = Get-Process -Id $hpid -ErrorAction SilentlyContinue
+                if ($hp -and $hp.Name -eq 'HWiNFO64' -and
+                    (New-TimeSpan -Start $hp.StartTime -End (Get-Date)).TotalHours -ge $HwinfoMaxRunH) {
+                    Stop-ManagedHWiNFO; Start-ManagedHWiNFO
+                }
+            } catch {}
+        }
         $t = Read-HWiNFO
         if (-not $t) { $t = Read-LHMWmi }
         if ($t) {
