@@ -16,6 +16,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 
+# permanent host-notes layer (note_add/note_get/note_has) — see recon_notes.sh
+source "$SCRIPT_DIR/recon_notes.sh" 2>/dev/null || true
+
 first_matching_or_nonblank() {
   local pattern="${1:?pattern}"
   local input
