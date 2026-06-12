@@ -2247,6 +2247,11 @@ cmd_ignore() {
          --arg added_at "$now" --arg expires_at "$expires" \
     '{host:$host, reason:$reason, added_by:$added_by, added_at:$added_at, expires_at:$expires_at}' \
     >> "$ig_file"
+  # ADDITIVE: persist the WHY as a permanent (non-expiring) note when a real reason was given.
+  # The 7d TTL above is untouched; "manual" (no reason) carries no signal -> no note.
+  if [[ "$reason" != "manual" ]]; then
+    note_add "$host" "$reason" "ignore" "$now" >/dev/null 2>&1 || true
+  fi
   echo "Ignored $host (7 days)  — $reason"
 }
 
