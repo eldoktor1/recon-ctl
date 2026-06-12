@@ -2255,6 +2255,22 @@ cmd_ignore() {
   echo "Ignored $host (7 days)  — $reason"
 }
 
+cmd_note() {
+  # recon-note <host>            -> print all notes for host + its root_domain, newest first
+  # recon-note <host> "<text>"   -> add a permanent manual note (source="manual")
+  local host="${1:-}"; shift || true
+  local text="${*:-}"
+  if [[ -z "$host" ]]; then echo 'Usage: recon-note <host> ["note text"]'; return 1; fi
+  if [[ -n "$text" ]]; then
+    if note_add "$host" "$text" "manual"; then echo "📝 noted: $host"; else echo "note failed (jq missing?)"; return 1; fi
+    return 0
+  fi
+  local rows; rows="$(note_get "$host")"
+  if [[ -z "$rows" ]]; then echo "  (no notes for $host)"; return 0; fi
+  hdr "📝 Notes — $host"
+  printf '%s\n' "$rows" | jq -r '"  [\(.created_at[0:10])] (\(.source))" + (if .program then " ["+.program+"]" else "" end) + " " + .note'
+}
+
 cmd_fp() {
   local host="${1:-}" tmpl="${2:-}"
   if [[ -z "$host" || -z "$tmpl" ]]; then echo "Usage: recon_ctl fp <host> <template_id>"; return 1; fi
@@ -2527,6 +2543,7 @@ case "${1:-}" in
   bulk)         shift; cmd_bulk "$@" ;;
   fp)           shift; cmd_fp "$@" ;;
   ignore)       shift; cmd_ignore "$@" ;;
+  note)         shift; cmd_note "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;
   *) echo "Unknown: $1"; usage; exit 1 ;;
