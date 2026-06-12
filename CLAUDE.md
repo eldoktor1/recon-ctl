@@ -189,6 +189,11 @@ ignores do.
   all scanning (and all probing — fail-closed).
 
 ## Operational notes
+- PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
+  WSL shell). NEVER invoke bare `python`/`python3`/`py`/`pip` on the Windows/MINGW side — Windows
+  resolves them to the PyManager shim (`C:\Program Files\PyManager`), which, with no managed runtime,
+  opens `docs.python.org/dev/using/windows.html` in the default browser (Brave) every time. The whole
+  engine runs under WSL python3; there is no reason to touch Windows python.
 - WSL: use heredoc form for execution; never `bash -c "..."` (var/escaping breaks).
 - ES auth: `-u "elastic:$(cat ~/.recon_es_pass)"`. Field types differ in queries:
   `triage_pays` is a JSON bool; `portscan_critical` is numeric.

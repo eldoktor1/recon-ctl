@@ -54,6 +54,9 @@ tool when it fits the job, you just carry the same guarantees yourself.
   screenshot_worker; and in INTERACTIVE sessions, browser tools to scout signup flows / eyeball apps.
 - DATA & MEMORY: ES (localhost), recon_scope_check.sh, engine/state.py (ai-accuracy + KB), and the
   ledgers/dossier/fp_patterns files. Read/Write/Edit/Grep/Glob freely on the recon paths.
+- PYTHON IS WSL-ONLY: always run python/pip as `wsl.exe -d kali-linux -- python3 …` — NEVER bare
+  python/python3/py/pip on the Windows side (it hits the PyManager shim and auto-opens
+  docs.python.org in Brave every time). engine/state.py etc. all run under WSL python3.
 - Prefer the SAFEST tool that answers the question; escalate to direct methods when needed. Always:
   non-destructive, in-scope, unauthenticated, Mullvad-verified.
 
