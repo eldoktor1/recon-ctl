@@ -10,7 +10,7 @@ run_counters, failure_patterns, false_positive_signatures).
   observability.py json [day]     -> machine-readable
 """
 from __future__ import annotations
-import os, sys, json, datetime as _dt
+import os, sys, json, re, datetime as _dt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import state as S
@@ -25,6 +25,7 @@ DIGEST_DIR = os.path.expanduser(os.environ.get("V3_DIGESTS", "~/recon/v3/digests
 
 # ---- per-lane yield self-audit (so no lane fails silently) -------------------
 ES_URL            = os.environ.get("ES_URL", "http://127.0.0.1:9200")
+STATE_DIR         = os.path.expanduser(os.environ.get("RECON_STATE_DIR", "~/recon/state"))
 OBS_YIELD_WINDOW_D = int(os.environ.get("OBS_YIELD_WINDOW_D", "14"))
 ENDPOINTS_STORE   = os.path.expanduser(os.environ.get("JS_ENDPOINT_STORE", "~/recon/js_recon/endpoints.jsonl"))
 IDOR_WORKLIST     = os.path.expanduser(os.environ.get("IDOR_WORKLIST", "~/recon/idor_worklist.jsonl"))
@@ -329,6 +330,70 @@ def _discord_digest(d: dict) -> None:
         pass
 
 
+def _ops_hook() -> str:
+    """#ops webhook — per-user file or the shared discord dir (same resolution as #digest)."""
+    for p in (os.path.expanduser("~/.recon_discord_ops"),
+              os.path.join(os.environ.get("RECON_DISCORD_DIR", "/home/d0k/recon/state/discord"), "ops")):
+        try:
+            if os.path.isfile(p):
+                h = open(p, encoding="utf-8").read().strip()
+                if h:
+                    return h
+        except Exception:
+            pass
+    return ""
+
+
+def _ops_post(hook: str, msg: str) -> bool:
+    import urllib.request
+    try:
+        req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return 200 <= getattr(r, "status", 200) < 300
+    except Exception:
+        return False
+
+
+def silent_zero_alarm(d: dict) -> None:
+    """Fire #ops ONCE per silent-zero lane per window (anti-spam — same pattern as
+    recon_watchdog.sh's 2IC alert: a per-lane marker, re-alert only after the window).
+    Action-only message; value-engine lanes (jsintel / idor_worklist) flagged CRITICAL.
+    The marker auto-expires after the window, so a lane that goes silent again re-alerts."""
+    ya = d.get("yield_audit") or {}
+    sz = ya.get("silent_zero", [])
+    if not sz:
+        return
+    window_s = int(ya.get("window_d", OBS_YIELD_WINDOW_D)) * 86400
+    hook = _ops_hook()
+    now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    for l in sz:
+        slug = re.sub(r'[^a-z0-9]+', '_', l["lane"].lower()).strip('_') or "lane"
+        mark = os.path.join(STATE_DIR, f".obs_silentzero_{slug}")
+        try:
+            last = float(open(mark, encoding="utf-8").read().strip())
+        except Exception:
+            last = 0.0
+        if now - last < window_s:
+            print(f"[obs] silent-zero {l['lane']} — alert suppressed (cooldown, within {ya.get('window_d')}d window)", file=sys.stderr)
+            continue
+        crit = "🚨 CRITICAL " if l["critical"] else ""
+        msg = (f"{crit}lane **{l['lane']}** SILENT-ZERO {ya.get('window_d')}d "
+               f"({l['input']} {l['input_label']}, 0 confirmed, 0 real) — fix or retire")
+        if not hook:
+            print(f"[obs] silent-zero {l['lane']} — #ops webhook unset, not delivered", file=sys.stderr)
+            continue
+        if _ops_post(hook, msg):
+            try:
+                open(mark, "w", encoding="utf-8").write(str(int(now)))
+            except Exception:
+                pass
+            print(f"[obs] #ops silent-zero alert fired: {l['lane']}", file=sys.stderr)
+        else:
+            print(f"[obs] silent-zero {l['lane']} — #ops post FAILED (will retry next run)", file=sys.stderr)
+
+
 def main(argv):
     conn = S.connect(); S.init_db(conn)
     as_json = len(argv) > 1 and argv[1] == "json"
@@ -343,7 +408,8 @@ def main(argv):
         fh.write(out)
     print(out)
     print(f"\n[written: {path}]", file=sys.stderr)
-    _discord_digest(d)   # compact #digest ping (best-effort; .md is the source of truth)
+    _discord_digest(d)        # compact #digest ping (best-effort; .md is the source of truth)
+    silent_zero_alarm(d)      # action-only #ops alert per silent-zero lane (anti-spam, once/window)
     return 0
 
 
