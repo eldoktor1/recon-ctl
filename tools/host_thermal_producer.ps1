@@ -25,6 +25,12 @@
 param([switch]$Once)
 $ErrorActionPreference = 'SilentlyContinue'
 
+# single-instance guard: every logon/Run of the task must NOT stack another producer loop
+if (-not $Once) {
+    $script:__mtx = New-Object System.Threading.Mutex($false, 'Global\recon_host_thermal_producer')
+    if (-not $script:__mtx.WaitOne(0)) { exit 0 }   # another producer already running
+}
+
 $PollSec        = if ($env:THERMAL_POLL_SEC)         { [int]$env:THERMAL_POLL_SEC }         else { 45 }
 $ThrottleInferC = if ($env:THERMAL_THROTTLE_INFER_C) { [int]$env:THERMAL_THROTTLE_INFER_C } else { 99 }
 $OutFile        = if ($env:HOST_THERMAL_OUT)         { $env:HOST_THERMAL_OUT }              else { '\\wsl.localhost\kali-linux\home\d0k\recon\state\host_thermal.json' }
