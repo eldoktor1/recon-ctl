@@ -78,9 +78,15 @@ PARAMS_JOB_TTL="${PARAMS_JOB_TTL:-1800}"          # a claimed job idle > this (c
 PARAMS_JOB_MAX_RETRY="${PARAMS_JOB_MAX_RETRY:-3}" # drop a job after this many requeues
 PARAMS_DONE_KEEP="${PARAMS_DONE_KEEP:-200}"       # done-archive cap (most-recent kept)
 PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent per-host crawls WITHIN a job (each per-host rate-limited) — politeness throttle, keep it
+# SLIDING-WINDOW cooldown (24/7, never idle, never re-hammer): the producer query
+# EXCLUDES hosts crawled within PARAMS_COOLDOWN_DAYS *server-side* (recon_alive
+# params_scanned_at), so it always returns the highest-value NOT-recently-crawled
+# hosts and reaches deeper into the ~600k pool automatically — the catalog can
+# never go "no candidates" idle while uncrawled hosts remain. Cooldown is a
+# ROTATION interval (re-check each host at most this often), NOT an idle cause;
+# at safe crawl rates a full pass takes far longer than the window anyway.
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
-PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so a host with no params doesn't get re-crawled — the next host queues instead
-PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-20000}"   # reach DEEP so cycles never starve (always work to crawl); selection only — actual crawl is per-host rate-limited
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-10000}"  # page size for candidate selection (single page; the server-side cooldown range slides the window). Sized for headroom: the 3-per-root diversity cap makes DISTINCT ROOTS the throughput limiter, so a deeper page = more roots/enqueue = the queue buffer never drains to idle
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
@@ -88,7 +94,7 @@ KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
 KATANA_RL="${KATANA_RL:-15}"
 GAU_TIMEOUT="${GAU_TIMEOUT:-30}"    # otx+urlscan are fast; 30s is ample; 60 wasted when providers blocked
 MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
-SCANNED_FILE="$STATE_DIR/.params_scanned.tsv"
+PARAMS_SCANNED_FIELD="${PARAMS_SCANNED_FIELD:-params_scanned_at}"   # recon_alive date field = per-host cooldown ledger (ES source of truth)
 
 mkdir -p "$PARAMS_DIR" "$STATE_DIR" "$PARAMS_INBOX" "$PARAMS_PROCESSING" "$PARAMS_DONE"
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
@@ -112,14 +118,22 @@ ensure_index() {
     }}}' >/dev/null 2>&1 || warn "could not create $PARAMS_INDEX index"
 }
 
+# ensure recon_alive carries the per-host cooldown date field used by the producer's
+# sliding-window query. Idempotent and purely additive (safe on the central index).
+ensure_alive_field() {
+  es -fsS -X PUT "$ES_URL/$INDEX_NAME/_mapping" -H 'Content-Type: application/json' \
+    -d "{\"properties\":{\"$PARAMS_SCANNED_FIELD\":{\"type\":\"date\"}}}" >/dev/null 2>&1 \
+    || warn "could not ensure $INDEX_NAME.$PARAMS_SCANNED_FIELD mapping"
+}
+
 # crawl_host — all per-host work, writing ONLY into its own dir under $wd so N copies
 # run concurrently without clobbering shared files. Emits: bulk.part (ndjson), scanned
-# (cooldown marker), cls.<class> (per-class URLs), urlcount. katana(live)+gau(archive),
-# waybackurls fallback when gau yields nothing. Target-facing; per-host rate-limited.
+# (just the hostname — the consumer stamps recon_alive.params_scanned_at = the cooldown
+# ledger), cls.<class> (per-class URLs), urlcount. katana(live)+gau(archive), waybackurls
+# fallback when gau yields nothing. Target-facing; per-host rate-limited.
 crawl_host() {
   local host="$1" url="$2" root="$3" program="$4" tier="$5" fresh="$6" fseen="$7" wd="$8"
   local hd="$wd/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
-  local now; now="$(date +%s)"
   sleep $(( (RANDOM % PARAMS_INTER_HOST_SLEEP) + 1 ))   # jitter so N parallel gau hits don't burst a provider
   { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
     [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
@@ -132,21 +146,17 @@ crawl_host() {
     raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
   fi
   log "  $host — ${raw_n:-0} param URLs"
-  if [[ "${raw_n:-0}" -eq 0 ]]; then
-    # param-POOR host (API/staging/SPA, no query-string surface): FUTURE-shift the scanned
-    # stamp so it stays in cooldown for PARAMS_ZERO_COOLDOWN_DAYS. The old code shifted it
-    # into the PAST (6h re-crawl), so high-score param-less hosts got re-crawled every cycle
-    # and starved out new-host discovery — that's why the catalog plateaued. Now the budget
-    # goes to hosts that actually yield params.
-    printf '%s\t%s\n' "$(( now + (PARAMS_ZERO_COOLDOWN_DAYS - PARAMS_COOLDOWN_DAYS)*86400 ))" "$host" > "$hd/scanned"
-    return 0
-  fi
+  # Record the host as crawled REGARDLESS of yield — the consumer cools it so the
+  # sliding window rotates past it (a param-poor host won't be retried until its
+  # cooldown lapses; by then the window has moved far through the ~600k pool).
+  printf '%s\n' "$host" > "$hd/scanned"
+  [[ "${raw_n:-0}" -eq 0 ]] && return 0
   if [[ -x "$QSREPLACE" ]]; then "$QSREPLACE" FUZZ < "$hd/raw" 2>/dev/null | sort -u > "$hd/urls"; else cp "$hd/raw" "$hd/urls" 2>/dev/null || : > "$hd/urls"; fi
-  [[ -s "$hd/urls" ]] || { printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"; return 0; }
+  [[ -s "$hd/urls" ]] || return 0
   : > "$hd/classified.tsv"
   local cls
   for cls in $PARAMS_CLASSES; do "$GF" "$cls" < "$hd/urls" 2>/dev/null | sed "s|\$|\t$cls|" >> "$hd/classified.tsv"; done
-  [[ -s "$hd/classified.tsv" ]] || { printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"; return 0; }
+  [[ -s "$hd/classified.tsv" ]] || return 0
   for cls in $PARAMS_CLASSES; do awk -F'\t' -v c="$cls" '$2==c{print $1}' "$hd/classified.tsv" > "$hd/cls.$cls" 2>/dev/null || true; done
   awk -F'\t' '{a[$1]=a[$1]","$2} END{for(u in a){sub(/^,/,"",a[u]); print u"\t"a[u]}}' "$hd/classified.tsv" \
   | while IFS=$'\t' read -r u classes; do
@@ -155,7 +165,6 @@ crawl_host() {
             --argjson tf "${fresh:-false}" --arg fs "$fseen" --arg ca "$iso" --arg cl "$classes" \
         '{index:{_id:$id}}, {url:$u,host:$h,root_domain:$rd,vuln_classes:($cl|split(",")),program:$pr,payout_tier:$ti,true_fresh:$tf,first_seen:(if $fs=="" then null else $fs end),cataloged_at:$ca}' 2>/dev/null >> "$hd/bulk.part"
     done
-  printf '%s\t%s\n' "$now" "$host" > "$hd/scanned"
   wc -l < "$hd/urls" | tr -d ' ' > "$hd/urlcount"
 }
 
@@ -177,14 +186,30 @@ requeue_stale() {
   done
 }
 
-# index_workdir WORKDIR — aggregate ONE crawl's per-host outputs and bulk-index to
-# recon_params; append per-class files + cooldown markers (ledger write is locked,
-# the producer prunes it concurrently). Echoes the indexed doc count on stdout.
+# stamp_cooldown WORKDIR — set recon_alive.<params_scanned_at> = now for every host this
+# crawl touched (collected from $wd/*/scanned, one host per file). ONE filtered
+# _update_by_query, bounded by job size; conflicts=proceed so a concurrent doc update
+# can't fail it. This ES field IS the cooldown ledger that slides the producer window.
+stamp_cooldown() {
+  local wd="$1" hosts terms ts
+  hosts="$(cat "$wd"/*/scanned 2>/dev/null | sort -u)"
+  [[ -n "$hosts" ]] || return 0
+  terms="$(printf '%s\n' "$hosts" | jq -R . | jq -cs .)"
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_update_by_query?conflicts=proceed" -d "{
+    \"query\":{\"terms\":{\"host\":$terms}},
+    \"script\":{\"lang\":\"painless\",\"source\":\"ctx._source.$PARAMS_SCANNED_FIELD=params.ts\",\"params\":{\"ts\":\"$ts\"}}
+  }" >/dev/null 2>&1 || warn "cooldown stamp failed for $(printf '%s\n' "$hosts" | wc -l | tr -d ' ') host(s)"
+}
+
+# index_workdir WORKDIR — aggregate ONE crawl's per-host outputs: bulk-index to
+# recon_params, append per-class files, and stamp the cooldown ledger. Echoes the
+# indexed doc count on stdout.
 index_workdir() {
   local wd="$1" cls
   local bulk="$wd/bulk.ndjson"; : > "$bulk"
   cat "$wd"/*/bulk.part >> "$bulk" 2>/dev/null || true
-  ( flock 201; cat "$wd"/*/scanned >> "$SCANNED_FILE" 2>/dev/null ) 201>"$SCANNED_FILE.lock" || true
+  stamp_cooldown "$wd"
   for cls in $PARAMS_CLASSES; do
     cat "$wd"/*/cls."$cls" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
     [[ -f "$PARAMS_DIR/$cls.txt" ]] && sort -u "$PARAMS_DIR/$cls.txt" -o "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
@@ -211,9 +236,9 @@ index_workdir() {
 cmd_enqueue() {
   es_up || { warn "ES not reachable"; exit 0; }
   ensure_index
+  ensure_alive_field
   exec 9>"$STATE_DIR/params_enqueue.lock"; flock -n 9 || { warn "params enqueue already running"; exit 0; }
   python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
-  touch "$SCANNED_FILE"
 
   requeue_stale
   local pending; pending="$(find "$PARAMS_INBOX" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | wc -l | tr -d ' ')"
@@ -223,18 +248,18 @@ cmd_enqueue() {
   WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
   : > "$WORK/cand.tsv"
 
-  # Score-first in-scope-paying host candidates. Sorting by triage_score DESC
-  # (not fresh-first) because GAU/web-archive coverage is what drives param
-  # discovery — established high-signal hosts have years of crawl history;
-  # CT-log-fresh UUID subdomains have zero. first_seen ASC tiebreaks so older
-  # hosts (more archive data) beat equally-scored newer ones; host ASC is the
-  # final UNIQUE tiebreaker so search_after paging is stable.
+  # SLIDING-WINDOW candidate query. Highest triage_score first (GAU/web-archive
+  # coverage drives param yield — established hosts have years of history; CT-fresh
+  # UUID subdomains have none). first_seen ASC tiebreaks; host ASC is the unique
+  # search_after tiebreaker. The must_not range on params_scanned_at EXCLUDES hosts
+  # crawled within the cooldown window SERVER-SIDE, so the query always returns the
+  # top NOT-recently-crawled hosts and walks deeper into the ~600k pool on its own —
+  # the producer can't go idle while uncrawled hosts remain, and never re-hammers one.
   #
-  # ES caps from+size at index.max_result_window (default 10000). A single
-  # oversized "size":PARAMS_CANDIDATE_POOL>10000 errors out instantly
-  # (search_phase_execution_exception) → jq extracts 0 rows → the whole pillar
-  # silently freezes (this exact bug stalled the catalog 2026-06-11..). So a
-  # DEEP pool is gathered by SEARCH_AFTER paging (each page <= 10000) instead.
+  # ES caps from+size at index.max_result_window (default 10000) — a single
+  # "size">10000 errors out (search_phase_execution_exception) → 0 rows → silent
+  # freeze (the 2026-06-11 bug). PARAMS_CANDIDATE_POOL is just the page size now (the
+  # range filter, not pool depth, slides the window); paged via SEARCH_AFTER regardless.
   local PAGE=$(( PARAMS_CANDIDATE_POOL < 10000 ? PARAMS_CANDIDATE_POOL : 10000 ))
   local got=0 after=""
   while (( got < PARAMS_CANDIDATE_POOL )); do
@@ -242,7 +267,7 @@ cmd_enqueue() {
     local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $PAGE,
       \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
-      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}}]}},
+      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}},{\"range\":{\"$PARAMS_SCANNED_FIELD\":{\"gte\":\"now-${PARAMS_COOLDOWN_DAYS}d\"}}}]}},
       \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}},{\"host\":{\"order\":\"asc\"}}]$sa
     }" 2>/dev/null)" || { warn "ES query failed (curl)"; exit 0; }
     # An ES-side error must NEVER masquerade as "no candidates" and silently
@@ -259,14 +284,12 @@ cmd_enqueue() {
   done
   [[ -s "$WORK/cand.tsv" ]] || { log "no in-scope-paying candidates"; exit 0; }
 
-  local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
-  # prune the cooldown ledger under a lock — the consumer appends to it concurrently.
-  ( flock 201; awk -F'\t' -v c="$CUTOFF" '$1>=c' "$SCANNED_FILE" > "$SCANNED_FILE.tmp" 2>/dev/null && mv "$SCANNED_FILE.tmp" "$SCANNED_FILE" ) 201>"$SCANNED_FILE.lock" || true
-  awk -F'\t' '{print $2}' "$SCANNED_FILE" | sort -u > "$WORK/done.set"
-  # also exclude hosts already sitting in the queue (inbox+processing) so a host is
-  # never enqueued twice while it waits to be (or is being) crawled.
-  cat "$PARAMS_INBOX"/*.tsv "$PARAMS_PROCESSING"/*.tsv 2>/dev/null | cut -f1 >> "$WORK/done.set"
-  sort -u "$WORK/done.set" -o "$WORK/done.set"
+  local NOW; NOW=$(date +%s)
+  # Cooldown is enforced SERVER-SIDE by the query's params_scanned_at range above, so
+  # the only client-side exclusion left is queue-dedup: drop hosts already sitting in
+  # the queue (inbox+processing) so a host is never enqueued twice while it waits.
+  : > "$WORK/done.set"
+  cat "$PARAMS_INBOX"/*.tsv "$PARAMS_PROCESSING"/*.tsv 2>/dev/null | cut -f1 | sort -u > "$WORK/done.set"
 
   # Diversity: cap hosts per root_domain so one program (e.g. 15 airbnb locale
   # subdomains) can't consume the entire 20-host cycle.
@@ -346,9 +369,9 @@ cmd_crawl() {
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping crawl"; exit 0; }
   es_up || { warn "ES not reachable"; exit 0; }
   ensure_index
+  ensure_alive_field
   exec 9>"$LOCK_FILE"; flock -n 9 || { warn "params crawl already running"; exit 0; }
   python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
-  touch "$SCANNED_FILE"
 
   requeue_stale
 
@@ -365,15 +388,14 @@ cmd_crawl() {
   log "claimed $(basename "$job") — $njob host(s), ${PARAM_PARALLEL}-wide"
 
   WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
-  # skip hosts already scanned within the cooldown window (idempotent on requeue).
-  local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
-  awk -F'\t' -v c="$CUTOFF" '$1>=c{print $2}' "$SCANNED_FILE" 2>/dev/null | sort -u > "$WORK/done.set"
 
+  # Crawl every host in the job (the producer already excluded cooled + queued hosts
+  # server-side, so there is no per-host re-check here). A crash before index_workdir
+  # means none were stamped → requeue re-crawls the whole job, idempotently.
   local running=0 crawled=0 halted=0
   while IFS=$'\t' read -r host url root program tier fresh fseen; do
     [[ -z "$host" ]] && continue
     [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-crawl — halting; job will requeue"; halted=1; break; }
-    grep -qxF "$host" "$WORK/done.set" && continue
     crawl_host "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" "$WORK" &
     running=$((running+1)); crawled=$((crawled+1))
     if (( running >= PARAM_PARALLEL )); then wait -n 2>/dev/null || wait; running=$((running-1)); fi
