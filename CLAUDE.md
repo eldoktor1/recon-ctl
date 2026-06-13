@@ -162,6 +162,21 @@ announces itself the moment it resurfaces, and the 2IC routine reads them to sto
 angles a note already killed. Add/view with `recon-note <host> ["text"]`. Notes never expire;
 ignores do.
 
+**ES IS THE SOURCE OF TRUTH (2026-06-13).** The flat files remain the durable write-log, but
+every `note_add`/`recon-ignore` now MIRRORS into the `recon_alive` doc(s) for that host
+(`recon_ledger_es.sh` → stored scripts `recon_note_push`/`recon_ignore_push`; best-effort,
+gate `RECON_ES_WRITEBACK=0`). ES fields: `host_notes[] {note,source,created_at}`,
+`host_notes_count`, `host_notes_text`, `ignore_active`, `ignore_reason`, `ignore_added_at`,
+`ignore_expires_at`, `ledger_synced_at`. **MANDATORY for ANY agent (incl. Claude) querying ES
+directly:** read these and respect them — a raw query does NOT auto-exclude benched hosts
+(`triage_ignored` is the *pipeline's* flag, NOT the operator's `recon-ignore`; that gap
+resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
+- **Exclude actively-benched**: `must_not` a `{"range":{"ignore_expires_at":{"gt":"now"}}}`
+  (self-correcting past the 7-day TTL; `ignore_active` is only the write-time snapshot — trust
+  the date range, not the bool).
+- **Surface worked-knowledge**: read `host_notes`/`host_notes_text` on every candidate; don't
+  re-rank an angle a note already killed. See [[feedback_takeover_claimability_primitive]].
+
 ## Submission discipline
 - Lead with the most severe **ACCURATE** framing. Don't overclaim — overclaimed
   severity gets reports closed N/A and dings researcher signal. (Real case: an unauth
