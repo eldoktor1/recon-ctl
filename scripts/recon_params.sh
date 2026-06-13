@@ -86,7 +86,7 @@ PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent 
 # ROTATION interval (re-check each host at most this often), NOT an idle cause;
 # at safe crawl rates a full pass takes far longer than the window anyway.
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
-PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-10000}"  # page size for candidate selection (single page; the server-side cooldown range slides the window). Sized for headroom: the 3-per-root diversity cap makes DISTINCT ROOTS the throughput limiter, so a deeper page = more roots/enqueue = the queue buffer never drains to idle
+PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-30000}"  # candidate reach (search_after-paged). MUST be deep: ephemeral/CI junk scores HIGH so it clusters in the top ~10k (measured ~77% junk there), while real param-bearing web apps sit DEEPER (a 40k sample was ~77% real post-filter). A shallow pool only ever sees the junk tier → ~0-yield crawls. Only queried when the queue has room (backpressure-gated), so the deeper pull is cheap. Server-side cooldown range still slides the window through the ~600k pool.
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
@@ -305,11 +305,22 @@ cmd_enqueue() {
   # PHASE 5: also drop host shapes with no GET-parameter web surface — API/RPC
   # endpoints (POST/JSON, no GET params), device/IoT/message brokers, and mail/DNS
   # records. They have no archive param-URLs, index 0, and burn GAU quota.
+  #
+  # EPHEMERAL/NON-PROD filter (2026-06-13): the leftmost-label rules above missed
+  # dev/test/staging/qa/preprod/CI hosts whose marker is EMBEDDED (e.g.
+  # foo.staging.runnr.in, nginx-ingress-test-92224.ea-ci-systems-dev.elastic.dev,
+  # thanos-...-preprod-...). Measured: ~77% of the top uncooled candidate field was
+  # this junk — zero param surface, so the consumer ground out 0-yield jobs while
+  # real hosts waited. Match the markers as whole DNS labels / hyphen-tokens
+  # ((^|[.-])marker([.-]|$)) so we never substring-FP a real host (e.g. "developers",
+  # "latest", "investor" are NOT matched). Out-of-scope corp/internal infra is caught
+  # here too as a side effect.
   grep -vE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.' \
        "$WORK/cand_div.tsv" \
   | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' \
   | grep -vE '^(api|apis|graphql|grpc|gql|mqtt|push|device|devices|iot|broker|smtp|imap|pop3?|mx[0-9]*|ns[0-9]+|dns)[.-]' \
   | grep -vE '^(auth|login|signin|sso|oauth|oidc|idp|saml|adfs|keycloak|prometheus|alertmanager|grafana|metrics|daemon|repo|repos|registry|artifactory|nexus)[.-]' \
+  | grep -viE '(^|[.-])(dev|test|tests|testing|qa|uat|sit|stg|stage|staging|preprod|prprd|nonprod|sandbox|sbx|demo|preview|storybook|ephemeral|internal|intranet|corp|canary|perf|loadtest|feature|pr[0-9]+)([.-]|$)' \
   > "$WORK/cand.tsv"
   rm -f "$WORK/cand_div.tsv"
 
