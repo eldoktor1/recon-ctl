@@ -57,7 +57,7 @@ for t in jsluice trufflehog subjs jq curl; do command -v "$t" >/dev/null 2>&1 ||
 # first (elite>high>... alphabetical asc), then true_fresh (fresh WITHIN tier — keeps the
 # be-first-to-fresh edge for new high-value hosts), then score. Mines elite API surface
 # first -> richer feedstock for recon_idor_candidates.py. (2026-06-13)
-q="$(jq -nc --argjson n "$JS_HOSTS" '{size:($n*5),_source:["host"],
+q="$(jq -nc --argjson n "$JS_HOSTS" '{size:2000,_source:["host"],
   query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{status_code:200}}],
                must_not:[{term:{triage_out_of_scope:true}}]}},
   sort:[{triage_payout_tier:{order:"asc",missing:"_last"}},{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
