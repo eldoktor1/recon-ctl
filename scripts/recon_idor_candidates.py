@@ -87,8 +87,13 @@ def main():
             key=(host,ep)
             if key in seen: continue
             seen.add(key)
+            # effective host = the endpoint's OWN host for full-URLs (you test THAT host,
+            # which may differ from where the JS was found — e.g. accounts2.netgear.com in
+            # Bitdefender's OEM JS), else the JS host. Scope is checked against this.
+            murl=re.match(r'^https?://([^/:]+)', ep)
+            eff_host=murl.group(1) if murl else host
             sc,idt=score_ep(host,ep)
-            if sc>=args.min_score: rows.append({"host":host,"endpoint":ep,"program":prog,"score":sc,"idtype":idt})
+            if sc>=args.min_score: rows.append({"host":host,"eff_host":eff_host,"endpoint":ep,"program":prog,"score":sc,"idtype":idt})
     if not rows: print("no candidates >= min-score"); return 0
     # product-class-dup suppression: the same templated endpoint on > FANOUT_MAX
     # distinct hosts is a shipped-product API (e.g. UniFi-OS /proxy/users/...), not
@@ -98,8 +103,8 @@ def main():
     before=len(rows)
     rows=[r for r in rows if len(fan[_fanout_key(r["endpoint"])])<=FANOUT_MAX]
     print(f"fanout-suppressed product-class endpoints: {before-len(rows)}")
-    # 2) resolve host -> tier/scope/benched (batch via ES terms)
-    hosts=sorted({r["host"] for r in rows})
+    # 2) resolve EFFECTIVE host -> tier/scope/benched (batch via ES terms)
+    hosts=sorted({r["eff_host"] for r in rows})
     meta={}
     for i in range(0,len(hosts),500):
         chunk=hosts[i:i+500]
@@ -111,8 +116,8 @@ def main():
     now=datetime.datetime.now(datetime.timezone.utc)
     out=[]
     for r in rows:
-        m=meta.get(r["host"])
-        if not m: continue                          # not in ES (unknown scope) -> skip
+        m=meta.get(r["eff_host"])
+        if not m: continue                          # endpoint host not in ES (unknown/OOS) -> skip
         if not m.get("triage_pays"): continue        # pays only
         if m.get("triage_in_scope") is False or m.get("triage_out_of_scope"): continue
         if m.get("triage_ignored"): continue          # pipeline-benched (incl. unifi shared-tenant)
@@ -131,7 +136,7 @@ def main():
     outp=args.out or os.path.join(HOME,f"recon/briefings/idor_candidates_{stamp}.md")
     os.makedirs(os.path.dirname(outp),exist_ok=True)
     byhost=collections.defaultdict(list)
-    for r in out[:args.top]: byhost[(r["tier"],r["program"],r["host"])].append(r)
+    for r in out[:args.top]: byhost[(r["tier"],r["program"],r["eff_host"])].append(r)
     lines=[f"# IDOR/BOLA candidate worklist (ranked) — {stamp}",
            f"From {len(seen)} jsintel endpoints -> {len(out)} scoped paying candidates (>= score {args.min_score}). Top {args.top} shown.",
            "Human 2-account test only (hard line: do NOT enumerate third-party IDs). Numeric-ID = enumerable; UUID = harvest from API list/JS.",""]
