@@ -51,11 +51,16 @@ exec 9>"$STATE_DIR/jsintel.lock"; flock -n 9 || { warn "already running"; exit 0
 [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — refusing (fail-closed)"; exit 0; }
 for t in jsluice trufflehog subjs jq curl; do command -v "$t" >/dev/null 2>&1 || { warn "$t missing"; exit 0; }; done
 
-# freshest live in-scope+paying hosts not recently mined
+# Host selection: VALUE-WEIGHTED freshness. IDOR/BOLA on high-value programs is the
+# #1 paid class (the money pillar this feeds), and fresh-first alone never reached the
+# elite API/dev/staging hosts (fresh mid-tier always jumped ahead). So sort payout_tier
+# first (elite>high>... alphabetical asc), then true_fresh (fresh WITHIN tier — keeps the
+# be-first-to-fresh edge for new high-value hosts), then score. Mines elite API surface
+# first -> richer feedstock for recon_idor_candidates.py. (2026-06-13)
 q="$(jq -nc --argjson n "$JS_HOSTS" '{size:($n*5),_source:["host"],
   query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{status_code:200}}],
                must_not:[{term:{triage_out_of_scope:true}}]}},
-  sort:[{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
+  sort:[{triage_payout_tier:{order:"asc",missing:"_last"}},{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
 mapfile -t hosts < <(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
   | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null | awk 'NF && !s[$0]++' \
   | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$JS_HOSTS")
