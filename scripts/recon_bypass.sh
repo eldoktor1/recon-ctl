@@ -273,10 +273,18 @@ _probe() {
     || printf '0\t0'
 }
 
-# Returns confidence integer (0-100). Args: <code> <size> <baseline_size>
+# Returns confidence integer (0-100). Args: <code> <size> <baseline_size> [shell_size]
+# shell_size = body size of the app's root "/" 2xx response. A "bypass" 200 whose
+# body size ~matches that shell is the SPA/app catch-all (index.html served for any
+# unmatched path), NOT a real bypass — it scores 0. (Fixes the tfb.t-mobile.com FP:
+# /<en-space>api returned the Angular index.html, identical to /, while real /api=401.)
 _confidence() {
-  local code="$1" size="$2" b_size="$3"
+  local code="$1" size="$2" b_size="$3" shell_size="${4:-0}"
   [[ "$code" =~ ^2 ]] || { printf '0'; return; }
+  if [[ "$shell_size" -gt 0 ]]; then
+    local sdiff=$(( size > shell_size ? size - shell_size : shell_size - size ))
+    [[ "$sdiff" -le 256 ]] && { printf '0'; return; }
+  fi
   local diff
   if [[ "$b_size" -eq 0 ]]; then
     if   [[ "$size" -ge 2000 ]]; then printf '90'
@@ -477,6 +485,12 @@ while IFS= read -r hit; do
   tech_paths="$(_tech_paths "$tech_csv")"
   mapfile -t all_paths < <(printf '%s\n%s\n/\n' "$tech_paths" "$_generic_paths" | awk 'NF && !seen[$0]++')
 
+  # Capture the app's root-shell size: a 2xx body served at "/" is the SPA/app
+  # catch-all; any "bypass" 200 of ~the same size is that shell, not a real bypass.
+  shell_size=0
+  root_probe="$(_probe "${base_url%/}/")"
+  [[ "${root_probe%%$'\t'*}" =~ ^2 ]] && shell_size="${root_probe##*$'\t'}"
+
   # Confirmed bypass records (JSON objects) for this host.
   bypass_records="[]"
   best_tech=""
@@ -521,7 +535,7 @@ while IFS= read -r hit; do
       result="$(_probe "$local_url" "${TECH_ARGS[@]}")"
       r_code="${result%%$'\t'*}"
       r_size="${result##*$'\t'}"
-      conf="$(_confidence "$r_code" "$r_size" "$b_size")"
+      conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
       [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
       # Body-boost confirmation (only on plausible hits)
       boost="$(_body_boost "$local_url" "${TECH_ARGS[@]}")"
@@ -547,7 +561,7 @@ while IFS= read -r hit; do
         [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]] && { budget_exceeded=1; break; }
         result="$(_probe "$local_url" -X "$m")"
         r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size")"
+        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
         [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
         log "  HIT path=$path technique=method-$m code=$r_code size=$r_size conf=$conf"
         rec="$(jq -nc \
@@ -570,7 +584,7 @@ while IFS= read -r hit; do
       if [[ "$now_elapsed" -le "$BYPASS_HOST_BUDGET" ]]; then
         result="$(_probe "$local_url" --http1.0)"
         r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size")"
+        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
         if [[ "$conf" -ge "$BYPASS_MIN_CONF" ]]; then
           log "  HIT path=$path technique=http1.0 code=$r_code size=$r_size conf=$conf"
           rec="$(jq -nc \
@@ -595,7 +609,7 @@ while IFS= read -r hit; do
         [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]] && { budget_exceeded=1; break; }
         result="$(_probe "$vurl")"
         r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size")"
+        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
         [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
         log "  HIT path=$path technique=$vname code=$r_code size=$r_size conf=$conf"
         rec="$(jq -nc \
