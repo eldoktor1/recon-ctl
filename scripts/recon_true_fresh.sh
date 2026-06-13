@@ -53,6 +53,11 @@ SCOPE_DIR="${SCOPE_DIR:-$BASE_DIR/scope}"
 HOLDING_FILE="$TF_DIR/holding.jsonl"
 SEEN_FILE="$TF_DIR/seen_hosts.txt"
 PERSIST_JSONL="$TF_DIR/../true_fresh.jsonl"   # i.e. ~/recon/state/true_fresh.jsonl
+# Cumulative "ever-seen" host ledger (maintained by recon_validate.sh, world-readable).
+# Used to drop CERT RENEWALS: gungnir can't distinguish a first issuance from a renewal,
+# so a long-known host re-emits via CT on every ~90d renewal — true-fresh must mean
+# GENUINELY NEW (never-before-seen), so any candidate already in this ledger is excluded.
+KNOWN_HOSTS="${KNOWN_HOSTS:-$STATE_DIR/known_hosts.txt}"
 GUNGNIR_PIDFILE="$TF_DIR/gungnir.pid"
 LISTENER_LOG="$BASE_DIR/logs/true_fresh_listener.log"
 LOCK_FILE="$STATE_DIR/true_fresh.lock"
@@ -553,7 +558,7 @@ if [[ ! -s "$HOLDING_FILE" ]]; then
 fi
 
 WORK="$(mktemp)"
-trap 'rm -f "$WORK" "$WORK.scoped" "$WORK.scoped_s" "$WORK.fresh" "$WORK.candidates" "$WORK.seen"' EXIT
+trap 'rm -f "$WORK" "$WORK.scoped" "$WORK.scoped_s" "$WORK.scoped_new" "$WORK.known" "$WORK.fresh" "$WORK.candidates" "$WORK.seen"' EXIT
 
 # Atomic rotate of the holding file. The gungnir reader appends to holding under
 # its own fcntl lock (a DIFFERENT lock than this script's fd 9), so the old
@@ -588,6 +593,26 @@ log "Scope-filtered: $scoped_n in-scope-paying candidates"
 
 if [[ "$scoped_n" -eq 0 ]]; then
   exit 0
+fi
+
+# ---- Cert-RENEWAL exclusion: drop hosts we've already seen ------------------
+# gungnir streams every newly-issued cert and CANNOT tell a first issuance from a
+# renewal — so a long-known host re-emits on each ~90d renewal and was being
+# mislabelled true_fresh. A host is only GENUINELY fresh if it is NOT already in
+# the cumulative known-hosts ledger. grep scans the big ledger once against the (small)
+# candidate set — no sort of the 4M-line file. Graceful no-op if absent.
+# -a is REQUIRED: known_hosts.txt carries NUL bytes, so grep treats it as binary and
+# WITHOUT -a prints nothing → the whole renewal filter would silently drop 0 (verified).
+if [[ -s "$KNOWN_HOSTS" ]]; then
+  sort -u "$WORK.scoped" > "$WORK.scoped_s"
+  grep -aFxf "$WORK.scoped_s" "$KNOWN_HOSTS" 2>/dev/null | sort -u > "$WORK.known" || : > "$WORK.known"
+  comm -23 "$WORK.scoped_s" "$WORK.known" > "$WORK.scoped_new" 2>/dev/null || cp "$WORK.scoped" "$WORK.scoped_new"
+  renew_n="$(wc -l < "$WORK.known" | tr -d ' ')"
+  mv "$WORK.scoped_new" "$WORK.scoped"
+  rm -f "$WORK.scoped_s" "$WORK.known"
+  scoped_n="$(wc -l < "$WORK.scoped" | tr -d ' ')"
+  log "Renewal filter: dropped ${renew_n:-0} already-known host(s) (cert renewals) → $scoped_n genuinely-new"
+  [[ "$scoped_n" -eq 0 ]] && exit 0
 fi
 
 # ---- 24h cooldown dedupe (seen_hosts.txt) ----------------------------------
