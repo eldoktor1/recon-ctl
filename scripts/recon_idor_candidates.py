@@ -52,6 +52,14 @@ def _fanout_key(ep):
     p=p.split('?')[0]
     return p
 FANOUT_MAX=5  # same endpoint on > this many distinct hosts = shipped-product API (dup)
+# Backend-API vs SPA-client-route hint: jsluice extracts both. The IDOR money is the BACKEND
+# API (returns JSON/401), not the Angular/React client routes (which return the app shell).
+# Verified signal: an /api/ prefix or an api.* host is backend; bare /bookings/:id, /v2/x were
+# SPA routes (blis). Not authoritative (operator confirms by probing for JSON/401), just a hint.
+def _backend_hint(ep, eff_host):
+    if re.search(r'/api[/.]|/graphql|/rest/|/services?/', ep, re.I): return "API"
+    if eff_host.startswith("api.") or ".api." in eff_host or eff_host.startswith("gw.") or eff_host.startswith("gateway"): return "API"
+    return "route?"
 
 def score_ep(host, ep):
     p=ep
@@ -143,11 +151,14 @@ def main():
     for r in out[:args.top]: byhost[(r["tier"],r["program"],r["eff_host"])].append(r)
     lines=[f"# IDOR/BOLA candidate worklist (ranked) — {stamp}",
            f"From {len(seen)} jsintel endpoints -> {len(out)} scoped paying candidates (>= score {args.min_score}). Top {args.top} shown.",
-           "Human 2-account test only (hard line: do NOT enumerate third-party IDs). Numeric-ID = enumerable; UUID = harvest from API list/JS.",""]
+           "Human 2-account test only (hard line: do NOT enumerate third-party IDs). Numeric-ID = enumerable; UUID = harvest from API list/JS.",
+           "[API] = likely backend (JSON/401) = test directly. [route?] = likely an SPA client route (returns app",
+           "shell) -- it REVEALS which resources are id-accessed; test the matching backend /api/<resource>/<id>",
+           "with auth (2-account, swap the id). Verify backend-vs-route by probing for JSON/401 vs index.html.",""]
     for (tier,prog,host),eps in sorted(byhost.items(),key=lambda kv:-max(e['rank'] for e in kv[1])):
         lines.append(f"## [{tier}] {host}  ({prog})")
         for e in sorted(eps,key=lambda x:-x["rank"])[:12]:
-            lines.append(f"  - `{e['endpoint']}`  score={e['score']} [{e['idtype']}]")
+            lines.append(f"  - [{_backend_hint(e['endpoint'],e['eff_host'])}] `{e['endpoint']}`  score={e['score']} [{e['idtype']}]")
         lines.append("")
     open(outp,"w").write("\n".join(lines))
     print(f"IDOR candidates: {len(out)} scoped paying (from {len(rows)} scored, {len(seen)} endpoints)")
