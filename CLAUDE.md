@@ -17,7 +17,15 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   reasons over the jsintel endpoint surface (`~/recon/js_recon/endpoints.jsonl` + ES) →
   ranked broken-access-control/IDOR worklist with the 2-account test (the most-rewarded
   class; reasoning only, human exploits with their own accounts). (The old `recon_ai_idor.sh`
-  daemon loop was retired 2026-06-08 — the routine subsumes it.)
+  daemon loop was retired 2026-06-08 — the routine subsumes it.) The routine/operator now
+  start from a **pre-ranked** list: `recon_idor_candidates.py` scores all endpoints.jsonl
+  entries for IDOR-likelihood (object-reference resource + ID type: numeric=enumerable,
+  uuid=harvestable, id-param; +sensitive/financial, +api/graphql, +upload-download), excludes
+  benched/OOS/non-paying + 3rd-party-host endpoints, and **fanout-suppresses product-class-dup
+  APIs** (same templated endpoint on >5 hosts = shipped product, e.g. UniFi `/proxy/users/...`).
+  Output → `~/recon/briefings/idor_candidates_<date>.md`. Added 2026-06-13; research-grounded
+  (IDOR in REST/GraphQL APIs = #1 paid class, the one automation can't confirm — so surface,
+  rank, human-test). Still reasoning-only; NEVER enumerate third-party IDs (hard line).
 - **n-day racing** (`recon_nday.sh`) — Claude version-reasons KEV/CVE matches to KILL the
   tech-class FP and surface only genuine in-range candidates, in the race window.
 - **GitHub leaks** (`recon_ghleaks.sh`) — code-search → trufflehog-verify live leaked
