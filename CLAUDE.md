@@ -152,6 +152,15 @@ probes) on any digest lead so the operator can deep-check before spending an eve
   even when something is exposed.
 
 ## Worked-knowledge: notes vs ignores
+**HARD STANDING RULE (any agent): a disqualified target MUST be noted, at the moment it's
+disqualified.** "If a target proves to be not valuable it needs to be noted and documented so we
+don't waste time" (operator, 2026-06-12). This covers BOTH a probed-and-killed host (note the
+primitive + the 401/403/version that killed it) AND a target dismissed by *reasoning alone*
+(by-design / mis-tag / product-class) — the latter is just as re-surfaceable but leaves no trace
+unless noted. Big cluster ⇒ note 2-3 REPRESENTATIVES with a class-reason, not one-per-host (that's
+product-class bloat; the fan-out filter handles the rest). NEVER bench a still-live lead (staging
+not-yet-checked, an un-mined JS lead). A disqualification without a note is incomplete.
+
 `ignored.jsonl` = a TEMPORARY 7-day penalty (a host willingly benched; resurfaces when the
 TTL lapses). `host_notes.jsonl` = PERMANENT worked-knowledge keyed to host/root-domain
 (`{host,root_domain,program,note,source,created_at}`, deduped on (host,note), NEVER TTL'd).
