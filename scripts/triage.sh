@@ -376,13 +376,18 @@ score_raw() {
         action:"GET /artifactory/api/system/info | /api/repositories | anon access | build artifacts = secrets"} else empty end),
       (if has_tech("glpi") or title_match("^glpi") then {pts:6, sig:"tech:glpi", class:"rce", strength:"confirmed",
         action:"CVE-2023-35924 unauth file read | CVE-2022-35914 PHP injection | default glpi:glpi"} else empty end),
-      (if has_tech("exchange") or has_tech("owa") or title_match("outlook web app|exchange") then
+      # bare "exchange" matched every crypto "... Exchange" title (Coinbase/Bybit/Deribit) —
+      # require Microsoft-Exchange-specific tech/title instead.
+      (if has_tech("microsoft exchange|exchange server") or has_tech("owa") or title_match("outlook web app|outlook web access") then
         {pts:8, sig:"tech:exchange-owa", class:"rce", strength:"confirmed",
         action:"CVE-2021-26855 ProxyLogon | CVE-2021-34473 ProxyShell | /owa/auth/logon.aspx version"} else empty end),
       (if has_tech("metabase") or title_match("metabase") then {pts:8, sig:"tech:metabase", class:"rce", strength:"confirmed",
         action:"CVE-2023-38646 unauth pre-auth RCE | /api/setup/properties | /api/health"} else empty end),
-      # "nifi" matches "UniFi" as substring — exclude Ubiquiti UniFi OS pages explicitly
-      (if (has_tech("nifi") or title_match("apache nifi|nifi")) and (title_match("unifi") | not) and (.host | test("unifi"; "i") | not) then {pts:8, sig:"tech:nifi", class:"rce", strength:"confirmed",
+      # "nifi" is a SUBSTRING of "UniFi" (Ubiquiti) — use a \b word-boundary so it
+      # cannot match inside "unifi" in the tech array OR title (the old title/host-only
+      # guard missed tech:["UniFi"] on a non-unifi host); keep the host guard for the
+      # *.unifi-hosting.ui.com shared-tenant pages too.
+      (if (has_tech("\\bnifi") or title_match("apache nifi|\\bnifi")) and (.host | test("unifi"; "i") | not) then {pts:8, sig:"tech:nifi", class:"rce", strength:"confirmed",
         action:"CVE-2023-34468 H2 driver RCE | unauth /nifi-api/flow/about often | DB connection RCE primitive"} else empty end),
       (if has_tech("superset") or title_match("apache superset") then {pts:8, sig:"tech:superset", class:"rce", strength:"confirmed",
         action:"CVE-2023-27524 default SECRET_KEY = session forge to admin | /api/v1/security/login"} else empty end),
