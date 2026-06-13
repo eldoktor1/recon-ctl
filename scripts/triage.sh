@@ -287,7 +287,9 @@ score_raw() {
         action:"CVE-2023-45196 SSRF | localhost connect | blank password test"} else empty end),
       (if has_tech("elasticsearch") and port_in([9200,9300]) then {pts:9, sig:"tech:es-exposed", class:"data-leak", strength:"confirmed",
         action:"GET /_cat/indices?v | /<index>/_search?size=10 | /_cluster/health | /_nodes"} else empty end),
-      (if has_tech("minio") or title_match("minio") then {pts:7, sig:"tech:minio", class:"data-leak", strength:"confirmed",
+      # "minio" is a substring of "Minion(s)" / "Image Minion" — negative-lookahead (?!n)
+      # so it cannot match when followed by an n forming a different word.
+      (if has_tech("minio(?!n)") or title_match("minio(?!n)") then {pts:7, sig:"tech:minio", class:"data-leak", strength:"confirmed",
         action:"CVE-2023-28432 unauth /minio/health/cluster | default minioadmin:minioadmin"} else empty end),
       (if has_tech("docker registry") or title_match("docker registry") then {pts:8, sig:"tech:docker-registry", class:"data-leak", strength:"confirmed",
         action:"GET /v2/_catalog | /v2/<image>/tags/list | pull for secret extraction"} else empty end),
@@ -299,7 +301,9 @@ score_raw() {
         action:"CVE-2022-21951 priv-esc | default admin:admin | /v3/clusters | kubectl via UI"} else empty end),
       (if title_match("portainer") then {pts:7, sig:"tech:portainer", class:"rce", strength:"confirmed",
         action:"CVE-2021-21315 escape | POST /api/users/admin/init unauth admin creation"} else empty end),
-      (if has_tech("harbor") or title_match("harbor.*registry") then {pts:7, sig:"tech:harbor", class:"data-leak", strength:"confirmed",
+      # "harbor" is a substring of "FareHarbor" — \b word-boundary so it cannot match
+      # inside another word (FareHarbor is a booking SaaS, not a Harbor registry).
+      (if has_tech("\\bharbor") or title_match("\\bharbor.*registry") then {pts:7, sig:"tech:harbor", class:"data-leak", strength:"confirmed",
         action:"CVE-2019-16097 unauth admin creation | /api/v2.0/projects anon list | default admin:Harbor12345"} else empty end),
       (if has_tech("struts") then {pts:9, sig:"tech:struts", class:"rce", strength:"confirmed",
         action:"CVE-2017-5638 OGNL Content-Type | CVE-2018-11776 namespace | CVE-2023-50164 file upload RCE"} else empty end),
