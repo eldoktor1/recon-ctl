@@ -287,9 +287,9 @@ score_raw() {
         action:"CVE-2023-45196 SSRF | localhost connect | blank password test"} else empty end),
       (if has_tech("elasticsearch") and port_in([9200,9300]) then {pts:9, sig:"tech:es-exposed", class:"data-leak", strength:"confirmed",
         action:"GET /_cat/indices?v | /<index>/_search?size=10 | /_cluster/health | /_nodes"} else empty end),
-      # "minio" is a substring of "Minion(s)" / "Image Minion" — negative-lookahead (?!n)
-      # so it cannot match when followed by an n forming a different word.
-      (if has_tech("minio(?!n)") or title_match("minio(?!n)") then {pts:7, sig:"tech:minio", class:"data-leak", strength:"confirmed",
+      # "minio" is a substring of "Minion(s)"/"Image Minion" (trailing n) AND of "dominio"/
+      # "dominion" (leading do-). \b boundary before + (?!n) lookahead after isolates real MinIO.
+      (if has_tech("\\bminio(?!n)") or title_match("\\bminio(?!n)") then {pts:7, sig:"tech:minio", class:"data-leak", strength:"confirmed",
         action:"CVE-2023-28432 unauth /minio/health/cluster | default minioadmin:minioadmin"} else empty end),
       (if has_tech("docker registry") or title_match("docker registry") then {pts:8, sig:"tech:docker-registry", class:"data-leak", strength:"confirmed",
         action:"GET /v2/_catalog | /v2/<image>/tags/list | pull for secret extraction"} else empty end),
