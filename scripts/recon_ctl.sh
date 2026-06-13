@@ -2516,7 +2516,11 @@ case "${1:-}" in
     case "${1:-}" in
       "")       bash "$SCRIPT_DIR/recon_params.sh" list ;;
       list)     shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
-      collect)  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" collect ;;
+      enqueue)  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue ;;
+      crawl)    sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
+      collect)  # manual one-shot: refill the queue then crawl a single job
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
       verify)   shift; sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" verify "$@" ;;
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac

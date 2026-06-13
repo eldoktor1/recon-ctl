@@ -6,10 +6,14 @@
 # vuln class, so you can pull "all in-scope SQLi targets" / "all XSS targets" on
 # demand — for manual hunting or feeding sqlmap/dalfox/nuclei.
 #
-#   collect        crawl in-scope-paying hosts (FRESH-FIRST), gf-classify their
-#                  parameterised URLs, store per-class files + ES recon_params
-#                  index. Bounded per run; 7d per-host cooldown. (daemon loop /
-#                  manual). Target-facing → run as reconrun via Mullvad.
+#   enqueue        PRODUCER (ES-only, no target traffic): score+cooldown-aware
+#                  candidate selection → small JOB FILES in the shared directory
+#                  queue (queue/params/inbox). Backpressure at PARAMS_INBOX_CAP.
+#   crawl          CONSUMER (target-facing → reconrun/Mullvad, egress-gated):
+#                  atomically claim ONE job, crawl its hosts (katana+gau),
+#                  gf-classify, index THIS job to recon_params immediately,
+#                  7d per-host cooldown, move job→done. One job/cycle = bounded,
+#                  honest egress + incremental feed. Crashed jobs auto-requeue.
 #   list <class> [N]   print in-scope param-URLs for a class, fresh-first,
 #                  tagged with program / tier / (FRESH). Read-only.
 #   verify <xss|sqli> [N]   actively probe top N catalog URLs for the class:
@@ -32,6 +36,15 @@ STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 PARAMS_DIR="$BASE_DIR/params"
 LOCK_FILE="$STATE_DIR/params.lock"
 
+# Shared directory queue (same inbox→processing→done pattern as recon_validate.sh,
+# in its OWN namespace so it never collides with the httpx-consumer queue). The
+# PRODUCER (enqueue) drops job files into inbox; the CONSUMER (crawl) atomically
+# claims one via mv→processing, then archives it to done.
+PARAMS_QUEUE_DIR="${PARAMS_QUEUE_DIR:-$BASE_DIR/queue/params}"
+PARAMS_INBOX="$PARAMS_QUEUE_DIR/inbox"
+PARAMS_PROCESSING="$PARAMS_QUEUE_DIR/processing"
+PARAMS_DONE="$PARAMS_QUEUE_DIR/done"
+
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 source "$SCRIPT_DIR/recon_net.sh"
 setup_es_netrc
@@ -53,15 +66,18 @@ if [[ -z "${PARAMS_CLASSES:-}" ]]; then
   # + rce and img-traversal from community Gf-Patterns (installed in reconrun home)
   PARAMS_CLASSES=$'sqli\nxss\nssrf\nlfi\nssti\ncmdi\ndebug\nrce\nredirect\nidor\nimg-traversal'
 fi
-# v3.2 throughput (balanced): the serial 10-host/cycle loop covered only ~13 hosts/day
-# (0.05% of in-scope), starving the confirmers. Parallelise the per-host crawl PARAM_PARALLEL-wide
-# and raise hosts/cycle — per-host rate limits (KATANA_RL, gau jitter) are unchanged so we
-# buy throughput without becoming aggressive (the article's ban cautionary tale).
-# CONTINUOUS / UNCAPPED collection: crawl the whole eligible pool each run, parallel-pooled so the next
-# host queues the instant one finishes (or comes up empty). Stays SAFE/no-ban via PARAM_PARALLEL + per-host
-# KATANA_RL/gau jitter (unchanged), and leak-safe via the mid-crawl vpn_down check in the pool loop.
-PARAMS_HOSTS_PER_CYCLE="${PARAMS_HOSTS_PER_CYCLE:-100000}"   # effectively uncapped — process all un-cooled candidates
-PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent per-host crawls (each per-host rate-limited) — politeness throttle, keep it
+# JOBS-AND-QUEUES throughput model (matches recon_validate.sh): the PRODUCER enqueues
+# small fixed-size jobs; the CONSUMER processes ONE job per cycle under the daemon's
+# global egress governor. This keeps the egress footprint BOUNDED + HONEST (the old
+# model held one egress slot but fanned out PARAM_PARALLEL-wide for a whole multi-hour
+# run, so the 6-slot governor under-counted it ~5x — the exact self-inflicted-ban risk)
+# and feeds downstream INCREMENTALLY (index per job, not once at end-of-run).
+PARAMS_JOB_SIZE="${PARAMS_JOB_SIZE:-50}"          # hosts per queued job file
+PARAMS_INBOX_CAP="${PARAMS_INBOX_CAP:-40}"        # producer backpressure: stop enqueuing at this many pending jobs (~2000 hosts buffered)
+PARAMS_JOB_TTL="${PARAMS_JOB_TTL:-1800}"          # a claimed job idle > this (crashed consumer) → requeued to inbox
+PARAMS_JOB_MAX_RETRY="${PARAMS_JOB_MAX_RETRY:-3}" # drop a job after this many requeues
+PARAMS_DONE_KEEP="${PARAMS_DONE_KEEP:-200}"       # done-archive cap (most-recent kept)
+PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent per-host crawls WITHIN a job (each per-host rate-limited) — politeness throttle, keep it
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
 PARAMS_ZERO_COOLDOWN_DAYS="${PARAMS_ZERO_COOLDOWN_DAYS:-30}"   # param-POOR hosts: long cooldown so a host with no params doesn't get re-crawled — the next host queues instead
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-20000}"   # reach DEEP so cycles never starve (always work to crawl); selection only — actual crawl is per-host rate-limited
@@ -74,7 +90,7 @@ GAU_TIMEOUT="${GAU_TIMEOUT:-30}"    # otx+urlscan are fast; 30s is ample; 60 was
 MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
 SCANNED_FILE="$STATE_DIR/.params_scanned.tsv"
 
-mkdir -p "$PARAMS_DIR" "$STATE_DIR"
+mkdir -p "$PARAMS_DIR" "$STATE_DIR" "$PARAMS_INBOX" "$PARAMS_PROCESSING" "$PARAMS_DONE"
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
 
 es()  { curl -sS -m30 --netrc-file "$HOME/.recon_es_netrc" "$@"; }
@@ -144,35 +160,113 @@ crawl_host() {
 }
 
 # ---------------------------------------------------------------------------
-cmd_collect() {
-  for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
-  # VPN gate — never crawl while the leak guard has tripped.
-  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping collect"; exit 0; }
-  exec 9>"$LOCK_FILE"; flock -n 9 || { warn "params collect already running"; exit 0; }
-  python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
+# requeue_stale — bounce jobs whose consumer crashed/overran (claimed > JOB_TTL
+# ago, still in processing/) back to inbox with a .retryN bump; drop after
+# PARAMS_JOB_MAX_RETRY. Mirrors recon_validate.sh's retry discipline.
+requeue_stale() {
+  local now f; now="$(date +%s)"
+  for f in "$PARAMS_PROCESSING"/*.tsv; do
+    [[ -e "$f" ]] || continue
+    local mt age; mt="$(stat -c %Y "$f" 2>/dev/null || echo "$now")"; age=$(( now - mt ))
+    (( age < PARAMS_JOB_TTL )) && continue
+    local base; base="$(basename "$f")"
+    local rc=0; [[ "$base" =~ \.retry([0-9]+)\.tsv$ ]] && rc="${BASH_REMATCH[1]}"
+    if (( rc >= PARAMS_JOB_MAX_RETRY )); then warn "dropping job $base after $rc retries"; rm -f "$f"; continue; fi
+    local stem="${base%.tsv}"; stem="${stem%.retry*}"
+    mv "$f" "$PARAMS_INBOX/${stem}.retry$((rc+1)).tsv" 2>/dev/null && log "requeued stale job $base (retry $((rc+1)))"
+  done
+}
+
+# index_workdir WORKDIR — aggregate ONE crawl's per-host outputs and bulk-index to
+# recon_params; append per-class files + cooldown markers (ledger write is locked,
+# the producer prunes it concurrently). Echoes the indexed doc count on stdout.
+index_workdir() {
+  local wd="$1" cls
+  local bulk="$wd/bulk.ndjson"; : > "$bulk"
+  cat "$wd"/*/bulk.part >> "$bulk" 2>/dev/null || true
+  ( flock 201; cat "$wd"/*/scanned >> "$SCANNED_FILE" 2>/dev/null ) 201>"$SCANNED_FILE.lock" || true
+  for cls in $PARAMS_CLASSES; do
+    cat "$wd"/*/cls."$cls" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
+    [[ -f "$PARAMS_DIR/$cls.txt" ]] && sort -u "$PARAMS_DIR/$cls.txt" -o "$PARAMS_DIR/$cls.txt" 2>/dev/null || true
+  done
+  local indexed=0
+  if [[ -s "$bulk" ]]; then
+    local bulk_resp
+    bulk_resp="$(es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" --data-binary @"$bulk" 2>/dev/null)"
+    if [[ -n "$bulk_resp" ]]; then
+      indexed="$(printf '%s' "$bulk_resp" | jq '[.items[]?.index | select(.result=="created" or .result=="updated")] | length' 2>/dev/null || echo 0)"
+      local errs; errs="$(printf '%s' "$bulk_resp" | jq -r '[.items[]?.index | select(.error) | .error.reason] | unique | .[:3] | join(" | ")' 2>/dev/null)"
+      [[ -n "$errs" ]] && warn "bulk index errors: $errs"
+    else
+      warn "bulk index: no response from ES (connection issue?)"
+    fi
+  fi
+  printf '%s' "$indexed"
+}
+
+# ---------------------------------------------------------------------------
+# PRODUCER — ES-only candidate selection → small job files in the queue. No
+# target traffic, so it takes its OWN light lock (not the egress-gated consumer
+# lock). Recovers crashed jobs and honours inbox backpressure before any ES work.
+cmd_enqueue() {
   es_up || { warn "ES not reachable"; exit 0; }
   ensure_index
+  exec 9>"$STATE_DIR/params_enqueue.lock"; flock -n 9 || { warn "params enqueue already running"; exit 0; }
+  python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
   touch "$SCANNED_FILE"
+
+  requeue_stale
+  local pending; pending="$(find "$PARAMS_INBOX" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | wc -l | tr -d ' ')"
+  local free=$(( PARAMS_INBOX_CAP - pending ))
+  (( free > 0 )) || { log "inbox full ($pending/$PARAMS_INBOX_CAP jobs) — not enqueuing"; exit 0; }
+
+  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
+  : > "$WORK/cand.tsv"
 
   # Score-first in-scope-paying host candidates. Sorting by triage_score DESC
   # (not fresh-first) because GAU/web-archive coverage is what drives param
   # discovery — established high-signal hosts have years of crawl history;
-  # CT-log-fresh UUID subdomains have zero. first_seen ASC as tiebreaker so
-  # older hosts (more archive data) beat equally-scored newer ones.
-  local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
-    \"size\": $PARAMS_CANDIDATE_POOL,
-    \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
-    \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}}]}},
-    \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}}]
-  }" 2>/dev/null)" || { warn "ES query failed"; exit 0; }
-
-  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
-  printf '%s' "$resp" | jq -rc '.hits.hits[]?._source | [(.host//""),(.url//("https://"+(.host//""))),(.root_domain//""),(.triage_program//""),(.triage_payout_tier//"none"),((.triage_true_fresh//false)|tostring),(.first_seen//"")] | @tsv' 2>/dev/null > "$WORK/cand.tsv"
+  # CT-log-fresh UUID subdomains have zero. first_seen ASC tiebreaks so older
+  # hosts (more archive data) beat equally-scored newer ones; host ASC is the
+  # final UNIQUE tiebreaker so search_after paging is stable.
+  #
+  # ES caps from+size at index.max_result_window (default 10000). A single
+  # oversized "size":PARAMS_CANDIDATE_POOL>10000 errors out instantly
+  # (search_phase_execution_exception) → jq extracts 0 rows → the whole pillar
+  # silently freezes (this exact bug stalled the catalog 2026-06-11..). So a
+  # DEEP pool is gathered by SEARCH_AFTER paging (each page <= 10000) instead.
+  local PAGE=$(( PARAMS_CANDIDATE_POOL < 10000 ? PARAMS_CANDIDATE_POOL : 10000 ))
+  local got=0 after=""
+  while (( got < PARAMS_CANDIDATE_POOL )); do
+    local sa=""; [[ -n "$after" ]] && sa=",\"search_after\":$after"
+    local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
+      \"size\": $PAGE,
+      \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
+      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}}]}},
+      \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}},{\"host\":{\"order\":\"asc\"}}]$sa
+    }" 2>/dev/null)" || { warn "ES query failed (curl)"; exit 0; }
+    # An ES-side error must NEVER masquerade as "no candidates" and silently
+    # freeze the pillar — surface it loudly and bail so MONITOR can catch it.
+    if printf '%s' "$resp" | jq -e '.error' >/dev/null 2>&1; then
+      warn "ES candidate query error: $(printf '%s' "$resp" | jq -r '.error.root_cause[0].reason // .error.reason // .error.type' 2>/dev/null)"
+      exit 1
+    fi
+    local n; n="$(printf '%s' "$resp" | jq -rc '.hits.hits[]?._source | [(.host//""),(.url//("https://"+(.host//""))),(.root_domain//""),(.triage_program//""),(.triage_payout_tier//"none"),((.triage_true_fresh//false)|tostring),(.first_seen//"")] | @tsv' 2>/dev/null | tee -a "$WORK/cand.tsv" | wc -l | tr -d ' ')"
+    got=$(( got + n ))
+    (( n < PAGE )) && break    # short page → candidate pool exhausted
+    after="$(printf '%s' "$resp" | jq -c '.hits.hits[-1].sort // empty' 2>/dev/null)"
+    [[ -z "$after" ]] && break
+  done
   [[ -s "$WORK/cand.tsv" ]] || { log "no in-scope-paying candidates"; exit 0; }
 
   local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
-  awk -F'\t' -v c="$CUTOFF" '$1>=c' "$SCANNED_FILE" > "$SCANNED_FILE.tmp" 2>/dev/null && mv "$SCANNED_FILE.tmp" "$SCANNED_FILE"
+  # prune the cooldown ledger under a lock — the consumer appends to it concurrently.
+  ( flock 201; awk -F'\t' -v c="$CUTOFF" '$1>=c' "$SCANNED_FILE" > "$SCANNED_FILE.tmp" 2>/dev/null && mv "$SCANNED_FILE.tmp" "$SCANNED_FILE" ) 201>"$SCANNED_FILE.lock" || true
   awk -F'\t' '{print $2}' "$SCANNED_FILE" | sort -u > "$WORK/done.set"
+  # also exclude hosts already sitting in the queue (inbox+processing) so a host is
+  # never enqueued twice while it waits to be (or is being) crawled.
+  cat "$PARAMS_INBOX"/*.tsv "$PARAMS_PROCESSING"/*.tsv 2>/dev/null | cut -f1 >> "$WORK/done.set"
+  sort -u "$WORK/done.set" -o "$WORK/done.set"
 
   # Diversity: cap hosts per root_domain so one program (e.g. 15 airbnb locale
   # subdomains) can't consume the entire 20-host cycle.
@@ -214,59 +308,90 @@ cmd_collect() {
     log "candidate bias: $(wc -l < "$covered") proven-coverage root(s) floated to front"
   fi
 
-  # Build the worklist: up to PER_CYCLE not-yet-scanned hosts (cooldown-respecting).
+  # Pick up to (free inbox slots × JOB_SIZE) not-yet-queued, not-cooled hosts and
+  # split them into PARAMS_JOB_SIZE-host job files. Score/proven-root order is kept;
+  # any job containing a true_fresh host gets the 00_ lane prefix so the consumer
+  # drains it first (00_ sorts before 50_).
   local worklist="$WORK/worklist.tsv"; : > "$worklist"
-  local picked=0
+  local picked=0 limit=$(( free * PARAMS_JOB_SIZE ))
   while IFS=$'\t' read -r host url root program tier fresh fseen; do
-    [[ "$picked" -ge "$PARAMS_HOSTS_PER_CYCLE" ]] && break
+    (( picked >= limit )) && break
     [[ -z "$host" ]] && continue
     grep -qxF "$host" "$WORK/done.set" && continue
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" >> "$worklist"
     picked=$((picked+1))
   done < "$WORK/cand.tsv"
-  [[ "$picked" -gt 0 ]] || { log "no fresh in-scope candidates this cycle (all in cooldown)"; exit 0; }
-  log "crawling $picked host(s), ${PARAM_PARALLEL}-wide"
+  (( picked > 0 )) || { log "no fresh in-scope candidates to enqueue (all cooled or already queued)"; exit 0; }
 
-  # Parallel pool: PARAM_PARALLEL concurrent crawl_host jobs, each isolated to its own
-  # dir (no shared-file races). Per-host rate limits + gau jitter keep egress polite.
-  local running=0
+  split -l "$PARAMS_JOB_SIZE" -d "$worklist" "$WORK/job_"
+  local jobs=0 jf
+  for jf in "$WORK"/job_*; do
+    [[ -e "$jf" ]] || continue
+    local pfx=50; awk -F'\t' '$6=="true"{e=1} END{exit !e}' "$jf" 2>/dev/null && pfx=00
+    local dest="$PARAMS_INBOX/${pfx}_${NOW}_$(printf '%s' "$jf" | sha1sum | cut -c1-8).tsv"
+    mv "$jf" "$dest" 2>/dev/null && jobs=$((jobs+1))
+  done
+  log "enqueued $picked host(s) as $jobs job(s) (inbox $(find "$PARAMS_INBOX" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | wc -l | tr -d ' ')/$PARAMS_INBOX_CAP)"
+}
+
+# ---------------------------------------------------------------------------
+# CONSUMER — claim ONE job, crawl its hosts (PARAM_PARALLEL-wide), index this job
+# to recon_params immediately, move it to done. Target-facing → invoked via the
+# daemon's run_scanner (egress slot + vpn gate). One job/cycle keeps the egress
+# footprint bounded and honest. A crash leaves the job in processing/ for
+# requeue_stale to bounce back (re-crawl is idempotent: already-scanned hosts are
+# skipped via the cooldown ledger).
+cmd_crawl() {
+  for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping crawl"; exit 0; }
+  es_up || { warn "ES not reachable"; exit 0; }
+  ensure_index
+  exec 9>"$LOCK_FILE"; flock -n 9 || { warn "params crawl already running"; exit 0; }
+  python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
+  touch "$SCANNED_FILE"
+
+  requeue_stale
+
+  # claim ONE job atomically (mv inbox→processing); 00_ fresh lane first (sort order).
+  local job="" f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local target="$PARAMS_PROCESSING/$(basename "$f")"
+    if mv "$f" "$target" 2>/dev/null; then job="$target"; break; fi
+  done < <(find "$PARAMS_INBOX" -maxdepth 1 -name '*.tsv' -type f 2>/dev/null | sort)
+  [[ -n "$job" ]] || { log "no jobs in queue"; exit 0; }
+
+  local njob; njob="$(wc -l < "$job" | tr -d ' ')"
+  log "claimed $(basename "$job") — $njob host(s), ${PARAM_PARALLEL}-wide"
+
+  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
+  # skip hosts already scanned within the cooldown window (idempotent on requeue).
+  local NOW CUTOFF; NOW=$(date +%s); CUTOFF=$(( NOW - PARAMS_COOLDOWN_DAYS*86400 ))
+  awk -F'\t' -v c="$CUTOFF" '$1>=c{print $2}' "$SCANNED_FILE" 2>/dev/null | sort -u > "$WORK/done.set"
+
+  local running=0 crawled=0 halted=0
   while IFS=$'\t' read -r host url root program tier fresh fseen; do
-    # leak-safe on long/uncapped runs: abort the moment Mullvad drops (supervise_loop only
-    # re-checks between runs, so check per-host here too). 'next host queues' via the pool below.
-    [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-crawl — halting"; break; }
+    [[ -z "$host" ]] && continue
+    [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-crawl — halting; job will requeue"; halted=1; break; }
+    grep -qxF "$host" "$WORK/done.set" && continue
     crawl_host "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" "$WORK" &
-    running=$((running+1))
+    running=$((running+1)); crawled=$((crawled+1))
     if (( running >= PARAM_PARALLEL )); then wait -n 2>/dev/null || wait; running=$((running-1)); fi
-  done < "$worklist"
+  done < "$job"
   wait
 
-  # Aggregate per-host outputs (serial — no races now that all jobs are done).
-  local bulk="$WORK/bulk.ndjson"; : > "$bulk"
-  cat "$WORK"/*/bulk.part >> "$bulk"         2>/dev/null || true
-  cat "$WORK"/*/scanned   >> "$SCANNED_FILE" 2>/dev/null || true
-  local cls
-  for cls in $PARAMS_CLASSES; do cat "$WORK"/*/cls."$cls" >> "$PARAMS_DIR/$cls.txt" 2>/dev/null || true; done
+  local indexed; indexed="$(index_workdir "$WORK")"
   local total_urls; total_urls="$(cat "$WORK"/*/urlcount 2>/dev/null | awk '{s+=$1} END{print s+0}')"
 
-  # dedup per-class files
-  local cls
-  for cls in $PARAMS_CLASSES; do [[ -f "$PARAMS_DIR/$cls.txt" ]] && sort -u "$PARAMS_DIR/$cls.txt" -o "$PARAMS_DIR/$cls.txt" 2>/dev/null || true; done
-  # bulk index to ES — capture response to get real indexed count and surface errors
-  local indexed=0
-  if [[ -s "$bulk" ]]; then
-    local bulk_resp
-    bulk_resp="$(es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" \
-      --data-binary @"$bulk" 2>/dev/null)"
-    if [[ -n "$bulk_resp" ]]; then
-      indexed="$(printf '%s' "$bulk_resp" | jq '[.items[]?.index | select(.result=="created" or .result=="updated")] | length' 2>/dev/null || echo 0)"
-      # Surface any per-doc errors so they show up in the daemon log
-      local errs; errs="$(printf '%s' "$bulk_resp" | jq -r '[.items[]?.index | select(.error) | .error.reason] | unique | .[:3] | join(" | ")' 2>/dev/null)"
-      [[ -n "$errs" ]] && warn "bulk index errors: $errs"
-    else
-      warn "bulk index: no response from ES (connection issue?)"
-    fi
+  if (( halted )); then
+    log "crawled $crawled/$njob host(s), $total_urls param-URLs, indexed $indexed (vpn_down — job left for requeue)"
+  else
+    mv "$job" "$PARAMS_DONE/$(basename "$job")" 2>/dev/null || rm -f "$job"
+    # prune the done archive to the most-recent PARAMS_DONE_KEEP
+    find "$PARAMS_DONE" -maxdepth 1 -name '*.tsv' -type f -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | tail -n +"$((PARAMS_DONE_KEEP+1))" | cut -d' ' -f2- | xargs -r rm -f 2>/dev/null || true
+    log "job done: crawled $crawled/$njob host(s), $total_urls param-URLs, indexed $indexed catalog entries"
   fi
-  log "collected $picked host(s), $total_urls param-URLs, indexed $indexed catalog entries"
 }
 
 # ---------------------------------------------------------------------------
@@ -400,9 +525,17 @@ cmd_verify() {
   [[ "$hits" -gt 0 ]] && printf '    saved → %s\n' "$out_file" >&2
 }
 
+# one-shot: refill the queue, then crawl ONE job. Manual convenience AND the
+# compatibility path for a not-yet-restarted daemon still invoking `collect`
+# (zero-downtime migration to the split enqueue/crawl loops). Separate processes
+# so each keeps its own lock/exit semantics.
+cmd_collect() { bash "$0" enqueue || true; bash "$0" crawl || true; }
+
 case "${1:-}" in
+  enqueue) shift; cmd_enqueue "$@" ;;
+  crawl)   shift; cmd_crawl "$@" ;;
   collect) shift; cmd_collect "$@" ;;
   list)    shift; cmd_list "$@" ;;
   verify)  shift; cmd_verify "$@" ;;
-  *) echo "usage: recon_params.sh {collect | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
+  *) echo "usage: recon_params.sh {enqueue | crawl | collect | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
 esac

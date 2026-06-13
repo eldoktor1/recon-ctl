@@ -392,7 +392,7 @@ supervise_loop() {
     # vpnguard logs its own state changes; logging every 20s here is pure noise.
     # Scanner loops get threads/rate context; lightweight loops get nothing extra.
     case "$name" in
-      validate|validate-fast|discovery|scope-watch|active-checks|js-scanner|cloudrecon|params|params-verify|portscan|bypass|evidence-gate|vuln-feed)
+      validate|validate-fast|discovery|scope-watch|active-checks|js-scanner|cloudrecon|params|params-enqueue|params-verify|portscan|bypass|evidence-gate|vuln-feed)
         log "[$name] starting (power=$POWER_STATE threads=$HTTPX_THREADS rate=$HTTPX_RATE)" ;;
       vpnguard) ;;
       *) log "[$name] starting" ;;
@@ -465,13 +465,20 @@ CLOUDRECON_SCRIPT="${CLOUDRECON_SCRIPT:-$(script_path recon_cloudrecon.sh)}"
 CLOUDRECON_INTERVAL="${CLOUDRECON_INTERVAL:-3600}"
 run_cloudrecon() { v21_killed cloudrecon && return 0; [[ -f "$CLOUDRECON_SCRIPT" ]] && run_scanner bash "$CLOUDRECON_SCRIPT" || true; }
 
-# sus_params targeting catalog (recon_params.sh collect): crawls in-scope-paying
-# hosts fresh-first, gf-classifies params, builds the recon_params ES index +
-# per-class files for `recon_ctl params <class>`. Target-facing → run_scanner.
+# sus_params targeting catalog (jobs-and-queues, like recon_validate.sh): a PRODUCER
+# (enqueue) selects in-scope-paying hosts from ES into small job files; a CONSUMER
+# (crawl) claims ONE job/cycle, crawls it (katana+gau), gf-classifies, and indexes
+# to recon_params + per-class files for `recon_ctl params <class>`.
 PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
-PARAMS_INTERVAL="${PARAMS_INTERVAL:-120}"          # near-continuous: re-invoke ~2min after a whole-pool collect run finishes (always crawling)
+PARAMS_INTERVAL="${PARAMS_INTERVAL:-120}"                  # CONSUMER: claim+crawl one job / cycle (egress-gated)
+PARAMS_ENQUEUE_INTERVAL="${PARAMS_ENQUEUE_INTERVAL:-300}"  # PRODUCER: refill the job queue from ES (no target traffic)
 PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-300}"   # verify IN PARALLEL ~5min — confirmed params -> findings.db -> agent's ai-pending (verified-only reaches the agent)
-run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" collect || true; }
+# CONSUMER — target-facing (katana+gau over Mullvad) → run_scanner (egress slot + vpn gate).
+run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" crawl || true; }
+# PRODUCER — ES-only candidate selection into the queue. Still via run_scanner so the
+# job files are reconrun-owned (consistent with the consumer's claim) and ES auth/env
+# match; the egress slot it briefly holds for the ES query is negligible (no targets hit).
+run_params_enqueue() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" enqueue || true; }
 # Active-probe the catalog for canary REFLECTION -> writes params/verify_xss.jsonl, the leads
 # xss-confirm consumes (headless marker-exec). Without this the catalog fills but xss-confirm
 # starves. Only `verify xss` here: param-confirm already does the SQLi/SSTI/redirect probes
@@ -669,6 +676,7 @@ run_discord_bot() {
   supervise_loop "active-checks"  "ACTIVE_CHECKS_INTERVAL" run_active_checks  &
   supervise_loop "js-scanner"     "JS_SCAN_INTERVAL"       run_js_scanner     &
   supervise_loop "cloudrecon"     "CLOUDRECON_INTERVAL"    run_cloudrecon     &
+  supervise_loop "params-enqueue" "PARAMS_ENQUEUE_INTERVAL" run_params_enqueue &
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "params-verify"  "PARAMS_VERIFY_INTERVAL" run_params_verify  &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
