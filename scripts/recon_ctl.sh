@@ -2252,6 +2252,8 @@ cmd_ignore() {
   if [[ "$reason" != "manual" ]]; then
     note_add "$host" "$reason" "ignore" "$now" >/dev/null 2>&1 || true
   fi
+  # mirror the bench state into ES (source of truth) — best-effort
+  es_ignore_push "$host" "$reason" "$now" "$expires" 2>/dev/null || true
   echo "Ignored $host (7 days)  — $reason"
 }
 

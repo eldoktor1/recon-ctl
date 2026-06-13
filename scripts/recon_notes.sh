@@ -17,6 +17,8 @@
 # =============================================================================
 NOTES_FILE="${NOTES_FILE:-$HOME/recon/state/host_notes.jsonl}"
 _NOTES_SCOPE_CHECK="${_NOTES_SCOPE_CHECK:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/recon_scope_check.sh}"
+# ES writeback layer (es_note_push / es_ignore_push) — keeps ES the source of truth.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/recon_ledger_es.sh" 2>/dev/null || true
 
 _note_root_domain() {  # last two labels (matches the engine's _root_domain)
   awk -F. '{ if (NF>=2) printf "%s.%s\n",$(NF-1),$NF; else print $0 }' <<<"${1:-}"
@@ -44,6 +46,8 @@ note_add() {  # <host> <note> [source] [created_at] [program] [root_domain]
       '{host:$host, root_domain:$rd, program:(($program|select(.!=""))//null),
         note:$note, source:$source, created_at:$created_at}' >> "$NOTES_FILE"
   ) 9>>"$NOTES_FILE.lock"
+  # mirror into ES (source of truth) — best-effort, never fails the caller
+  es_note_push "$host" "$note" "$source" "$created_at" 2>/dev/null || true
 }
 
 note_get() {  # <host> -> host- and root-domain-level notes, newest first
