@@ -31,7 +31,10 @@ ap.add_argument("--stamp",default=None)  # date string (Date.now unavailable not
 args=ap.parse_args()
 
 UUID=re.compile(r'/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
-NUMID=re.compile(r'/\d{2,}(?:/|$|\?)')
+NUMID=re.compile(r'/(?:[a-z]+-)?\d{2,}(?:/|$|\?)',re.I)   # /12345 or /nab-432320 (prefixed id)
+# path-template id: /:id /{id} /:userId /{companyId} — the app explicitly parameterizes a
+# user-supplied object id = the STRONGEST IDOR signal (research). Any /:seg or /{seg} counts.
+TEMPLATE=re.compile(r'/[:{][A-Za-z_]\w*\}?')
 IDPARAM=re.compile(r'[?&](id|.*_?id|uid|account|order|invoice|doc|document|user|member|customer|ref|token|key|file|guid|uuid)=',re.I)
 OBJRES=re.compile(r'/(users?|accounts?|orders?|invoices?|documents?|profiles?|messages?|payments?|cards?|transactions?|members?|customers?|files?|reports?|tickets?|subscriptions?|addresses?|contacts?|teams?|orgs?|organizations?|projects?|companies)(/|$)',re.I)
 SENS=re.compile(r'(payment|card|invoice|transaction|balance|wallet|clabe|bank|account|kyc|ssn|salary|salaries|tax|statement|withdraw|deposit|transfer|loan|credit|billing|payout)',re.I)
@@ -54,6 +57,7 @@ def score_ep(host, ep):
     p=ep
     if NOISE.search(p): return 0,"noise"
     s=0; idt=[]
+    if TEMPLATE.search(p): s+=4; idt.append("templated-id(:id/{id})")
     if NUMID.search(p): s+=4; idt.append("numeric-ID(enumerable)")
     if UUID.search(p): s+=3; idt.append("uuid")
     if IDPARAM.search(p): s+=3; idt.append("id-param")
