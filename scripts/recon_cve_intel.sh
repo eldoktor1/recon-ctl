@@ -341,6 +341,14 @@ TECH_KEYWORDS = {
     "tech:exchange-owa":    ["exchange server", "outlook web", "owa"],
 }
 
+# A keyword can match a DIFFERENT product inside the CVE text. If any exclude term
+# is present, do NOT map the CVE to that signal. e.g. CVE-2026-41940 is a WebPros
+# cPanel/WHM + "WP2 (WordPress Squared)" auth-bypass — NOT WordPress core/plugins,
+# so the bare "wordpress" keyword must not pull it onto every WordPress host.
+TECH_EXCLUDE = {
+    "tech:wordpress": ["cpanel", " whm", "webpros", "wordpress squared", "wp squared", "wp2 "],
+}
+
 def age_days(pub):
     if not pub:
         return 999
@@ -361,7 +369,7 @@ for cve in filtered:
         cve.get("vendor") or "",
     ]).lower()
     for sig, keywords in TECH_KEYWORDS.items():
-        if any(kw in text for kw in keywords):
+        if any(kw in text for kw in keywords) and not any(x in text for x in TECH_EXCLUDE.get(sig, [])):
             mapping[sig].append({
                 "id": cve["id"],
                 "cvss": cve.get("cvss") or 0,
