@@ -46,11 +46,15 @@ ANALYZE_BATCH="${ANALYZE_BATCH:-45}"        # balanced safe-max (reasoning-only;
 ANALYZE_CHUNK="${ANALYZE_CHUNK:-10}"        # assets per Claude call
 ANALYZE_TTL="${ANALYZE_TTL:-14d}"           # re-analyse cadence (ES date math)
 KB_CONTEXT="${KB_CONTEXT:-3}"               # prior lessons injected per asset
+ANALYZE_AI_NOTES="${ANALYZE_AI_NOTES:-1}"   # let the analyst persist confident durable FP kills as host-notes (flat file + ES)
+ANALYZE_NOTE_CAP="${ANALYZE_NOTE_CAP:-12}"  # max analyst notes per run (anti-bloat)
+# host-notes layer: note_add -> flat file + ES writeback (recon_alive = source of truth)
+source "$SCRIPT_DIR/recon_notes.sh" 2>/dev/null || true
 
 # schema-validated structured output (CLI -> .structured_output; no text scraping)
 # NOTE: --json-schema root MUST be an object (the API wraps it as a tool input_schema);
 # a top-level array 400s. So the per-asset verdicts live under an "assets" array.
-ANALYZE_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"assets":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"host":{"type":"string"},"worth":{"type":"boolean"},"interest":{"type":"number","minimum":0,"maximum":1},"vuln_class":{"type":"string"},"reason":{"type":"string"}},"required":["host","worth","interest","vuln_class","reason"]}}},"required":["assets"]}'
+ANALYZE_SCHEMA='{"type":"object","additionalProperties":false,"properties":{"assets":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"host":{"type":"string"},"worth":{"type":"boolean"},"interest":{"type":"number","minimum":0,"maximum":1},"vuln_class":{"type":"string"},"reason":{"type":"string"},"note":{"type":"boolean"}},"required":["host","worth","interest","vuln_class","reason"]}}},"required":["assets"]}'
 
 es() { curl -fsS -m 30 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 _ge() { awk "BEGIN{exit !(($1)>=($2))}"; }   # float >= (exit 0 if $1>=$2)
@@ -108,7 +112,7 @@ n="$(printf '%s' "$assets" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no un-analysed in-scope assets due this cycle"; exit 0; }
 log "🧠 ─── CLAUDE ANALYZE ─── $n in-scope asset(s) · model=$CLAUDE_ANALYZE_MODEL→$CLAUDE_ANALYZE_MODEL_HI@score≥$ANALYZE_HI_SCORE (Max, no API) · chunk=$ANALYZE_CHUNK ───"
 
-analyzed=0; worth=0; gated=0; leads=0
+analyzed=0; worth=0; gated=0; leads=0; noted=0
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # iterate in chunks of ANALYZE_CHUNK
@@ -162,9 +166,17 @@ ${kb_lines:-  (none yet)}
 ASSETS:
 $asset_lines
 
+Set "note": true ONLY in the RARE case where a host that carries a REAL exposure signal
+(admin/panel/api/dev/staging, version-pinned software, an exposed service) turns out to be a
+CONFIDENT DURABLE dead-end worth remembering: patched out of CVE range, secured/auth-gated,
+shared-tenant/per-customer, or a product-class duplicate. Your "reason" becomes the permanent
+note. Do NOT note generic CDN/WAF/parking/redirect/404 pages — triage already handles those and
+persisting them bloats the ledger. For a product-class cluster (regional siblings), set note=true
+on ONE representative only. Default note=false.
+
 Output ONLY a JSON object {"assets":[ ... ]} with one element per asset IN THE SAME
 ORDER, no prose/markdown:
-{"assets":[{"host":"...","worth":true,"interest":0.0,"vuln_class":"...","reason":"one sentence"}]}
+{"assets":[{"host":"...","worth":true,"interest":0.0,"vuln_class":"...","reason":"one sentence","note":false}]}
 EOF
 )"
 
@@ -197,6 +209,7 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
     iv="$(printf '%s' "$v" | jq -r '(.interest // 0) | tonumber? // 0')"
     cls="$(printf '%s' "$v" | jq -r '.vuln_class // "none"')"
     why="$(printf '%s' "$v" | jq -r '.reason // ""')"
+    nv="$(printf '%s' "$v" | jq -r 'if (.note==true) then "true" else "false" end')"
     doc="$(jq -nc --arg w "$wv" --argjson i "${iv:-0}" --arg c "$cls" --arg a "$why" \
             --arg t "$now_iso" --arg m "$CLAUDE_ANALYZE_MODEL" \
             '{claude_worth: ($w=="true"), claude_interest: $i, claude_suggested_class: $c,
@@ -215,6 +228,14 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
       log "   🎯 worth $host · int=$iv · $cls · $route"
       log "        ↳ 💬 $why"
     fi
+    # analyst-persisted worked-knowledge: a confident DURABLE fp -> host-note (flat file + ES).
+    # Model-gated (note=true) + per-run capped so the bulk tier can't flood the ledger.
+    if [[ "${ANALYZE_AI_NOTES:-1}" == "1" && "$wv" == "false" && "$nv" == "true" \
+          && -n "$why" && "$noted" -lt "${ANALYZE_NOTE_CAP:-25}" ]] && declare -F note_add >/dev/null 2>&1; then
+      if NOTES_NO_SCOPE=1 note_add "$host" "$why" "ai-analyze" "$now_iso" >/dev/null 2>&1; then
+        noted=$((noted+1)); log "   📝 noted(fp) $host · $why"
+      fi
+    fi
     bulk+="$(jq -nc --arg id "$host" --arg idx "$INDEX_NAME" '{update:{_id:$id,_index:$idx}}')"$'\n'
     bulk+="$(jq -nc --argjson d "$doc" '{doc:$d}')"$'\n'
     analyzed=$((analyzed+1))
@@ -225,4 +246,4 @@ print(json.dumps(v) if isinstance(v,list) else "")' 2>/dev/null)"
   log "   · chunk $((k+1))/$ci done ($m assets · $mdl) · running: 🎯$worth worth ⚙️$gated gate 📋$leads lead"
 done
 
-log "🧠 analyze done · 🎯 $worth worth · ⚙️ $gated gate-candidates · 📋 $leads operator-leads  (of $analyzed analysed)"
+log "🧠 analyze done · 🎯 $worth worth · ⚙️ $gated gate-candidates · 📋 $leads operator-leads · 📝 $noted fp-notes  (of $analyzed analysed)"
