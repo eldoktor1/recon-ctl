@@ -2421,8 +2421,8 @@ usage() {
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
   printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
-  printf "  ${G}recon-params crawl-host${R} <host> [url]  On-demand crawl ONE host for params NOW (hunt queue-bypass)\n"
-  printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N]  Confirm — xss=dalfox(executes)  sqli=SAFE %s vs %s diff\n" "'" "''"
+  printf "  ${G}recon-params crawl-host${R} <host> [url] [--cookie/--header]  On-demand crawl ONE host NOW (queue-bypass; --cookie=AUTHED)\n"
+  printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N] [--cookie/--header]  Confirm — xss=dalfox(executes) sqli=SAFE %s vs %s; --cookie=AUTHED(own session)\n" "'" "''"
   printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"

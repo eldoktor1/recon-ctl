@@ -180,7 +180,11 @@ crawl_host() {
   local host="$1" url="$2" root="$3" program="$4" tier="$5" fresh="$6" fseen="$7" wd="$8"
   local hd="$wd/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
   sleep $(( (RANDOM % PARAMS_INTER_HOST_SLEEP) + 1 ))   # jitter so N parallel gau hits don't burst a provider
-  { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
+  # AUTHED crawl: cmd_crawl_host may export KATANA_AUTH_HEADER (operator's OWN session) so katana
+  # walks the authenticated surface. The daemon never sets it → daemon crawls stay unauth (hard
+  # line: no autonomous authed requests). gau/archive are passive, so auth only affects katana.
+  local kauth=(); [[ -n "${KATANA_AUTH_HEADER:-}" ]] && kauth+=(-H "$KATANA_AUTH_HEADER")
+  { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" "${kauth[@]}" 2>/dev/null
     # gau: otx+urlscan only — wayback (web.archive.org) + commoncrawl block our Mullvad
     # egress, so asking gau for them just burns the timeout. Wayback comes via the worker.
     [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --providers otx,urlscan --threads 5 --subs 2>/dev/null
@@ -599,17 +603,30 @@ DALFOX="${DALFOX:-$(command -v dalfox 2>/dev/null || echo "$GOBIN/dalfox")}"
 DALFOX_DELAY="${DALFOX_DELAY:-300}"     # ms between requests (anti-burn politeness)
 cmd_confirm() {
   local cls="${1:-}"; shift 2>/dev/null || true
-  local host="" n="" a
-  for a in "$@"; do
-    if [[ "$a" =~ ^[0-9]+$ ]]; then n="$a"; else host="$a"; fi
+  local host="" n="" a AUTH_COOKIE="" AUTH_HEADER=""
+  # AUTHED mode: operator supplies their OWN logged-in session (--cookie / --header) so the
+  # SAFE confirm runs against the authenticated param surface. Human-in-the-loop ONLY — this
+  # is operator-initiated, never a daemon/autonomous authed request (hard line). The primitive
+  # stays SAFE: xss=dalfox must EXECUTE, sqli=' vs '' differential — NEVER sqlmap/--dump/harvest.
+  while [[ $# -gt 0 ]]; do
+    a="$1"
+    case "$a" in
+      --cookie) AUTH_COOKIE="${2:-}"; shift 2 || true ;;
+      --cookie=*) AUTH_COOKIE="${a#--cookie=}"; shift ;;
+      --header) AUTH_HEADER="${2:-}"; shift 2 || true ;;
+      --header=*) AUTH_HEADER="${a#--header=}"; shift ;;
+      *) if [[ "$a" =~ ^[0-9]+$ ]]; then n="$a"; else host="$a"; fi; shift ;;
+    esac
   done
   case "$cls" in
     xss|sqli) ;;
-    *) printf 'usage: recon-params confirm <xss|sqli> [host] [N]\n' >&2
+    *) printf 'usage: recon-params confirm <xss|sqli> [host] [N] [--cookie "<c>"] [--header "<h>"]\n' >&2
        printf '  xss  — dalfox context-aware (break-out must EXECUTE, not merely reflect)\n' >&2
        printf '  sqli — SAFE %s vs %s differential (NEVER dumps data / never sqlmap)\n' "'" "''" >&2
+       printf '  --cookie/--header — AUTHED: your OWN session (operator-initiated, SAFE, human-in-loop only)\n' >&2
        exit 2 ;;
   esac
+  [[ -n "$AUTH_COOKIE$AUTH_HEADER" ]] && warn "confirm($cls): AUTHED mode — using operator-supplied session (SAFE primitives only; 2 owned accounts; never harvest)"
   [[ -z "$n" ]] && { [[ -n "$host" ]] && n=40 || n=30; }
 
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping confirm"; exit 0; }
@@ -669,8 +686,11 @@ PY
     # noise (--skip-bav), GET, rate-limited. --silence prints only PoCs. A [POC] line =
     # dalfox VERIFIED the payload reflects executably (its own headless check), not bare
     # reflection — this is the real confirmation the old canary check lacked.
+    local dfx_auth=()
+    [[ -n "$AUTH_COOKIE" ]] && dfx_auth+=(--cookie "$AUTH_COOKIE")
+    [[ -n "$AUTH_HEADER" ]] && dfx_auth+=(--header "$AUTH_HEADER")
     "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all \
-      --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" \
+      --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" "${dfx_auth[@]}" \
       --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.out" || true
     local pocs; pocs="$(grep -cE '\[POC\]' "$WORK/dalfox.out" 2>/dev/null || echo 0)"
     if [[ "${pocs:-0}" -gt 0 ]]; then
@@ -686,6 +706,10 @@ PY
 
   # ---- SQLi: SAFE ' vs '' differential (doctrine: injectable-or-not, never a harvest) ----
   local sqli_re='SQL syntax|mysql_num_rows|ORA-[0-9]+|SQLSTATE|You have an error in your SQL|Microsoft OLE DB|ODBC SQL Server|Warning.*mysql_|Unclosed quotation mark|quoted string not properly terminated|pg_query\(\)|supplied argument is not a valid MySQL|PostgreSQL.*ERROR|SQLite/JDBCDriver|valid PostgreSQL result'
+  # AUTHED session (operator-supplied) threaded into the SAFE GETs — still read-only/no-harvest.
+  local curl_auth=()
+  [[ -n "$AUTH_COOKIE" ]] && curl_auth+=(-H "Cookie: $AUTH_COOKIE")
+  [[ -n "$AUTH_HEADER" ]] && curl_auth+=(-H "$AUTH_HEADER")
   local hits=0 checked=0
   while IFS=$'\t' read -r url program tier fresh_tag; do
     [[ -z "$url" ]] && continue
@@ -700,9 +724,9 @@ PY
     [[ -z "$u_inj" ]] && continue
     sleep "0.$(( RANDOM % 6 + 3 ))"
     local b_base b_inj b_ctl
-    b_base="$(curl -sS -m10 -k -A "$ua" "$u_base" 2>/dev/null | head -c 200000)"
-    b_inj="$( curl -sS -m10 -k -A "$ua" "$u_inj"  2>/dev/null | head -c 200000)"
-    b_ctl="$( curl -sS -m10 -k -A "$ua" "$u_ctl"  2>/dev/null | head -c 200000)"
+    b_base="$(curl -sS -m10 -k -A "$ua" "${curl_auth[@]}" "$u_base" 2>/dev/null | head -c 200000)"
+    b_inj="$( curl -sS -m10 -k -A "$ua" "${curl_auth[@]}" "$u_inj"  2>/dev/null | head -c 200000)"
+    b_ctl="$( curl -sS -m10 -k -A "$ua" "${curl_auth[@]}" "$u_ctl"  2>/dev/null | head -c 200000)"
     local status=""
     if printf '%s' "$b_inj" | grep -qiE "$sqli_re" && ! printf '%s' "$b_base" | grep -qiE "$sqli_re"; then
       status="error-based"
@@ -820,12 +844,26 @@ cmd_collect() { bash "$0" enqueue || true; bash "$0" crawl || true; }
 # is correct, indexes it, and PRINTS the discovered param-URLs per class so a confirm can run
 # immediately. Target-facing (katana) → Mullvad-gated + rate-limited like the daemon path.
 cmd_crawl_host() {
-  local host="${1:-}" url="${2:-}"
-  [[ -n "$host" ]] || { warn "usage: recon_params.sh crawl-host <host> [url]"; exit 2; }
+  local host="" url="" a AUTH_COOKIE="" AUTH_HEADER=""
+  while [[ $# -gt 0 ]]; do
+    a="$1"
+    case "$a" in
+      --cookie) AUTH_COOKIE="${2:-}"; shift 2 || true ;;
+      --cookie=*) AUTH_COOKIE="${a#--cookie=}"; shift ;;
+      --header) AUTH_HEADER="${2:-}"; shift 2 || true ;;
+      --header=*) AUTH_HEADER="${a#--header=}"; shift ;;
+      *) if [[ -z "$host" ]]; then host="$a"; elif [[ -z "$url" ]]; then url="$a"; fi; shift ;;
+    esac
+  done
+  [[ -n "$host" ]] || { warn "usage: recon_params.sh crawl-host <host> [url] [--cookie \"<c>\"] [--header \"<h>\"]"; exit 2; }
   for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping crawl-host"; exit 0; }
   es_up || { warn "ES not reachable"; exit 1; }
   ensure_index; ensure_alive_field
+  # AUTHED crawl (operator's OWN session) — human-in-the-loop only, exported to crawl_host's katana.
+  [[ -n "$AUTH_COOKIE" ]] && export KATANA_AUTH_HEADER="Cookie: $AUTH_COOKIE"
+  [[ -n "$AUTH_HEADER" ]] && export KATANA_AUTH_HEADER="$AUTH_HEADER"
+  [[ -n "${KATANA_AUTH_HEADER:-}" ]] && warn "crawl-host: AUTHED crawl — operator session (2 owned accounts; read-only discovery)"
 
   # scope metadata from recon_alive (so the catalog entry carries the right program/tier/root)
   local hit root program tier fresh fseen
@@ -867,5 +905,5 @@ case "${1:-}" in
   list)           shift; cmd_list "$@" ;;
   confirm|verify) shift; cmd_confirm "$@" ;;   # verify = back-compat alias for confirm
   candidates)     shift; exec python3 "$SCRIPT_DIR/recon_xss_sqli_candidates.py" "$@" ;;
-  *) echo "usage: recon_params.sh {enqueue | crawl | crawl-host <host> [url] | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
+  *) echo "usage: recon_params.sh {enqueue | crawl | crawl-host <host> [url] [--cookie/--header] | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] [--cookie/--header] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
 esac
