@@ -26,6 +26,8 @@
 # =============================================================================
 import json, subprocess, os, re, sys, argparse, collections
 from urllib.parse import urlsplit, parse_qsl
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from recon_fp_footer import FP_FOOTER   # single source of the ZERO-FP discipline footer
 
 HOME = os.path.expanduser("~")
 ES = "http://127.0.0.1:9200"
@@ -315,7 +317,7 @@ def write_report(cls, data, out_dir, stamp):
 
     emit("TOP UNIQUE LANES (rare per-app params — test these first)", data["unique"], args.top)
     emit("PRODUCT-CLASS (high fan-out — dup-risk; only if fresh / your own program)", data["product"], max(20, args.top // 2))
-    open(outp, "w").write("\n".join(L))
+    open(outp, "w").write("\n".join(L) + FP_FOOTER)
     return outp
 
 
