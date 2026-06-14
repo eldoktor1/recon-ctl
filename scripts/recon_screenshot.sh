@@ -53,9 +53,30 @@ SHOT_WORKER="${SHOT_WORKER:-$REPO_DIR/tools/screenshot_worker.py}"
 SHOT_BATCH="${SHOT_BATCH:-25}"             # hosts/cycle in normal daemon mode
 SHOT_COOLDOWN_HOURS="${SHOT_COOLDOWN_HOURS:-24}"
 SHOT_MIN_SCORE="${SHOT_MIN_SCORE:-0}"      # 0 = no score gate; raise for priority-only mode
-SHOT_NAV_TIMEOUT_MS="${SHOT_NAV_TIMEOUT_MS:-15000}"
-SHOT_PER_HOST_BUDGET="${SHOT_PER_HOST_BUDGET:-30}"  # wall-clock seconds inc settle
+SHOT_NAV_TIMEOUT_MS="${SHOT_NAV_TIMEOUT_MS:-20000}"
+SHOT_SETTLE_MS="${SHOT_SETTLE_MS:-2000}"            # post-load idle before capture
+SHOT_CHALLENGE_WAIT_MS="${SHOT_CHALLENGE_WAIT_MS:-12000}"  # patience for a JS bot-challenge
+SHOT_PER_HOST_BUDGET="${SHOT_PER_HOST_BUDGET:-75}"  # wall-clock s (headed + challenge-wait + 1 retry)
 SHOT_BACKFILL_LIMIT="${SHOT_BACKFILL_LIMIT:-200}"   # `backfill` mode batch size
+
+# ── Anti-bot launch posture ──────────────────────────────────────────────────
+# Run the browser HEADED on a virtual display — headless detection is the single
+# strongest bot signal, and headed-under-Xvfb defeats a whole class of checks
+# that JS-property stealth cannot reach. When Xvfb is absent we fall through to
+# the worker's headless path (it self-detects no DISPLAY). When real Chrome is
+# installed we use its channel (the bundled-Chromium fingerprint is what
+# Akamai/DataDome flag); otherwise the worker falls back to bundled Chromium.
+SHOT_XVFB_PREFIX=()
+if command -v xvfb-run >/dev/null 2>&1; then
+  SHOT_XVFB_PREFIX=(xvfb-run -a --server-args="-screen 0 1366x768x24 -nolisten tcp")
+  export SHOT_HEADED=1
+else
+  export SHOT_HEADED=0
+  warn "xvfb-run not found — screenshots run HEADLESS (more bot-detectable); apt install xvfb to fix"
+fi
+if [[ -z "${SHOT_CHROME_CHANNEL:-}" ]] && command -v google-chrome >/dev/null 2>&1; then
+  export SHOT_CHROME_CHANNEL=chrome
+fi
 
 KILL_FILE="$STATE_DIR/kill/v2_screenshot"
 LOCK_FILE="$STATE_DIR/screenshot.lock"
@@ -255,6 +276,7 @@ es_update_from_json() {
       screenshot_w:         ($j.screenshot_w // 0),
       screenshot_h:         ($j.screenshot_h // 0),
       screenshot_thumb_b64: ($j.screenshot_thumb_b64 // null),
+      screenshot_engine:    ($j.screenshot_engine // ""),
       screenshot_error:     ($j.error // "")
     }
   }')"
@@ -270,9 +292,11 @@ shoot_one() {
   # Wrap with `timeout` so a hung Chromium can never stall the daemon loop.
   local out
   out="$(timeout "$SHOT_PER_HOST_BUDGET" \
-    "$SHOT_VENV_PY" "$SHOT_WORKER" "$host" \
+    "${SHOT_XVFB_PREFIX[@]}" "$SHOT_VENV_PY" "$SHOT_WORKER" "$host" \
       --out-dir "$SCREENSHOT_DIR" \
-      --nav-timeout "$SHOT_NAV_TIMEOUT_MS" 2>>"$STATE_DIR/screenshot.err" || true)"
+      --nav-timeout "$SHOT_NAV_TIMEOUT_MS" \
+      --settle "$SHOT_SETTLE_MS" \
+      --challenge-wait "$SHOT_CHALLENGE_WAIT_MS" 2>>"$STATE_DIR/screenshot.err" || true)"
   local elapsed=$(( $(date +%s) - started ))
 
   if [[ -z "$out" ]]; then

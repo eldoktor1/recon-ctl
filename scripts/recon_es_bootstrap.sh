@@ -87,6 +87,7 @@ apply_screenshot_mapping() {
         "screenshot_w":         {"type": "integer"},
         "screenshot_h":         {"type": "integer"},
         "screenshot_error":     {"type": "keyword", "ignore_above": 256},
+        "screenshot_engine":    {"type": "keyword"},
         "screenshot_thumb_b64": {"type": "binary", "doc_values": false, "store": false}
       }
     }' >/dev/null
