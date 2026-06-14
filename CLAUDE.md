@@ -34,6 +34,30 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
 
+## THE HUNT FLOW — keyword `hunt` (operator-locked 2026-06-13)
+When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until
+they say **stop**/**pause** (never self-terminate, never ask "want to wrap?"). Config the operator
+locked: trigger=`hunt`, target-picking=fully-autonomous, probes=operator-runs-them (one-at-a-time paste).
+0. **PREFLIGHT** Mullvad up + no `state/vpn_down` (fail-closed).
+1. **PICK (autonomous)** ES `recon_alive`: pays + in-scope + not-ignored (`must_not ignore_expires_at>now`)
+   + un-noted + concrete-class, ranked by claude_worth/score; or continue the current fertile lane.
+   Out of hosts ⇒ re-query/widen, never stop.
+2. **VERIFY BEFORE INVESTING** (a) PER-ASSET pays from `scope/raw/<platform>.json`, NOT program-level;
+   (b) read host_notes + active ignores (don't re-walk); (c) check the program's OUT-OF-SCOPE rules
+   (don't chase dir-listing / info-disclosure-without-impact = excludable). The 3 hard lessons.
+3. **PROBE** operator runs target traffic — I give ONE copy-paste at a time (lead with my read +
+   the decision), they paste, I hand the next. I run recon/scope/ES/notes/jsintel myself.
+4. **TRIAGE** CONFIRMED vs LEAD vs FP/dead; honest severity, never overclaim.
+5. **NOTE EVERYTHING inline** FP/skip/disqualified/noise (clusters ⇒ 2-3 reps + class-reason). Mandatory.
+6. **LANE-MINE** fertile lane (actuator/swagger spec; source-maps→cloud-creds; unauth-GraphQL introspection)
+   ⇒ keep mining fresh hosts; tapped ⇒ pivot/re-query ES.
+7. **ANTI-BURN** respect 429/403/rate-limits; back off; never get the Mullvad exit banned.
+8. **AUTHED** hand a Claude-in-Chrome prompt (recon, then scope+safety-gated: own-account setup +
+   safe/active prove-impact PoC); 2 owned accounts, never third-party IDs, confirm-then-stop.
+9. **REPORT** confirmed + scope+OOS-verified ⇒ draft a ready-to-paste Claude-in-Chrome fill-the-form
+   prompt (operator submits; honest severity; AI-use disclosure where required). Full SOP: memory
+   `project_hunt_flow`.
+
 ## Core principle: CONFIRMED vs LEAD
 Every signal is exactly one of:
 - **CONFIRMED** — an exploitable primitive was directly observed.
@@ -160,14 +184,24 @@ probes) on any digest lead so the operator can deep-check before spending an eve
   even when something is exposed.
 
 ## Worked-knowledge: notes vs ignores
-**HARD STANDING RULE (any agent): a disqualified target MUST be noted, at the moment it's
-disqualified.** "If a target proves to be not valuable it needs to be noted and documented so we
-don't waste time" (operator, 2026-06-12). This covers BOTH a probed-and-killed host (note the
-primitive + the 401/403/version that killed it) AND a target dismissed by *reasoning alone*
-(by-design / mis-tag / product-class) — the latter is just as re-surfaceable but leaves no trace
-unless noted. Big cluster ⇒ note 2-3 REPRESENTATIVES with a class-reason, not one-per-host (that's
-product-class bloat; the fan-out filter handles the rest). NEVER bench a still-live lead (staging
-not-yet-checked, an un-mined JS lead). A disqualification without a note is incomplete.
+**HARD STANDING RULE (any agent): ALWAYS note FPs, skips, disqualifications, and noise — at the
+moment you hit them.** "If a target proves to be not valuable it needs to be noted and documented so
+we don't waste time" + "always note fps and skips and disqualified and noise this is a doctrine"
+(operator, 2026-06-12 / 2026-06-13). This covers EVERY non-finding outcome, not just probed kills:
+(a) a probed-and-killed host (note the primitive + the 401/403/version that killed it); (b) a
+VERIFIED FALSE POSITIVE (note what made it look real and what disproved it); (c) a target dismissed
+by *reasoning alone* (by-design / mis-tag / product-class); (d) NOISE skipped without probing
+(product-class / third-party / multi-tenant clusters). All four are re-surfaceable and leave no
+trace unless noted. Big cluster ⇒ note 2-3 REPRESENTATIVES with a class-reason, not one-per-host
+(that's product-class bloat; the fan-out filter handles the rest). NEVER bench a still-live lead
+(staging not-yet-checked, an un-mined JS lead). A skip/FP/dismissal without a note is incomplete
+work — if you waved something off as "noise," that judgment MUST be written down.
+
+**HUNT-UNTIL-STOP DOCTRINE (operator, 2026-06-13): never self-terminate a hunt.** Do not ask "want to
+wrap?" or offer to stop — keep the probe→triage→note→next loop running continuously until the operator
+explicitly says stop. When the current host queue empties, SELF-REPLENISH by re-querying ES
+(`recon_alive`, paying + in-scope + not-ignored + un-noted, concrete-class) for the next batch — running
+out of hosts is never a reason to stop, it's the trigger to pull more.
 
 `ignored.jsonl` = a TEMPORARY 7-day penalty (a host willingly benched; resurfaces when the
 TTL lapses). `host_notes.jsonl` = PERMANENT worked-knowledge keyed to host/root-domain
@@ -210,6 +244,18 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   console, file-read CVEs); attempt to bypass a login to get IN.
 - IDOR/BOLA testing uses TWO accounts the researcher owns — never guessed/enumerated
   third-party IDs.
+- ACTIVE-PoC DOCTRINE (operator, 2026-06-13; ALL agents incl. main Claude, not only CinC prompts):
+  a test/PoC need NOT be read-only. An active / state-changing step IS allowed to PROVE IMPACT,
+  and agents may complete the SETUP a test needs (create your OWN org, register accounts, complete
+  onboarding) — that's authorized own-account setup, not an attack. GATES (all required): (1)
+  in-scope + authorized + pays-confirmed; (2) NOT malicious; (3) MINIMAL — only enough to demonstrate,
+  then STOP (no exploiting past the PoC). "Non-malicious / prove-impact-only" STILL EXCLUDES the NEVER
+  list above and never overrides it: no other users' data, no guessed/third-party IDs, no real money
+  movement (transfers/withdrawals/orders that charge), no destruction/DoS, nothing affecting real
+  third parties, no login-bypass-to-get-IN, no RCE-for-harm. Prefer reversible/benign demonstrations
+  on your OWN scope (read your own 2nd-account object via a swap; `alert()` for XSS; one benign
+  authorized action for privesc). The goal is proof, not exploitation. (The autonomous UNATTENDED
+  unauth pipeline probes below stay read-only/safe — active PoC is for operator-overseen testing.)
 - Autonomous active verification is ALLOWED but only as **SAFE, UNAUTHENTICATED,
   non-destructive** probes via the vetted primitives / `recon_safe_probe.sh` (GET/HEAD/
   OPTIONS, no creds, no redirect-follow, no internal/metadata, scope+pays-gated,
@@ -217,6 +263,17 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   a trusted harness runs them — the model never executes anything itself (it gets no shell).
 - Authenticated live-target testing stays human-in-the-loop. The pipeline / any agent
   must NOT autonomously issue **authenticated** requests against live bug-bounty targets.
+  DOCTRINE (operator, 2026-06-13): when an authed step is warranted, Claude does NOT walk the
+  operator through curl/token-extraction — it hands them a single ready-to-paste **Claude-in-Chrome
+  prompt** to run in their logged-in tab (read-only authed recon: map API ops + ID/BOLA params +
+  auth-header NAMES + own IDs; redact secret values; NO mutations). The operator owns the session;
+  Claude-in-Chrome is the in-browser hands; Claude analyzes the report and builds the 2-account swap.
+  Template lives in memory `feedback_authtest_claude_chrome_prompt`. EXTENSION: Claude-in-Chrome may
+  also EXECUTE the test (in-browser Burp — replay the actual authed requests, e.g. the BOLA swap)
+  GATED on two preconditions stated in the prompt: (1) host confirmed in-scope+PAYING (authoritative
+  per-asset), and (2) the test is SAFE + NON-DESTRUCTIVE (read-only queries/GET/HEAD/OPTIONS — never
+  mutations/orders/payments/writes/deletes/state-changes). Hard line unchanged: 2 owned accounts,
+  swap only owned IDs (never guessed third-party IDs), confirm-then-stop, no harvest.
 - Never touch nftables/iptables/VPN config. Mullvad is sole egress; `vpn_down` pauses
   all scanning (and all probing — fail-closed).
 
