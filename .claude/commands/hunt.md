@@ -21,6 +21,11 @@ pending action, or the operator steps away — UPDATE `hunt_cursor.md`** so a co
 
 Focus this run on: **$ARGUMENTS** — if a program/lane/host is given, work within it; if `resume`,
 pick up from the cursor; if empty, resume the cursor's current host first, then pick autonomously from ES.
+**MOOD HUNTING:** if the focus is a vuln-class / tech / lane keyword (xss, sqli, ssrf, lfi, redirect, api,
+wordpress, php, drupal, jira, graphql, jenkins, … or ANY tech keyword), run `recon-mood <kw>` (or
+`recon_mood.py`) — it returns a ranked, scope+pays+not-benched worklist for exactly that mood
+(→ `~/recon/briefings/mood_<kw>_<date>.md`). Hunt that lane with the same uniqueness/freshness/confirm
+discipline. `recon-mood --list` shows known moods (any keyword still works via broad match).
 
 The loop:
 0. PREFLIGHT — Mullvad up (`am.i.mullvad .mullvad_exit_ip==true`) + no `~/recon/state/vpn_down` (fail-closed).

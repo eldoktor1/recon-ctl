@@ -2421,7 +2421,8 @@ usage() {
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
   printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
-  printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N]  Confirm — xss=dalfox(executes)  sqli=SAFE %s vs %s diff\n\n" "'" "''"
+  printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N]  Confirm — xss=dalfox(executes)  sqli=SAFE %s vs %s diff\n" "'" "''"
+  printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-ports${R} [N]               All hosts with open non-standard ports (from ES)\n"
@@ -2527,6 +2528,7 @@ case "${1:-}" in
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;
+  mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;
   outcome)      shift; cmd_outcome "$@" ;;
   view|dashboard) shift; cmd_view "$@" ;;
