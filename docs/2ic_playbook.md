@@ -89,8 +89,10 @@ tool when it fits the job, you just carry the same guarantees yourself.
 2. MINE ES high-value lanes (base filter: triage_pays=true AND triage_in_scope=true, must_not
    triage_ignored=true): data-leak/dir-listing/object-store; injection + api-surface(tech:graphql);
    admin-surface status_code:200; info-disclosure (skip bare 500s + *.githubusercontent CDN misfires);
-   triage_breaking_vuln (but cap:kev-unverified-no-p0 WordPress-plugin-KEV = LEAD-only FP); and the IDOR/BAC
-   worklist (`~/recon/idor_worklist.jsonl` status "to-test"). SKIP burned lanes: takeover (all
+   triage_breaking_vuln (but cap:kev-unverified-no-p0 WordPress-plugin-KEV = LEAD-only FP); the IDOR/BAC
+   worklist (`~/recon/idor_worklist.jsonl` status "to-test"); the ranked **XSS/SQLi candidates**
+   (`recon-params candidates` → briefings/{xss,sqli}_candidates_<date>.md, TOP UNIQUE first); and the **cve
+   mood** (`recon-mood cve` = triage_kev_signal matches → VERSION-REASON, route to recon-nday). SKIP burned lanes: takeover (all
    takeover:cname-lead) and *.unifi-hosting.ui.com rce (UUID shared-tenant = third-party data, HARD LINE).
 3. DEDUP: drop hosts in `~/recon/state/worked_targets.jsonl` or present as FP in `~/recon/v3/findings.db`
    (copy first — WAL-locked). Collapse regional/product-class clusters to ONE representative.
@@ -129,14 +131,22 @@ Round loop (keep going until a confirm OR the budget below is exhausted):
    If the version is genuinely in-range → real n-day candidate (human exploits).
 3. **403/401 access-control bypass** (`recon_bypass.sh` / the auth-bypass lane, 68k hosts): header/method/
    path-normalization tricks on protected admin/api hosts.
-4. **Params (VERIFIED-only — do NOT mine the raw catalog).** The daemon now collects + confirms params
-   CONTINUOUSLY in parallel (uncapped, polite, next-host-queues), and only CONFIRMED ones land in the state
-   machine. So you consume them via the **ai-pending queue** (state-machine step 1: `state.py ai-pending`) —
-   adversarially re-verify each confirmed SSTI/redirect/SQLi and set the verdict. Don't re-run
-   `param_confirm_worker.py` across raw candidates; that's the daemon's job, and raw catalog `payout_tier`
-   lies anyway. (You MAY still spot-confirm a specific param if a lead warrants it.)
-5. **Different programs / score tiers / freshness windows** each round — don't re-walk the same
-   top-of-lane every day.
+4. **Params — two complementary lanes.** (a) VERIFIED queue: the daemon collects+confirms params
+   CONTINUOUSLY; consume via the **ai-pending queue** (`state.py ai-pending`), adversarially re-verify each
+   confirmed SSTI/redirect/SQLi, set the verdict. Don't re-run `param_confirm_worker.py` across raw
+   candidates — that's the daemon's job and raw `payout_tier` lies. (b) RANKED candidates (2026-06-14): the
+   **`recon-params candidates`** ranker turns the catalog into a dup-proof XSS/SQLi worklist
+   (briefings/{xss,sqli}_candidates_<date>.md — TOP UNIQUE first, skip PRODUCT-CLASS) — this is RANKED+DEDUP'd,
+   NOT raw mining, so it IS allowed. CONFIRM with **`recon-params confirm xss <host>`** (dalfox must EXECUTE —
+   reflection≠XSS) / **`confirm sqli <host>`** (SAFE `'`vs`''` diff; never sqlmap/--dump). A confirm here = a
+   reportable lead for tonight.
+5. **`recon-mood <mood>` as the per-round slice-picker** (2026-06-14): instead of hand-querying ES, name the
+   lane — xss/sqli/api/wordpress/php/jira/graphql/**cve**/takeover/**interesting**/… or ANY keyword — and get
+   a ranked scope+pays+not-benched worklist (briefings/mood_<mood>_<date>.md). A mood is a LENS, not a limit:
+   run the FULL flow on its hosts. **cve mood** = `triage_kev_signal` matches → VERSION-REASON first (LEAD
+   until in-range running version; route to `recon-nday`; template-safety). Use a DIFFERENT mood/program/tier
+   each round — don't re-walk the same top-of-lane every day. REGENERATE the candidate/mood worklists so the
+   operator's /hunt finds today's files.
 6. **Deeper per-host investigation** on promising hosts: mine JS for the real API base, fetch+diff
    endpoints, screenshot, introspect GraphQL.
 BUDGET & SAFETY (the loop is bounded, never a runaway): respect the safe_probe anti-burn (rate-limits,
