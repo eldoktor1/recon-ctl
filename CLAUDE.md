@@ -48,6 +48,16 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
 
+## RESEARCH MANDATE (operator 2026-06-14, "very very important") — read the source, don't guess
+For ANYTHING that needs research — **design, hunting, recon, enumeration, AND building/fixing the
+pipeline** — GO READ THE AUTHORITATIVE SOURCE before acting: (1) the **target host's own DOCS**
+(API/developer/reference/OpenAPI-Swagger/changelog — for authed targets via Claude-in-Chrome in the
+logged-in tab); (2) **top bug-bounty hunters' RESEARCH** (writeups, disclosed H1 reports, rs0n/NahamSec/
+jhaddix/XBOW/PortSwigger, CVE/advisory writeups, technique posts) — via WebSearch/WebFetch. This is how
+the part-time hunter beats full-timers and how the MOTTO's "use Claude's understanding where tools are
+blind" actually works: be informed, not fast-and-blind. Don't act on a hunch when the source is one
+fetch away (ties to template-safety: read before you fire). Applies to /hunt AND to me building this engine.
+
 ## THE HUNT FLOW — keyword `hunt` (operator-locked 2026-06-13)
 When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until
 they say **stop**/**pause** (never self-terminate, never ask "want to wrap?"). Config the operator
