@@ -50,6 +50,22 @@ TECH={
  "sharepoint":"Microsoft SharePoint","graphql":"GraphQL","mysql":"MySQL","oracle":"Oracle",
  "coldfusion":"Adobe ColdFusion","wpengine":"WP Engine","shopify":"Shopify",
 }
+# PARAM-BUG → vuln-PRONE tech. For a param class (sqli/xss/…), discover MORE candidate hosts by
+# the tech most associated with that bug — DB-backed / server-rendered stacks for SQLi, reflective
+# server + client-template stacks for XSS — so the hunt isn't capped by what the param catalog has
+# already crawled. These hosts feed `recon-params crawl-host <host>` → confirm. (operator 2026-06-14:
+# "look up by interesting tech for param bug … so it can discover as much as it needs".)
+CLASS_TECH={
+ "sqli":["PHP","Microsoft ASP.NET","Adobe ColdFusion","Java","Apache Tomcat","JBoss",
+         "Oracle","MySQL","Microsoft SQL Server","PostgreSQL","WordPress","Joomla","Drupal",
+         "Magento","PrestaShop","vBulletin","CodeIgniter","Laravel","Symfony","Perl","ASP.NET"],
+ "xss":["PHP","Microsoft ASP.NET","Java","JSP","WordPress","Joomla","Drupal","Adobe ColdFusion",
+        "AngularJS","jQuery","PrestaShop","vBulletin","Magento","Laravel","Symfony","ASP.NET"],
+ # other param classes lean on the same server-rendered surface
+ "lfi":["PHP","Java","Apache Tomcat","Perl","ASP.NET"],
+ "ssti":["PHP","Java","Python","Flask","Django","Jinja","Ruby on Rails","Smarty","Twig","Freemarker","Velocity"],
+ "redirect":["PHP","Microsoft ASP.NET","Java","WordPress","Spring"],
+}
 # mood -> host-pattern lane (leftmost-label / substring intent)
 HOST_LANE={
  "api":   {"prefixes":["api","apis","gw","gateway"], "contains":[".api."]},
@@ -279,6 +295,34 @@ def do_interesting(top, stamp, noted):
         print(f"   {'⚡' if rr['fresh'] else ' '}[{rr['tier']}] {rr['host']}  ({rr['program']}){'  · '+ctx if ctx else ''}")
     return 0
 
+def do_param_tech_discovery(cls, top, stamp, noted):
+    """Discover MORE candidate hosts for a param class by vuln-PRONE tech (CLASS_TECH) — the hosts
+    to feed `recon-params crawl-host` so the hunt isn't capped by the already-crawled catalog.
+    Scope+pays+not-benched, ranked, root-diversity-capped. Writes <cls>_tech_targets_<stamp>.md."""
+    techs=CLASS_TECH.get(cls) or []
+    if not techs: return None
+    should=[{"match_phrase":{"tech":t}} for t in techs]
+    r=alive_query([], qshould=should, pool=900)
+    if r.get("_err") or r.get("error"):
+        print(f"  [{cls} tech-discovery] ES error:", r.get("_err") or r.get("error")); return None
+    rows,total=rank_alive(r.get("hits",{}).get("hits",[]), noted, top)
+    outp=os.path.join(HOME,f"recon/briefings/{cls}_tech_targets_{stamp}.md")
+    os.makedirs(os.path.dirname(outp),exist_ok=True)
+    L=[f"# 🧬 {cls.upper()} tech-prone CANDIDATE HOSTS (crawl-host these) — {stamp}",
+       f"Hosts running {cls.upper()}-prone tech ({', '.join(techs[:8])}…) — discover their param surface ON DEMAND:",
+       f"  `recon-params crawl-host <host>`  → then  `recon-params confirm {cls} <host>`",
+       f"(authed: add `--cookie \"<your session>\"` to both). Not catalog-gated — this EXPANDS the pool.",
+       f"{len(rows)} ranked of {total} scope+paying+not-benched. ⚡=fresh 📝=noted.",""]
+    for rr in rows:
+        fr="⚡" if rr["fresh"] else "  "; nt=" 📝" if rr["noted"] else ""
+        L.append(f"{fr}[{rr['tier']}] `{rr['host']}`{nt}  score={rr['score']}  ({rr['program']})"
+                 +(f"  · {fmt_list(rr['tech'],4)}" if rr['tech'] else ""))
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
+    print(f"[{cls} tech-discovery] {len(rows)} prone-tech hosts to crawl-host (of {total}) → {outp}")
+    for rr in rows[:10]:
+        print(f"   {'⚡' if rr['fresh'] else ' '}[{rr['tier']}] {rr['host']}  ({rr['program']})  · {fmt_list(rr['tech'],3)}")
+    return outp
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("mood",nargs="?")
@@ -289,7 +333,8 @@ def main():
 
     if a.list or not a.mood:
         print("MOODS (a mood is a LENS over the FULL /hunt flow, never a cap on depth):")
-        print("  param-class :", " ".join(sorted(PARAM_CLASSES)))
+        print("  param-class :", " ".join(sorted(PARAM_CLASSES)),
+              "\n                (sqli/xss/lfi/ssti/redirect ALSO emit a vuln-prone-tech host list to crawl-host)")
         print("  tech        :", " ".join(sorted(TECH)))
         print("  host-lane   :", " ".join(sorted(HOST_LANE)))
         print("  signal      :", " ".join(sorted(SIGNAL)))
@@ -310,9 +355,14 @@ def main():
     if mood in PARAM_CLASSES:
         if mood in ("xss","sqli"):
             print(f"[{mood}] → ranked dup-proof candidates (recon_xss_sqli_candidates.py)")
-            return subprocess.call(["python3",os.path.join(SCRIPT_DIR,"recon_xss_sqli_candidates.py"),
-                                    "--class",mood,"--stamp",a.stamp,"--top",str(a.top)])
-        return 0 if do_params_catalog(mood,a.top,a.stamp) else 1
+            rc=subprocess.call(["python3",os.path.join(SCRIPT_DIR,"recon_xss_sqli_candidates.py"),
+                                "--class",mood,"--stamp",a.stamp,"--top",str(a.top)])
+        else:
+            rc=0 if do_params_catalog(mood,a.top,a.stamp) else 1
+        # ALSO discover vuln-prone-tech hosts to crawl-host (expands beyond the catalog)
+        if mood in CLASS_TECH:
+            do_param_tech_discovery(mood, a.top, a.stamp, noted)
+        return rc
 
     # 2) TECH moods (exact wappalyzer value)
     if mood in TECH:
