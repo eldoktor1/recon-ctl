@@ -31,6 +31,20 @@ Root-caused and rebuilt the whole params lane end-to-end. All changes keep the e
   past it; diversity-cap only the survivors. Measured immediately: one cycle went from `enqueued 2`
   → `cooled 9177 junk` + `enqueued 343 host(s) as 7 jobs` (~170× producer throughput). The
   deterministic filter makes the 7d cooldown safe — a false-dropped host just returns after the TTL.
+- **Product-class fan-out suppression (data-driven, 2026-06-14).** Even with cool-on-examine,
+  the producer ground 3 hosts/cycle through mass per-user/per-tenant fan-outs that yield ~0
+  params — `quora.com` (31k "spaces"), `artstation.com` (27k portfolios), `statuspage.io` (16k
+  tenants), `elastic.dev` (15k CI — **938 crawled, 0 params**), `elstc.co`, `amazon.in`.
+  `compute_dead_roots` now flags a root as dead only when ALL three hold: mass fan-out
+  (`>=8000` eligible hosts), well-sampled (`>=20` crawled), and ~zero yield (`<0.05`
+  params/crawled-host); the producer adds them to its candidate `must_not`. The eligible-count
+  gate is the safety: low *archive*-param yield != no attack surface, so real programs with
+  modest subdomain counts (paypal/tesla/hilton) are never suppressed — only genuine fan-outs.
+  Self-maintaining (a fresh root must accrue the sample before judgement) and scoped to THIS
+  lane (suppression never removes a host from jsintel/IDOR/takeover/nuclei). Tunable via
+  `PARAMS_DEADROOT_{MIN_FANOUT,MIN_SAMPLE,MAX_YIELD}`; the live set is written to
+  `state/params_deadroots.txt`. Same pass: archive timeout 30s->60s (big domains were timing
+  out and losing their param-rich surface) and the ephemeral filter gained `ci|jenkins|gerrit|vpn|np`.
 - **true-fresh cert-renewal fix** — gungnir can't tell a first cert issuance from a renewal, so
   ~90-day renewals of long-known hosts were mislabeled `true_fresh`. recon_true_fresh.sh now drops
   hosts already in the known_hosts ledger (`grep -a` — it has NUL bytes); existing mislabels written

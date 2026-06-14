@@ -86,6 +86,25 @@ PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent 
 # ROTATION interval (re-check each host at most this often), NOT an idle cause;
 # at safe crawl rates a full pass takes far longer than the window anyway.
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
+# Product-class fan-out suppression: a root_domain we've already crawled >= MIN_SAMPLE
+# hosts from but that yielded < MAX_YIELD params/host is a PROVEN zero-yield per-user/
+# per-tenant fan-out (quora "spaces", artstation portfolios, statuspage tenants,
+# elastic.dev CI — 938 hosts crawled, 0 params). Its remaining tens-of-thousands of hosts
+# would grind 3/cycle forever, displacing real targets. Data-driven + self-maintaining:
+# only suppresses AFTER a real sample proves the class dead (operator doctrine 2026-06-14:
+# "check one, the rest of the class applies"); a root with any yield (tumblr/shopify/etsy/
+# amazon) is never touched, and a fresh root must accrue MIN_SAMPLE crawls before judgement.
+PARAMS_DEADROOT_MIN_SAMPLE="${PARAMS_DEADROOT_MIN_SAMPLE:-20}"
+PARAMS_DEADROOT_MAX_YIELD="${PARAMS_DEADROOT_MAX_YIELD:-0.05}"   # params per crawled host
+# CRITICAL GATE: only suppress MASS per-user/per-tenant fan-outs (quora 31k spaces,
+# artstation 27k portfolios, elastic.dev 15k CI). Low ARCHIVE-param yield != no attack
+# surface — a real program (paypal/tesla/hilton) can have hundreds of subdomains with no
+# historical wayback param-URLs yet still be worth the param lane. Fan-out size is the
+# discriminator: a root needs >= MIN_FANOUT eligible hosts before zero-yield => "dead". This
+# spares corporate programs and limits blast radius if the yield data was skewed (e.g. by a
+# transient archive outage). The param catalog is THIS lane only — suppression here never
+# removes a host from jsintel/IDOR/takeover/nuclei, which query recon_alive independently.
+PARAMS_DEADROOT_MIN_FANOUT="${PARAMS_DEADROOT_MIN_FANOUT:-8000}"
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-30000}"  # candidate reach (search_after-paged). MUST be deep: ephemeral/CI junk scores HIGH so it clusters in the top ~10k (measured ~77% junk there), while real param-bearing web apps sit DEEPER (a 40k sample was ~77% real post-filter). A shallow pool only ever sees the junk tier → ~0-yield crawls. Only queried when the queue has room (backpressure-gated), so the deeper pull is cheap. Server-side cooldown range still slides the window through the ~600k pool.
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
@@ -260,6 +279,46 @@ cool_hosts() {
   log "cooled $(wc -l < "$f" | tr -d ' ') filtered junk host(s) so the window advances"
 }
 
+# compute_dead_roots — DATA-DRIVEN product-class fan-out suppression. Echoes a JSON array
+# of root_domains we've sampled enough of (crawled >= MIN_SAMPLE) to prove they yield
+# essentially no params (< MAX_YIELD params/crawled-host) — quora/artstation/statuspage/
+# elastic.dev-style per-user/per-tenant fan-out. Two cheap aggs (crawled-per-root over
+# recon_alive, cataloged-per-root over recon_params), joined in jq. Echoes "[]" if none or
+# on any error (fail-open: a suppression bug must never starve the producer). The producer
+# adds these to its candidate query's must_not so the class stops consuming crawl cycles.
+compute_dead_roots() {
+  local ms="${PARAMS_DEADROOT_MIN_SAMPLE:-20}" my="${PARAMS_DEADROOT_MAX_YIELD:-0.05}" mf="${PARAMS_DEADROOT_MIN_FANOUT:-8000}" eligible crawled cataloged
+  # eligible-per-root (the fan-out size: in-scope + paying hosts under the root)
+  eligible="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d '{
+    "size":0,"query":{"bool":{"filter":[{"term":{"triage_in_scope":true}},{"term":{"triage_pays":true}}]}},
+    "aggs":{"r":{"terms":{"field":"root_domain","size":5000}}}}' 2>/dev/null)"
+  # crawled-per-root (how many we've already sampled for params)
+  crawled="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d '{
+    "size":0,"query":{"exists":{"field":"'"$PARAMS_SCANNED_FIELD"'"}},
+    "aggs":{"r":{"terms":{"field":"root_domain","size":5000}}}}' 2>/dev/null)"
+  # cataloged-per-root (param-URLs we actually got)
+  cataloged="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d '{
+    "size":0,"aggs":{"r":{"terms":{"field":"root_domain","size":5000}}}}' 2>/dev/null)"
+  # default empties to a literal '{}' on their OWN line — `${var:-{}}` is ambiguous in bash
+  # (parses as `${var:-{}` + a stray `}`) and corrupts otherwise-valid JSON for --argjson.
+  [[ -n "$eligible"  ]] || eligible='{}'
+  [[ -n "$crawled"   ]] || crawled='{}'
+  [[ -n "$cataloged" ]] || cataloged='{}'
+  # DEAD = mass fan-out (eligible >= mf) AND well-sampled (crawled >= ms) AND ~zero yield
+  # (params/crawled < my). All three gates required; fail-open to [] on any parse error.
+  jq -cn --argjson e "$eligible" --argjson c "$crawled" --argjson p "$cataloged" \
+         --argjson ms "$ms" --argjson my "$my" --argjson mf "$mf" '
+    (($e.aggregations.r.buckets // []) | map({(.key): .doc_count}) | add // {}) as $em
+    | (($p.aggregations.r.buckets // []) | map({(.key): .doc_count}) | add // {}) as $pm
+    | (($c.aggregations.r.buckets // []))
+    | map(select(
+        .doc_count >= $ms
+        and (($em[.key] // 0) >= $mf)
+        and ((($pm[.key] // 0) / .doc_count) < $my)
+      ) | .key)
+  ' 2>/dev/null || echo '[]'
+}
+
 # index_workdir WORKDIR — aggregate ONE crawl's per-host outputs: bulk-index to
 # recon_params, append per-class files, and stamp the cooldown ledger. Echoes the
 # indexed doc count on stdout.
@@ -306,6 +365,16 @@ cmd_enqueue() {
   WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
   : > "$WORK/cand.tsv"
 
+  # Product-class fan-out suppression (server-side): exclude roots PROVEN zero-yield by a
+  # real sample, so they stop consuming crawl cycles. Fail-open — never starve the producer.
+  local DEADROOTS DEAD_CLAUSE=""
+  DEADROOTS="$(compute_dead_roots)"; [[ -n "$DEADROOTS" ]] || DEADROOTS='[]'
+  if [[ "$DEADROOTS" != "[]" ]]; then
+    DEAD_CLAUSE=",{\"terms\":{\"root_domain\":$DEADROOTS}}"
+    printf '%s\n' "$DEADROOTS" | jq -r '.[]' > "$STATE_DIR/params_deadroots.txt" 2>/dev/null || true
+    log "suppressing $(printf '%s' "$DEADROOTS" | jq 'length') proven zero-yield product-class root(s) (≥${PARAMS_DEADROOT_MIN_SAMPLE} crawled, <${PARAMS_DEADROOT_MAX_YIELD} params/host)"
+  fi
+
   # SLIDING-WINDOW candidate query. Highest triage_score first (GAU/web-archive
   # coverage drives param yield — established hosts have years of history; CT-fresh
   # UUID subdomains have none). first_seen ASC tiebreaks; host ASC is the unique
@@ -325,7 +394,7 @@ cmd_enqueue() {
     local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $PAGE,
       \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
-      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}},{\"range\":{\"$PARAMS_SCANNED_FIELD\":{\"gte\":\"now-${PARAMS_COOLDOWN_DAYS}d\"}}}]}},
+      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}},{\"range\":{\"$PARAMS_SCANNED_FIELD\":{\"gte\":\"now-${PARAMS_COOLDOWN_DAYS}d\"}}}$DEAD_CLAUSE]}},
       \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}},{\"host\":{\"order\":\"asc\"}}]$sa
     }" 2>/dev/null)" || { warn "ES query failed (curl)"; exit 0; }
     # An ES-side error must NEVER masquerade as "no candidates" and silently
