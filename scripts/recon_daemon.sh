@@ -392,7 +392,7 @@ supervise_loop() {
     # vpnguard logs its own state changes; logging every 20s here is pure noise.
     # Scanner loops get threads/rate context; lightweight loops get nothing extra.
     case "$name" in
-      validate|validate-fast|discovery|scope-watch|active-checks|js-scanner|cloudrecon|params|params-enqueue|params-verify|portscan|bypass|evidence-gate|vuln-feed)
+      validate|validate-fast|discovery|scope-watch|active-checks|js-scanner|cloudrecon|params|params-enqueue|params-verify|params-live|portscan|bypass|evidence-gate|vuln-feed)
         log "[$name] starting (power=$POWER_STATE threads=$HTTPX_THREADS rate=$HTTPX_RATE)" ;;
       vpnguard) ;;
       *) log "[$name] starting" ;;
@@ -473,8 +473,12 @@ PARAMS_SCRIPT="${PARAMS_SCRIPT:-$(script_path recon_params.sh)}"
 PARAMS_INTERVAL="${PARAMS_INTERVAL:-120}"                  # CONSUMER: claim+crawl one job / cycle (egress-gated)
 PARAMS_ENQUEUE_INTERVAL="${PARAMS_ENQUEUE_INTERVAL:-300}"  # PRODUCER: refill the job queue from ES (no target traffic)
 PARAMS_VERIFY_INTERVAL="${PARAMS_VERIFY_INTERVAL:-300}"   # verify IN PARALLEL ~5min — confirmed params -> findings.db -> agent's ai-pending (verified-only reaches the agent)
+PARAMS_LIVE_INTERVAL="${PARAMS_LIVE_INTERVAL:-300}"      # LIVENESS: probe catalog URLs, keep live + DELETE dead (archive URLs go stale)
 # CONSUMER — target-facing (katana+gau over Mullvad) → run_scanner (egress slot + vpn gate).
 run_params() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" crawl || true; }
+# LIVENESS — probe catalog URLs (deduped by path), keep live, DELETE dead so only worth-
+# keeping params remain + confirmers never waste budget on 404s. Target-facing → run_scanner.
+run_params_live() { v21_killed params && return 0; [[ -f "$PARAMS_SCRIPT" ]] && run_scanner bash "$PARAMS_SCRIPT" verify-live || true; }
 # PRODUCER — ES-only candidate selection into the queue. Still via run_scanner so the
 # job files are reconrun-owned (consistent with the consumer's claim) and ES auth/env
 # match; the egress slot it briefly holds for the ES query is negligible (no targets hit).
@@ -679,6 +683,7 @@ run_discord_bot() {
   supervise_loop "params-enqueue" "PARAMS_ENQUEUE_INTERVAL" run_params_enqueue &
   supervise_loop "params"         "PARAMS_INTERVAL"        run_params         &
   supervise_loop "params-verify"  "PARAMS_VERIFY_INTERVAL" run_params_verify  &
+  supervise_loop "params-live"    "PARAMS_LIVE_INTERVAL"   run_params_live    &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &

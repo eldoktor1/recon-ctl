@@ -103,6 +103,13 @@ PARAMS_SCANNED_FIELD="${PARAMS_SCANNED_FIELD:-params_scanned_at}"   # recon_aliv
 PARAMS_ARCHIVE_URL="${PARAMS_ARCHIVE_URL:-$(tr -d '\r\n' < "$HOME/.recon_cdx_url" 2>/dev/null)}"
 PARAMS_ARCHIVE_KEY="${PARAMS_ARCHIVE_KEY:-$(tr -d '\r\n' < "$HOME/.recon_cdx_key" 2>/dev/null)}"
 PARAMS_ARCHIVE_TIMEOUT="${PARAMS_ARCHIVE_TIMEOUT:-30}"
+# Liveness verification (verify-live): archive URLs (wayback/gau) are HISTORICAL, so many
+# are dead 404s. A paced, Mullvad-gated stage probes catalog URLs (deduped by path), keeps
+# the live ones, and DELETES the dead — so only worth-keeping params remain and confirmers
+# never burn budget on 404s. Bounded per cycle (anti-burn) + loud errors (never silent-freeze).
+PARAMS_LIVE_BATCH="${PARAMS_LIVE_BATCH:-120}"        # catalog URLs checked per cycle
+PARAMS_LIVE_TIMEOUT="${PARAMS_LIVE_TIMEOUT:-10}"     # per-probe timeout (s)
+PARAMS_LIVE_TTL_DAYS="${PARAMS_LIVE_TTL_DAYS:-30}"   # re-verify a URL's liveness this often
 
 mkdir -p "$PARAMS_DIR" "$STATE_DIR" "$PARAMS_INBOX" "$PARAMS_PROCESSING" "$PARAMS_DONE"
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
@@ -161,6 +168,15 @@ crawl_host() {
     # Wayback CDX archive URLs, proxied through Cloudflare (escapes IA's Mullvad block).
     archive_fetch "$host"
   } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
+  # Drop tracking-ONLY URLs: if EVERY param is analytics junk (utm_*, fbclid, gclid, …) the
+  # page is not server-side testable — pure noise for the confirmers. Keep any URL with at
+  # least one non-tracking param. (Liveness of the survivors is checked later by verify-live.)
+  if [[ -s "$hd/raw" ]]; then
+    awk '{ q=$0; sub(/^[^?]*\?/,"",q); real=0; n=split(q,P,/&/);
+           for(i=1;i<=n;i++){ nm=P[i]; sub(/=.*/,"",nm);
+             if (nm !~ /^(utm_[a-z_]+|fbclid|gclid|gclsrc|dclid|wbraid|gbraid|msclkid|mc_cid|mc_eid|_ga|_gl|yclid|igshid|twclid|spm|scm|fb_action_ids|fb_action_types|fb_source|ref|referrer)$/) { real=1; break } }
+           if (real) print }' "$hd/raw" > "$hd/raw.f" 2>/dev/null && mv "$hd/raw.f" "$hd/raw"
+  fi
   local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
   log "  $host — ${raw_n:-0} param URLs"
   # Record the host as crawled REGARDLESS of yield — the consumer cools it so the
@@ -575,6 +591,84 @@ cmd_verify() {
   [[ "$hits" -gt 0 ]] && printf '    saved → %s\n' "$out_file" >&2
 }
 
+# ---------------------------------------------------------------------------
+# LIVENESS VERIFIER — archive URLs (wayback/gau) are historical; many are dead 404s.
+# Probe a bounded batch of catalog URLs (deduped by path so it's one probe per page, not
+# per param-variant), KEEP the live (mark live_status/live_checked_at), DELETE the dead so
+# only worth-keeping params remain. Target-facing → invoked via run_scanner (egress slot +
+# vpn gate); per-probe jitter keeps it gentle. Robust: loud ES-error detection, transient
+# failures (000/5xx/timeout) are left for retry — NEVER deleted on a flaky probe.
+cmd_verify_live() {
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping verify-live"; exit 0; }
+  es_up || { warn "ES not reachable"; exit 0; }
+  exec 9>"$STATE_DIR/params_live.lock"; flock -n 9 || { warn "params verify-live already running"; exit 0; }
+  python3 -c "import fcntl;fcntl.fcntl(9,fcntl.F_SETFD,fcntl.FD_CLOEXEC)" 2>/dev/null || true
+  # ensure the liveness fields are mapped (idempotent, additive)
+  es -fsS -X PUT "$ES_URL/$PARAMS_INDEX/_mapping" -H 'Content-Type: application/json' \
+    -d '{"properties":{"live_status":{"type":"keyword"},"live_checked_at":{"type":"date"}}}' >/dev/null 2>&1 || true
+
+  local NOW_ISO CUTOFF_ISO
+  NOW_ISO="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  CUTOFF_ISO="$(date -u -d "-${PARAMS_LIVE_TTL_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')"
+
+  # batch: never-checked OR checked > TTL ago; oldest/unchecked first
+  local resp
+  resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
+    \"size\": $PARAMS_LIVE_BATCH,
+    \"_source\":[\"url\"],
+    \"query\":{\"bool\":{\"should\":[
+        {\"bool\":{\"must_not\":[{\"exists\":{\"field\":\"live_checked_at\"}}]}},
+        {\"range\":{\"live_checked_at\":{\"lt\":\"$CUTOFF_ISO\"}}}
+      ],\"minimum_should_match\":1}},
+    \"sort\":[{\"live_checked_at\":{\"order\":\"asc\",\"missing\":\"_first\"}}]
+  }" 2>/dev/null)" || { warn "ES query failed (curl)"; exit 0; }
+  if printf '%s' "$resp" | jq -e '.error' >/dev/null 2>&1; then
+    warn "verify-live ES error: $(printf '%s' "$resp" | jq -r '.error.root_cause[0].reason // .error.reason // .error.type' 2>/dev/null)"; exit 1
+  fi
+
+  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
+  printf '%s' "$resp" | jq -rc '.hits.hits[]? | [._id, ._source.url] | @tsv' 2>/dev/null > "$WORK/batch.tsv"
+  local n; n="$(wc -l < "$WORK/batch.tsv" | tr -d ' ')"
+  [[ "${n:-0}" -gt 0 ]] || { log "verify-live: nothing to check"; exit 0; }
+
+  local ua='Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0'
+  : > "$WORK/bulk.ndjson"
+  declare -A PATHRES
+  local alive=0 dead=0 trans=0 probed=0
+  while IFS=$'\t' read -r id url; do
+    [[ -z "$id" || -z "$url" ]] && continue
+    [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — halting verify-live"; break; }
+    local pk="${url%%\?*}"
+    local res="${PATHRES[$pk]:-}"
+    if [[ -z "$res" ]]; then
+      sleep "0.$(( RANDOM % 5 + 2 ))"   # min-gap jitter (anti-burn)
+      local code
+      code="$(curl -sS -m"$PARAMS_LIVE_TIMEOUT" -k -I -A "$ua" -o /dev/null -w '%{http_code}' "$pk" 2>/dev/null)"
+      case "$code" in 000|405|501|""|400) code="$(curl -sS -m"$PARAMS_LIVE_TIMEOUT" -k -A "$ua" -o /dev/null -w '%{http_code}' "$pk" 2>/dev/null)" ;; esac
+      case "$code" in
+        2[0-9][0-9]|301|302|303|307|308|401|403|429) res=alive ;;
+        404|410)                                     res=dead  ;;
+        *)                                           res=trans ;;   # 000/5xx/timeout → retry later, do NOT delete
+      esac
+      PATHRES[$pk]="$res"; probed=$((probed+1))
+    fi
+    case "$res" in
+      alive) printf '{"update":{"_id":"%s"}}\n{"doc":{"live_status":"alive","live_checked_at":"%s"}}\n' "$id" "$NOW_ISO" >> "$WORK/bulk.ndjson"; alive=$((alive+1)) ;;
+      dead)  printf '{"delete":{"_id":"%s"}}\n' "$id" >> "$WORK/bulk.ndjson"; dead=$((dead+1)) ;;
+      trans) trans=$((trans+1)) ;;
+    esac
+  done < "$WORK/batch.tsv"
+
+  local applied=0
+  if [[ -s "$WORK/bulk.ndjson" ]]; then
+    local br; br="$(es -H 'Content-Type: application/x-ndjson' -X POST "$ES_URL/$PARAMS_INDEX/_bulk" --data-binary @"$WORK/bulk.ndjson" 2>/dev/null)"
+    applied="$(printf '%s' "$br" | jq '[.items[]?|(.update//.delete)|select(.result=="updated" or .result=="deleted")]|length' 2>/dev/null || echo 0)"
+    local errs; errs="$(printf '%s' "$br" | jq -r '[.items[]?|(.update//.delete)|select(.error)|.error.reason]|unique|.[:3]|join(" | ")' 2>/dev/null)"
+    [[ -n "$errs" ]] && warn "verify-live bulk errors: $errs"
+  fi
+  log "verify-live: $alive alive / $dead dead(deleted) / $trans transient · $probed pages probed · $applied catalog ops"
+}
+
 # one-shot: refill the queue, then crawl ONE job. Manual convenience AND the
 # compatibility path for a not-yet-restarted daemon still invoking `collect`
 # (zero-downtime migration to the split enqueue/crawl loops). Separate processes
@@ -582,10 +676,11 @@ cmd_verify() {
 cmd_collect() { bash "$0" enqueue || true; bash "$0" crawl || true; }
 
 case "${1:-}" in
-  enqueue) shift; cmd_enqueue "$@" ;;
-  crawl)   shift; cmd_crawl "$@" ;;
-  collect) shift; cmd_collect "$@" ;;
-  list)    shift; cmd_list "$@" ;;
-  verify)  shift; cmd_verify "$@" ;;
-  *) echo "usage: recon_params.sh {enqueue | crawl | collect | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
+  enqueue)     shift; cmd_enqueue "$@" ;;
+  crawl)       shift; cmd_crawl "$@" ;;
+  collect)     shift; cmd_collect "$@" ;;
+  verify-live) shift; cmd_verify_live "$@" ;;
+  list)        shift; cmd_list "$@" ;;
+  verify)      shift; cmd_verify "$@" ;;
+  *) echo "usage: recon_params.sh {enqueue | crawl | collect | verify-live | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
 esac
