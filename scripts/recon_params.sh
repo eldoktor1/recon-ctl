@@ -887,13 +887,16 @@ cmd_crawl_host() {
   # surface what we found, grouped by class, so the hunt can confirm right away
   local cls f n
   printf -- '--- discovered param-URLs by class (%s) ---\n' "$host" >&2
+  local any=0
   for cls in $PARAMS_CLASSES; do
     f="$(cat "$WORK"/*/cls."$cls" 2>/dev/null | sort -u)"
-    n="$(printf '%s' "$f" | grep -c . 2>/dev/null || echo 0)"
-    [[ "${n:-0}" -gt 0 ]] || continue
+    [[ -n "$f" ]] || continue
+    n="$(printf '%s\n' "$f" | grep -c .)"
     printf '[%s] %s surface(s):\n' "$cls" "$n" >&2
     printf '%s\n' "$f" | head -30 >&2
+    any=1
   done
+  [[ "$any" -eq 0 ]] && printf '  (no param URLs discovered — host may be login-walled / SPA / no linked params)\n' >&2
 }
 
 case "${1:-}" in
