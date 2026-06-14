@@ -567,6 +567,22 @@ score_raw() {
       (if (.host | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\."; "i")) then
         {pts:-10, sig:"penalty:uuid-cloud-infra", class:"low-priority", strength:"pattern", action:""} else empty end),
 
+      # Multi-tenant USER-CONTENT / blog / pages platforms (tumblr.com,
+      # wordpress.com, blogspot, github.io, ...). The leftmost label is
+      # USER-CHOSEN content, not the asset-owner infra naming, so the
+      # host:*-pattern keyword taggers above mis-fire en masse
+      # (bruno-jenkins.tumblr.com is a blog, NOT a CI server;
+      # art-internal.tumblr.com is NOT internal infra), and Wappalyzer
+      # false-detects tech:wordpress/joomla on the rendered Tumblr HTML.
+      # Each host is also third-party user content (testing one = another
+      # party data, like a shared tenant), so it should never headline.
+      # Neutralise the spurious score so these do not flood the
+      # fresh-surface lane. Accuracy-only -- does NOT touch scope/pays.
+      # (2ic r119 2026-06-14: 64/79 of fresh<=3d status:200 score>=13 were *.tumblr.com.)
+      (if (.host // "") | ascii_downcase
+            | test("\\.(tumblr\\.com|wordpress\\.com|blogspot\\.com|blogger\\.com|github\\.io|gitlab\\.io)$") then
+        {pts:-15, sig:"penalty:user-content-platform", class:"low-priority", strength:"pattern", action:""} else empty end),
+
       empty
     ] as $signals |
 
