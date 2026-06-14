@@ -2421,6 +2421,7 @@ usage() {
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
   printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
+  printf "  ${G}recon-params crawl-host${R} <host> [url]  On-demand crawl ONE host for params NOW (hunt queue-bypass)\n"
   printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N]  Confirm — xss=dalfox(executes)  sqli=SAFE %s vs %s diff\n" "'" "''"
   printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n\n"
 
@@ -2520,6 +2521,8 @@ case "${1:-}" in
       list)     shift; bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
       enqueue)  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue ;;
       crawl)    sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
+      crawl-host) shift  # on-demand single-host crawl — queue bypass for the hunt
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl-host "$@" ;;
       collect)  # manual one-shot: refill the queue then crawl a single job
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;

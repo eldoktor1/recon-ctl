@@ -812,13 +812,60 @@ cmd_verify_live() {
 # so each keeps its own lock/exit semantics.
 cmd_collect() { bash "$0" enqueue || true; bash "$0" crawl || true; }
 
+# on-demand SINGLE-HOST crawl — the hunt's queue-bypass. When the hunt finds an interesting
+# host (tech-match for a param class: XSS/SQLi/…), crawl it NOW for its live param surface
+# instead of waiting for the sliding-window producer to reach it. Same engine as the daemon
+# (katana + gau-passive + Wayback-CDX-via-proxy → gf-classify → catalog), just aimed at one
+# host. Pulls scope metadata (program/tier/root/fresh) from recon_alive so the catalog entry
+# is correct, indexes it, and PRINTS the discovered param-URLs per class so a confirm can run
+# immediately. Target-facing (katana) → Mullvad-gated + rate-limited like the daemon path.
+cmd_crawl_host() {
+  local host="${1:-}" url="${2:-}"
+  [[ -n "$host" ]] || { warn "usage: recon_params.sh crawl-host <host> [url]"; exit 2; }
+  for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping crawl-host"; exit 0; }
+  es_up || { warn "ES not reachable"; exit 1; }
+  ensure_index; ensure_alive_field
+
+  # scope metadata from recon_alive (so the catalog entry carries the right program/tier/root)
+  local hit root program tier fresh fseen
+  hit="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
+    \"size\":1,\"_source\":[\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_true_fresh\",\"first_seen\"],
+    \"query\":{\"term\":{\"host\":\"$host\"}}}" 2>/dev/null | jq -c '.hits.hits[0]._source // {}' 2>/dev/null)"
+  [[ -z "$url" ]] && url="$(printf '%s' "$hit" | jq -r '.url // empty' 2>/dev/null)"
+  [[ -n "$url" ]] || url="https://$host"
+  root="$(printf '%s' "$hit" | jq -r '.root_domain // empty' 2>/dev/null)"; [[ -n "$root" ]] || root="$host"
+  program="$(printf '%s' "$hit" | jq -r '.triage_program // empty' 2>/dev/null)"
+  tier="$(printf '%s' "$hit" | jq -r '.triage_payout_tier // "none"' 2>/dev/null)"
+  fresh="$(printf '%s' "$hit" | jq -r '(.triage_true_fresh // false)|tostring' 2>/dev/null)"
+  fseen="$(printf '%s' "$hit" | jq -r '.first_seen // empty' 2>/dev/null)"
+
+  WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
+  log "crawl-host: $host ($url) program=${program:-?} tier=$tier — ON-DEMAND (queue bypass)"
+  crawl_host "$host" "$url" "$root" "$program" "$tier" "$fresh" "$fseen" "$WORK"
+  local indexed; indexed="$(index_workdir "$WORK")"
+  log "crawl-host: indexed $indexed catalog entries for $host"
+
+  # surface what we found, grouped by class, so the hunt can confirm right away
+  local cls f n
+  printf -- '--- discovered param-URLs by class (%s) ---\n' "$host" >&2
+  for cls in $PARAMS_CLASSES; do
+    f="$(cat "$WORK"/*/cls."$cls" 2>/dev/null | sort -u)"
+    n="$(printf '%s' "$f" | grep -c . 2>/dev/null || echo 0)"
+    [[ "${n:-0}" -gt 0 ]] || continue
+    printf '[%s] %s surface(s):\n' "$cls" "$n" >&2
+    printf '%s\n' "$f" | head -30 >&2
+  done
+}
+
 case "${1:-}" in
   enqueue)        shift; cmd_enqueue "$@" ;;
   crawl)          shift; cmd_crawl "$@" ;;
+  crawl-host)     shift; cmd_crawl_host "$@" ;;
   collect)        shift; cmd_collect "$@" ;;
   verify-live)    shift; cmd_verify_live "$@" ;;
   list)           shift; cmd_list "$@" ;;
   confirm|verify) shift; cmd_confirm "$@" ;;   # verify = back-compat alias for confirm
   candidates)     shift; exec python3 "$SCRIPT_DIR/recon_xss_sqli_candidates.py" "$@" ;;
-  *) echo "usage: recon_params.sh {enqueue | crawl | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
+  *) echo "usage: recon_params.sh {enqueue | crawl | crawl-host <host> [url] | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
 esac
