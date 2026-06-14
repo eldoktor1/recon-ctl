@@ -2423,7 +2423,8 @@ usage() {
   printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
   printf "  ${G}recon-params crawl-host${R} <host> [url] [--cookie/--header]  On-demand crawl ONE host NOW (queue-bypass; --cookie=AUTHED)\n"
   printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N] [--cookie/--header]  Confirm — xss=dalfox(executes) sqli=SAFE %s vs %s; --cookie=AUTHED(own session)\n" "'" "''"
-  printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n\n"
+  printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n"
+  printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-ports${R} [N]               All hosts with open non-standard ports (from ES)\n"
@@ -2532,6 +2533,7 @@ case "${1:-}" in
     esac
     ;;
   mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
+  account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;
   outcome)      shift; cmd_outcome "$@" ;;
   view|dashboard) shift; cmd_view "$@" ;;
