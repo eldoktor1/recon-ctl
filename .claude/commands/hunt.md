@@ -8,9 +8,10 @@ Operator config: fully-autonomous target-picking; operator runs target-facing pr
 at a time, I read the paste and hand the next); run AUTONOMOUSLY until the operator says **stop**/**pause**
 (never self-terminate, never ask "want to wrap?").
 
-**SCOPE = ALL OF ES, NOT ONE VULN CLASS:** anything in `recon_alive` that looks suspicious or could lead
-to a finding/report is on the table — every signal, every class. Make sense of all the ES chaos; never
-tunnel on a single lane/vuln-type. **EXHAUST EACH HOST:** dig DEEP until all suspicion is gone and
+**SCOPE = ALL OF ES — every IN-SCOPE + PAYING host — NOT ONE VULN CLASS:** within the in-scope + paying
+surface (always gated on `triage_in_scope` + per-asset pays; never the raw index), anything in
+`recon_alive` that looks suspicious or could lead to a finding/report is on the table — every signal,
+every class. Make sense of all the ES chaos; never tunnel on a single lane/vuln-type. **EXHAUST EACH HOST:** dig DEEP until all suspicion is gone and
 further investigation won't yield — don't abandon a host early.
 
 **FIRST, read the cursor:** `~/recon/state/hunt_cursor.md` records the host(s) we were on + pending

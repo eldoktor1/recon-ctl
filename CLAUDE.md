@@ -38,9 +38,10 @@ Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over v
 When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until
 they say **stop**/**pause** (never self-terminate, never ask "want to wrap?"). Config the operator
 locked: trigger=`hunt`, target-picking=fully-autonomous, probes=operator-runs-them (one-at-a-time paste).
-**SCOPE = ALL OF ES, NOT ONE VULN CLASS (doctrine 2026-06-13):** anything in `recon_alive` that looks
-suspicious or could lead to a finding/report is on the table — every signal, every class. Make sense
-of all the ES chaos; never tunnel on a single lane/vuln-type. **EXHAUST EACH HOST: dig DEEP until all
+**SCOPE = ALL OF ES — every IN-SCOPE + PAYING host — NOT ONE VULN CLASS (doctrine 2026-06-13):** within
+the in-scope + paying surface (always gated on `triage_in_scope` + per-asset pays; never the raw index),
+anything in `recon_alive` that looks suspicious or could lead to a finding/report is on the table — every
+signal, every class. Make sense of all the ES chaos; never tunnel on a single lane/vuln-type. **EXHAUST EACH HOST: dig DEEP until all
 suspicion is gone and further investigation won't yield** — don't abandon a host early.
 **RESUME CURSOR:** `~/recon/state/hunt_cursor.md` tracks the current host + pending actions; READ it on
 `hunt`/`/hunt resume` to pick up where we left off, and UPDATE it whenever you switch host / leave a
