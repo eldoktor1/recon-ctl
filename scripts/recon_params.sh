@@ -235,6 +235,31 @@ stamp_cooldown() {
   }" >/dev/null 2>&1 || warn "cooldown stamp failed for $(printf '%s\n' "$hosts" | wc -l | tr -d ' ') host(s)"
 }
 
+# cool_hosts FILE — stamp params_scanned_at=now on every hostname in FILE (one per
+# line). The PRODUCER uses this to COOL filtered-out junk: hosts with zero param
+# surface (UUID cloud tenants, api/auth/infra leftmost-labels, embedded dev/test/
+# staging/preprod/CI/internal markers) are never crawled, so they were never stamped —
+# which meant they permanently re-occupied the top of the score-sorted candidate window
+# and starved real hosts (the 2026-06-14 "enqueued 2 hosts/cycle" freeze). Cooling them
+# slides the window past them. The filter is deterministic, so a 7d cooldown is safe: a
+# false-dropped real host just returns after the TTL. Chunked to stay well under
+# index.max_terms_count; conflicts=proceed so a concurrent update can't fail it.
+cool_hosts() {
+  local f="$1" ts c; [[ -s "$f" ]] || return 0
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  split -l 1000 "$f" "$f.chunk_"
+  for c in "$f".chunk_*; do
+    [[ -s "$c" ]] || continue
+    local terms; terms="$(jq -R . < "$c" | jq -cs .)"
+    es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_update_by_query?conflicts=proceed" -d "{
+      \"query\":{\"terms\":{\"host\":$terms}},
+      \"script\":{\"lang\":\"painless\",\"source\":\"ctx._source.$PARAMS_SCANNED_FIELD=params.ts\",\"params\":{\"ts\":\"$ts\"}}
+    }" >/dev/null 2>&1 || warn "cool_hosts stamp failed for a chunk"
+  done
+  rm -f "$f".chunk_*
+  log "cooled $(wc -l < "$f" | tr -d ' ') filtered junk host(s) so the window advances"
+}
+
 # index_workdir WORKDIR — aggregate ONE crawl's per-host outputs: bulk-index to
 # recon_params, append per-class files, and stamp the cooldown ledger. Echoes the
 # indexed doc count on stdout.
@@ -324,38 +349,45 @@ cmd_enqueue() {
   : > "$WORK/done.set"
   cat "$PARAMS_INBOX"/*.tsv "$PARAMS_PROCESSING"/*.tsv 2>/dev/null | cut -f1 | sort -u > "$WORK/done.set"
 
-  # Diversity: cap hosts per root_domain so one program (e.g. 15 airbnb locale
-  # subdomains) can't consume the entire 20-host cycle.
-  local MAX_PER_ROOT="${PARAMS_MAX_PER_ROOT:-3}"
-  awk -F'\t' -v m="$MAX_PER_ROOT" '{if(++seen[$3]<=m)print}' "$WORK/cand.tsv" > "$WORK/cand_div.tsv"
-
-  # Filter out hosts that are structurally useless for URL-archive lookups:
+  # FILTER FIRST (before the diversity cap) so we can COOL every junk host in the
+  # window — not just 3-per-root. Hosts that are structurally useless for URL-archive
+  # lookups:
   #   - UUID-named cloud infra (unifi-hosting, etc.) — no public URL history
   #   - mta-sts.* — MTA-STS policy records, not web apps
   #   - cdn-*.* / assets.* / static.* — CDN edge nodes
-  #   - *.api.* where the subdomain itself starts with an API path fragment
-  # These consume GAU quota and always return 0; skipping them saves rate limit.
-  # PHASE 5: also drop host shapes with no GET-parameter web surface — API/RPC
-  # endpoints (POST/JSON, no GET params), device/IoT/message brokers, and mail/DNS
-  # records. They have no archive param-URLs, index 0, and burn GAU quota.
+  #   - api/auth/infra leftmost-labels (POST/JSON, no GET params), device/IoT/message
+  #     brokers, mail/DNS records — no archive param-URLs, index 0, burn GAU quota.
+  # EPHEMERAL/NON-PROD (2026-06-13): dev/test/staging/qa/preprod/CI/internal markers
+  # EMBEDDED anywhere as a whole DNS label / hyphen-token ((^|[.-])marker([.-]|$)) —
+  # never substring-FP a real host ("developers", "latest", "investor" are NOT matched).
+  # Out-of-scope corp/internal infra is caught here as a side effect.
   #
-  # EPHEMERAL/NON-PROD filter (2026-06-13): the leftmost-label rules above missed
-  # dev/test/staging/qa/preprod/CI hosts whose marker is EMBEDDED (e.g.
-  # foo.staging.runnr.in, nginx-ingress-test-92224.ea-ci-systems-dev.elastic.dev,
-  # thanos-...-preprod-...). Measured: ~77% of the top uncooled candidate field was
-  # this junk — zero param surface, so the consumer ground out 0-yield jobs while
-  # real hosts waited. Match the markers as whole DNS labels / hyphen-tokens
-  # ((^|[.-])marker([.-]|$)) so we never substring-FP a real host (e.g. "developers",
-  # "latest", "investor" are NOT matched). Out-of-scope corp/internal infra is caught
-  # here too as a side effect.
+  # COOL-ON-EXAMINE (2026-06-14): these filtered hosts are never crawled, so they were
+  # never stamped params_scanned_at — which meant the score-sorted candidate window
+  # stayed permanently anchored to uncoolable junk (unifi UUID tenants score 25/16,
+  # backblaze S3 buckets, *-internal infra) and the producer only ever surfaced the 2-3
+  # real hosts mixed into the top 30k → "enqueued 2 hosts/cycle" forever. We now run the
+  # filter on the RAW window, COOL the junk via cool_hosts (so the window slides past
+  # it), THEN diversity-cap the survivors.
   grep -vE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.' \
-       "$WORK/cand_div.tsv" \
+       "$WORK/cand.tsv" \
   | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' \
   | grep -vE '^(api|apis|graphql|grpc|gql|mqtt|push|device|devices|iot|broker|smtp|imap|pop3?|mx[0-9]*|ns[0-9]+|dns)[.-]' \
   | grep -vE '^(auth|login|signin|sso|oauth|oidc|idp|saml|adfs|keycloak|prometheus|alertmanager|grafana|metrics|daemon|repo|repos|registry|artifactory|nexus)[.-]' \
   | grep -viE '(^|[.-])(dev|test|tests|testing|qa|uat|sit|stg|stage|staging|preprod|prprd|nonprod|sandbox|sbx|demo|preview|storybook|ephemeral|internal|intranet|corp|canary|perf|loadtest|feature|pr[0-9]+)([.-]|$)' \
-  > "$WORK/cand.tsv"
-  rm -f "$WORK/cand_div.tsv"
+  > "$WORK/cand_clean.tsv"
+  # cool the junk = (raw window) − (clean survivors): every examined zero-param-surface
+  # host, regardless of root, so high-cardinality junk roots actually drain.
+  cut -f1 "$WORK/cand.tsv"        | sort -u > "$WORK/win.hosts"
+  cut -f1 "$WORK/cand_clean.tsv"  | sort -u > "$WORK/clean.hosts"
+  comm -23 "$WORK/win.hosts" "$WORK/clean.hosts" > "$WORK/junk.hosts"
+  cool_hosts "$WORK/junk.hosts"
+
+  # Diversity: cap hosts per root_domain so one program (e.g. 15 airbnb locale
+  # subdomains) can't consume the entire cycle. Applied to the CLEAN survivors only.
+  local MAX_PER_ROOT="${PARAMS_MAX_PER_ROOT:-3}"
+  awk -F'\t' -v m="$MAX_PER_ROOT" '{if(++seen[$3]<=m)print}' "$WORK/cand_clean.tsv" > "$WORK/cand.tsv"
+  rm -f "$WORK/cand_clean.tsv" "$WORK/win.hosts" "$WORK/clean.hosts" "$WORK/junk.hosts"
 
   # PHASE 5: bias toward roots with PROVEN archive/param coverage. A root already in
   # the params catalog has GAU/wayback history that yields param-URLs; a brand-new

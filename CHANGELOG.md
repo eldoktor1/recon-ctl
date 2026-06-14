@@ -21,6 +21,16 @@ Root-caused and rebuilt the whole params lane end-to-end. All changes keep the e
 - **Reach the real surface** — ephemeral/CI junk (dev/test/qa/staging/preprod) scored high and
   filled the top tier (~77%); added a token-bounded non-prod filter + deepened the pool (30k via
   search_after) so the producer pages past the junk to real param-bearing hosts.
+- **Cool-on-examine — the real window-advance fix (2026-06-14).** The non-prod filter above ran
+  *client-side, after* the fetch, so filtered hosts were never crawled → never stamped
+  `params_scanned_at` → they permanently re-anchored the top of the score-sorted window (unifi
+  UUID tenants at score 25/16, `*-internal` infra, 168k `*.s3.*.backblazeb2.com` buckets). The
+  producer could only surface the 2-3 real hosts mixed into the top 30k → `enqueued 2 host(s)`
+  every cycle, forever. Fix: run the structural/ephemeral filter on the RAW window and COOL the
+  junk (`cool_hosts` → `params_scanned_at=now`, chunked `_update_by_query`) so the window slides
+  past it; diversity-cap only the survivors. Measured immediately: one cycle went from `enqueued 2`
+  → `cooled 9177 junk` + `enqueued 343 host(s) as 7 jobs` (~170× producer throughput). The
+  deterministic filter makes the 7d cooldown safe — a false-dropped host just returns after the TTL.
 - **true-fresh cert-renewal fix** — gungnir can't tell a first cert issuance from a renewal, so
   ~90-day renewals of long-known hosts were mislabeled `true_fresh`. recon_true_fresh.sh now drops
   hosts already in the known_hosts ledger (`grep -a` — it has NUL bytes); existing mislabels written
