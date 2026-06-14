@@ -6,7 +6,10 @@
 .env
 
 # Local tooling / editor cruft (not pipeline code)
-.claude/
+# Ignore .claude/* (local settings, worktrees) but TRACK the slash-commands —
+# /hunt et al. are versioned pipeline doctrine, not local cruft.
+.claude/*
+!.claude/commands/
 *.code-workspace
 
 # Runtime state
