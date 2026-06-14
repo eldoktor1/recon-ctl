@@ -323,11 +323,62 @@ def do_param_tech_discovery(cls, top, stamp, noted):
         print(f"   {'⚡' if rr['fresh'] else ' '}[{rr['tier']}] {rr['host']}  ({rr['program']})  · {fmt_list(rr['tech'],3)}")
     return outp
 
+CVE_RE=re.compile(r'^cve-\d{4}-\d{3,}$', re.I)
+
+def do_cve_lookup(cve_id, techs, top, stamp, noted):
+    """Target a SPECIFIC CVE# (operator: a new CVE drops → which of MY ES hosts are vulnerable / warrant
+    testing?). TWO pools:
+      A) MATCHED — hosts the pipeline already tags with this CVE in triage_kev_cves (the KEV/CVE feed
+         attached it to a matched tech-class). Highest-confidence candidates.
+      B) WARRANT-TESTING — hosts running the CVE's AFFECTED TECH (pass --tech <wappalyzer value …>;
+         I research the CVE per the RESEARCH MANDATE to get the affected product, then tech-match ES).
+    Both scope+pays+not-benched. DOCTRINE: a tech/CVE-feed match WITHOUT a confirmed in-range RUNNING
+    version is a LEAD, never P0 — version-reason via `recon-nday`; template-safety on any PoC."""
+    cve_id=cve_id.upper()
+    matched,_=rank_alive(alive_query([{"term":{"triage_kev_cves":cve_id}}],pool=600).get("hits",{}).get("hits",[]),noted,top)
+    warrant=[]
+    if techs:
+        should=[{"match_phrase":{"tech":t}} for t in techs]
+        warrant,_=rank_alive(alive_query([],qshould=should,pool=900).get("hits",{}).get("hits",[]),noted,top)
+        mset={r["host"] for r in matched}
+        warrant=[r for r in warrant if r["host"] not in mset]   # don't double-list
+    outp=os.path.join(HOME,f"recon/briefings/cve_{cve_id}_{stamp}.md")
+    os.makedirs(os.path.dirname(outp),exist_ok=True)
+    L=[f"# 🎯 CVE LOOKUP: {cve_id} — {stamp}",
+       f"Which of my scope+paying+not-benched ES hosts are vulnerable / warrant testing for {cve_id}.",
+       f"DOCTRINE: a match is a LEAD, NOT P0 — VERSION-REASON the running version first (`recon-nday`); "
+       f"template-safety on any PoC (read it; OOB-canary/read-only only). ⚡=fresh 📝=noted.",""]
+    L.append(f"## A) MATCHED — pipeline already tags {cve_id} (triage_kev_cves)  [{len(matched)}]")
+    if matched:
+        for r in matched:
+            fr="⚡" if r["fresh"] else "  "; nt=" 📝" if r["noted"] else ""
+            L.append(f"{fr}[{r['tier']}] `{r['host']}`{nt}  score={r['score']}  ({r['program']})  · {fmt_list(r['tech'],4)}")
+    else:
+        L.append("  (none — this CVE isn't in the pipeline's KEV/CVE feed yet. Use --tech to find warrant-testing hosts.)")
+    L.append("")
+    L.append(f"## B) WARRANT-TESTING — running the affected tech{' ('+', '.join(techs)+')' if techs else ''}  [{len(warrant)}]")
+    if techs:
+        L+=([f"{'⚡' if r['fresh'] else '  '}[{r['tier']}] `{r['host']}`{' 📝' if r['noted'] else ''}  score={r['score']}  ({r['program']})  · {fmt_list(r['tech'],4)}" for r in warrant]
+            or ["  (no scope+paying host runs that tech)"])
+    else:
+        L.append("  (pass `--tech \"<Wappalyzer product>\"` — e.g. researched affected product — to populate this pool)")
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
+    print(f"[cve {cve_id}] MATCHED={len(matched)}  WARRANT={len(warrant)}  → {outp}")
+    for r in matched[:10]:
+        print(f"   [MATCH] {'⚡' if r['fresh'] else ' '}[{r['tier']}] {r['host']}  ({r['program']})")
+    for r in warrant[:8]:
+        print(f"   [WARRANT] {'⚡' if r['fresh'] else ' '}[{r['tier']}] {r['host']}  ({r['program']})  · {fmt_list(r['tech'],2)}")
+    if not matched and not techs:
+        print(f"   → no direct match. Research {cve_id}'s affected product, then re-run with --tech \"<product>\".")
+    return 0
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("mood",nargs="?")
+    ap.add_argument("extra",nargs="?")   # e.g. the CVE id in: recon-mood cve CVE-2024-1234
     ap.add_argument("--top",type=int,default=40)
     ap.add_argument("--stamp",default="latest")
+    ap.add_argument("--tech",action="append",help="affected Wappalyzer tech for a CVE warrant-test pool (repeatable)")
     ap.add_argument("--list",action="store_true")
     a=ap.parse_args()
 
@@ -338,6 +389,8 @@ def main():
         print("  tech        :", " ".join(sorted(TECH)))
         print("  host-lane   :", " ".join(sorted(HOST_LANE)))
         print("  signal      :", " ".join(sorted(SIGNAL)))
+        print("  specific-CVE: recon-mood CVE-2024-1234   (or: cve CVE-2024-1234 --tech \"<product>\")")
+        print("                → MATCHED hosts (triage_kev_cves) + WARRANT-TESTING hosts (affected tech)")
         print("  interesting :", " ".join(sorted(INTERESTING_ALIASES)), "(broad/unclassified high-signal)")
         print("  + ANY keyword (coldfusion, elasticsearch, citrix, …) via broad multi_match")
         print("\nUsage: recon-mood <mood> [--top N]   (picks the lane; the hunt then enumerates/")
@@ -346,6 +399,14 @@ def main():
 
     mood=a.mood.strip().lower()
     noted=noted_hosts()
+
+    # 0a) SPECIFIC CVE lookup — `recon-mood CVE-2024-1234` or `recon-mood cve CVE-2024-1234 [--tech …]`.
+    #     A new CVE drops → which of MY ES hosts are vulnerable / warrant testing for it?
+    cve_arg=None
+    if CVE_RE.match(a.mood.strip()): cve_arg=a.mood.strip()
+    elif mood=="cve" and a.extra and CVE_RE.match(a.extra.strip()): cve_arg=a.extra.strip()
+    if cve_arg:
+        return do_cve_lookup(cve_arg, a.tech, a.top, a.stamp, noted)
 
     # 0) INTERESTING — broad/unclassified high-signal lane
     if mood in INTERESTING_ALIASES:
