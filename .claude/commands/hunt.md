@@ -21,11 +21,15 @@ pending action, or the operator steps away — UPDATE `hunt_cursor.md`** so a co
 
 Focus this run on: **$ARGUMENTS** — if a program/lane/host is given, work within it; if `resume`,
 pick up from the cursor; if empty, resume the cursor's current host first, then pick autonomously from ES.
-**MOOD HUNTING:** if the focus is a vuln-class / tech / lane keyword (xss, sqli, ssrf, lfi, redirect, api,
-wordpress, php, drupal, jira, graphql, jenkins, … or ANY tech keyword), run `recon-mood <kw>` (or
-`recon_mood.py`) — it returns a ranked, scope+pays+not-benched worklist for exactly that mood
-(→ `~/recon/briefings/mood_<kw>_<date>.md`). Hunt that lane with the same uniqueness/freshness/confirm
-discipline. `recon-mood --list` shows known moods (any keyword still works via broad match).
+**MOOD HUNTING — a mood is a LENS, not a limit:** if the focus is a vuln-class / tech / lane / signal
+keyword (xss, sqli, ssrf, lfi, redirect, api, wordpress, php, drupal, jira, graphql, jenkins, **cve/kev/
+nday**, takeover, … or **ANY keyword** — coldfusion/elasticsearch/citrix all work via broad match), run
+`recon-mood <kw>` — it returns a ranked, scope+pays+not-benched worklist for that mood
+(→ `~/recon/briefings/mood_<kw>_<date>.md`); `recon-mood --list` shows the curated set. The mood only
+focuses WHERE you start — it does NOT cap the rigor. Within the mood run the **FULL /hunt flow at full
+depth**: ENUMERATE (subfinder/permutation/CT/jsintel), SCAN, CRAWL (katana/gau/params), pull as much from
+ES as needed, use **ANY tool available**, and EXHAUST each host across every angle + adjacent class —
+same uniqueness/freshness/confirm/impact-gate discipline as a normal hunt.
 
 The loop:
 0. PREFLIGHT — Mullvad up (`am.i.mullvad .mullvad_exit_ip==true`) + no `~/recon/state/vpn_down` (fail-closed).

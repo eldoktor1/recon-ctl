@@ -75,10 +75,15 @@ pending action / the operator steps away (so a comeback never loses the thread).
    `recon-params candidates --class both`); (b) **raw ES `recon_alive`**: pays + in-scope + not-ignored
    (`must_not ignore_expires_at>now`) + un-noted, ANY finding-worthy/suspicious signal (not one class),
    ranked by claude_worth/score. Or continue the current host/lane. Out of picks ⇒ re-query/widen/
-   regenerate, never stop. **MOOD HUNTING:** if the operator names a vuln-class/tech/lane
-   (`hunt xss`/`sqli`/`api`/`wordpress`/`php`/`jira`/`graphql`/…or ANY tech keyword), run
-   `recon-mood <kw>` → a ranked scope+pays+not-benched worklist for that mood
-   (`~/recon/briefings/mood_<kw>_<date>.md`); `recon-mood --list` for known moods (any keyword works).
+   regenerate, never stop. **MOOD HUNTING (a mood is a LENS, not a limit):** if the operator names a
+   vuln-class/tech/lane/signal (`hunt xss`/`sqli`/`api`/`wordpress`/`php`/`jira`/`graphql`/`cve`/`kev`/
+   `nday`/`takeover`/…or ANY keyword — coldfusion/elasticsearch/citrix all work via broad match), run
+   `recon-mood <kw>` → a ranked scope+pays+not-benched worklist (`~/recon/briefings/mood_<kw>_<date>.md`);
+   `recon-mood --list` shows the curated set. The mood only focuses WHERE you start — it does NOT cap the
+   rigor: within it run the FULL hunt at full depth (ENUMERATE subfinder/permutation/CT/jsintel, SCAN,
+   CRAWL katana/gau/params, pull as much from ES as needed, ANY tool available, EXHAUST each host across
+   every angle + adjacent class). `cve`/`kev` = `triage_kev_signal` matches → VERSION-REASON first (KEV
+   tech-class without confirmed in-range version = LEAD, never P0; run `recon-nday`; template-safety).
 2. **VERIFY BEFORE INVESTING** (a) PER-ASSET pays from `scope/raw/<platform>.json`, NOT program-level;
    (b) read host_notes + active ignores (don't re-walk); (c) check the program's OUT-OF-SCOPE rules
    (don't chase dir-listing / info-disclosure-without-impact = excludable). The 3 hard lessons.
