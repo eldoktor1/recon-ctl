@@ -2420,7 +2420,8 @@ usage() {
   printf "  ${G}recon-programs${R}                 Program summary from scope DB\n"
   printf "  ${G}recon-params${R} <class> [N]       Sus-params catalog by vuln class\n"
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
-  printf "  ${G}recon-params verify${R} <xss|sqli> [N]  Probe top N URLs — xss=canary reflection  sqli=DB errors\n\n"
+  printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
+  printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N]  Confirm — xss=dalfox(executes)  sqli=SAFE %s vs %s diff\n\n" "'" "''"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
   printf "  ${G}recon-ports${R} [N]               All hosts with open non-standard ports (from ES)\n"
@@ -2521,7 +2522,8 @@ case "${1:-}" in
       collect)  # manual one-shot: refill the queue then crawl a single job
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
-      verify)   shift; sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" verify "$@" ;;
+      candidates) shift; bash "$SCRIPT_DIR/recon_params.sh" candidates "$@" ;;
+      confirm|verify) shift; sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" confirm "$@" ;;
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;

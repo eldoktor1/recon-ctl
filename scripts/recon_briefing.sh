@@ -197,6 +197,20 @@ NOTED='[]'
 [[ -s "$NOTES_FILE" ]] && NOTED="$(jq -r '.host // empty, .root_domain // empty' "$NOTES_FILE" 2>/dev/null | sort -u | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
 [[ -n "$NOTED" ]] || NOTED='[]'
 
+# --- rs0n XSS/SQLi lane: regenerate today's ranked, dup-proof worklist (ES-only, read-only —
+# no target traffic, consistent with the briefing contract) and surface a pointer to the full
+# .md lists. The card just headlines the counts + top unique hosts; `recon-params candidates`
+# / the .md files hold the rest. Confirm with `recon-params confirm xss|sqli <host>`. ---
+XSS_CAND_LINE=""; SQLI_CAND_LINE=""; XSS_TOP=""; SQLI_TOP=""
+if [[ -f "$SCRIPT_DIR/recon_xss_sqli_candidates.py" ]]; then
+  cand_out="$(python3 "$SCRIPT_DIR/recon_xss_sqli_candidates.py" --class both --stamp "$today" 2>/dev/null || true)"
+  xf="$BRIEF_DIR/xss_candidates_$today.md"; sf="$BRIEF_DIR/sqli_candidates_$today.md"
+  XSS_CAND_LINE="$(printf '%s' "$cand_out" | grep -m1 '^\[xss\]' | sed 's/ → .*//')"
+  SQLI_CAND_LINE="$(printf '%s' "$cand_out" | grep -m1 '^\[sqli\]' | sed 's/ → .*//')"
+  [[ -f "$xf" ]] && XSS_TOP="$(awk '/^## TOP UNIQUE/{f=1;next} /^## /{f=0} f&&/^### /{print;n++} n>=4{exit}' "$xf" 2>/dev/null)"
+  [[ -f "$sf" ]] && SQLI_TOP="$(awk '/^## TOP UNIQUE/{f=1;next} /^## /{f=0} f&&/^### /{print;n++} n>=4{exit}' "$sf" 2>/dev/null)"
+fi
+
 # --- compile the card + durable .md ---
 md="$BRIEF_DIR/tonight_$today.md"
 {
@@ -215,6 +229,12 @@ md="$BRIEF_DIR/tonight_$today.md"
   if [[ "${nnday:-0}" -gt 0 ]]; then
     printf '\n\n## ⚡ n-day CVE candidates (version-reasoned) — %s\n' "$nnday"
     printf '%s' "$show_nday" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.host) — \(.cve // .endpoint // "?")\n- **why:** \(.why)\n- **verify:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  fi
+  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
+    printf '\n\n## 💉 XSS / SQLi lanes (rs0n — dup-proof, ranked)\n'
+    [[ -n "$XSS_CAND_LINE" ]]  && printf '**XSS** — %s · `xss_candidates_%s.md`\n%s\n'  "${XSS_CAND_LINE#\[xss\] }"  "$today" "$(printf '%s' "$XSS_TOP"  | sed 's/^/  /')"
+    [[ -n "$SQLI_CAND_LINE" ]] && printf '\n**SQLi** — %s · `sqli_candidates_%s.md`\n%s\n' "${SQLI_CAND_LINE#\[sqli\] }" "$today" "$(printf '%s' "$SQLI_TOP" | sed 's/^/  /')"
+    printf '_Confirm:_ `recon-params confirm xss <host>` _(dalfox, executes)_ · `recon-params confirm sqli <host>` _(SAFE diff)._\n'
   fi
   if [[ "${nheld:-0}" -gt 0 ]]; then
     printf '\n\n## 🟡 If time (medium dup-risk) — %s\n' "$nheld"
@@ -257,6 +277,12 @@ if [[ -n "$rh" ]]; then
     def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
     .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
+  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
+    card+="$(printf '\n\n💉 **XSS/SQLi lanes (rs0n):**')"
+    [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
+    [[ -n "$SQLI_CAND_LINE" ]] && card+="$(printf '\n• %s' "${SQLI_CAND_LINE#\[sqli\] }")"
+    card+="$(printf '\n_see xss/sqli_candidates_%s.md · confirm: recon-params confirm xss|sqli <host>_' "$today")"
+  fi
   card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
   [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }

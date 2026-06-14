@@ -26,6 +26,20 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   Output → `~/recon/briefings/idor_candidates_<date>.md`. Added 2026-06-13; research-grounded
   (IDOR in REST/GraphQL APIs = #1 paid class, the one automation can't confirm — so surface,
   rank, human-test). Still reasoning-only; NEVER enumerate third-party IDs (hard line).
+- **XSS/SQLi reflected-param lane** (`recon_xss_sqli_candidates.py` + `recon_params.sh confirm`) —
+  rs0n's "all XSS targets from HackerOne" idea made DUP-PROOF and multi-platform. The params catalog
+  (~18k XSS / ~3k SQLi in-scope+paying URLs across 5 platforms) is RANKED by param-name injectability
+  (the kxss insight — `q`/`redirect`/`callback` reflect; `id`/`cat`/numeric inject), handler/path signal
+  (`.php`/`/api/`), freshness + payout tier; deduped by (host, locale/id-normalized path, param-set)
+  template; and SPLIT into rare per-app UNIQUE lanes vs high-fan-out PRODUCT-CLASS dup-magnets (the `?q=` /
+  `_next/image?url=` everyone fuzzes). Drops wayback attack-capture noise (`%22`/FUZZ-flood paths). Output
+  → `~/recon/briefings/{xss,sqli}_candidates_<date>.md`, surfaced in the 6:30 briefing. CONFIRM on-demand
+  (`recon-params confirm xss|sqli <host>`): XSS via **dalfox** (context-aware — break-out must EXECUTE,
+  reflection≠XSS, killing the old canary-FP) rate-limited + mining-off; SQLi via the SAFE `'` vs `''`
+  differential (error + boolean length-diff). HARD LINE: never sqlmap / `--dump` / data-harvest / "large
+  traffic"; confirm is manual/on-demand only (never a daemon loop — dalfox fan-out would burn the egress).
+  Mass-XSS on saturated programs IS the dup trap (the MOTTO); the uniqueness-split + freshness-first +
+  real-PoC confirm is what keeps it an edge, not noise. Added 2026-06-14.
 - **n-day racing** (`recon_nday.sh`) — Claude version-reasons KEV/CVE matches to KILL the
   tech-class FP and surface only genuine in-range candidates, in the race window.
 - **GitHub leaks** (`recon_ghleaks.sh`) — code-search → trufflehog-verify live leaked
@@ -43,6 +57,13 @@ the in-scope + paying surface (always gated on `triage_in_scope` + per-asset pay
 anything in `recon_alive` that looks suspicious or could lead to a finding/report is on the table — every
 signal, every class. Make sense of all the ES chaos; never tunnel on a single lane/vuln-type. **EXHAUST EACH HOST: dig DEEP until all
 suspicion is gone and further investigation won't yield** — don't abandon a host early.
+**NO PREMATURE EXHAUSTION (doctrine 2026-06-14, emphatic — cost a real finding):** NEVER declare a host
+"burned/dead/exhausted/locked/no-bug" after a SURFACE-level pass, and NEVER push to wrap or pivot. A few
+negative probes (auth/WAF/404/SPA-catch-all) is NOT proof of absence — diamonds hide below the surface,
+behind the 2nd/3rd/5th angle, on the pre-prod host, in the endpoint/class you didn't try. When tempted to
+conclude, instead ENUMERATE the untested angles and go do them, broadly across ALL classes, over hours not
+minutes. "Haven't found it yet" ≠ "not there." Only the OPERATOR calls a target done; a host_note saying
+"clean" is a provisional checkpoint ("clean so far on X"), never a tombstone. See [[feedback_no_premature_exhaustion]].
 **RESUME CURSOR:** `~/recon/state/hunt_cursor.md` tracks the current host + pending actions; READ it on
 `hunt`/`/hunt resume` to pick up where we left off, and UPDATE it whenever you switch host / leave a
 pending action / the operator steps away (so a comeback never loses the thread).

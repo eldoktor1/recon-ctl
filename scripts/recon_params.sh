@@ -585,111 +585,147 @@ cmd_list() {
 }
 
 # ---------------------------------------------------------------------------
-cmd_verify() {
-  local cls="${1:-}" n="${2:-50}"
+# cmd_confirm — ON-DEMAND confirmation engine for the ranked XSS/SQLi worklist.
+#   confirm xss  [host] [N]   dalfox (context-aware: reflection ≠ XSS — break-out must
+#                             EXECUTE) on the host's / top-N catalog URLs.
+#   confirm sqli [host] [N]   SAFE ' vs '' DIFFERENTIAL (error-based + boolean length-diff).
+#                             HARD LINE: never sqlmap / never --dump / never a data harvest —
+#                             confirm the param is injectable, then STOP.
+# DOCTRINE: manual/on-demand ONLY (NOT a daemon loop — dalfox fans out many requests/URL,
+# which would burn the Mullvad egress and trip "no automated scanners" program rules).
+# Rate-limited (DALFOX_DELAY ms, 1 worker; per-probe jitter for sqli), Mullvad-gated,
+# param-set-deduped (test one rep per param-surface, not 44 category pages). Unauthenticated.
+DALFOX="${DALFOX:-$(command -v dalfox 2>/dev/null || echo "$GOBIN/dalfox")}"
+DALFOX_DELAY="${DALFOX_DELAY:-300}"     # ms between requests (anti-burn politeness)
+cmd_confirm() {
+  local cls="${1:-}"; shift 2>/dev/null || true
+  local host="" n="" a
+  for a in "$@"; do
+    if [[ "$a" =~ ^[0-9]+$ ]]; then n="$a"; else host="$a"; fi
+  done
   case "$cls" in
     xss|sqli) ;;
-    "")
-      printf 'usage: recon-params verify <xss|sqli> [N]\n' >&2
-      printf '  xss  — inject d0k_recon canary, check if param reflects it in response\n' >&2
-      printf '  sqli — inject '"'"''"'"' payload, check response for DB error signatures\n' >&2
-      exit 2
-      ;;
-    *) printf 'verify supports: xss sqli\n' >&2; exit 2 ;;
+    *) printf 'usage: recon-params confirm <xss|sqli> [host] [N]\n' >&2
+       printf '  xss  — dalfox context-aware (break-out must EXECUTE, not merely reflect)\n' >&2
+       printf '  sqli — SAFE %s vs %s differential (NEVER dumps data / never sqlmap)\n' "'" "''" >&2
+       exit 2 ;;
   esac
-  [[ "$n" =~ ^[0-9]+$ ]] || n=50
+  [[ -z "$n" ]] && { [[ -n "$host" ]] && n=40 || n=30; }
 
-  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping verify"; exit 0; }
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping confirm"; exit 0; }
   es_up || { warn "ES not reachable"; exit 1; }
   [[ -x "$QSREPLACE" ]] || { warn "qsreplace not found: $QSREPLACE"; exit 1; }
 
+  # pull catalog URLs for the class (paying only, freshest first), optional host filter.
+  local host_clause=""
+  [[ -n "$host" ]] && host_clause=",{\"term\":{\"host\":\"$host\"}}"
   local resp
-  # scope discipline: only probe PAYING catalog targets (payout_tier != none), freshest first
   resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$PARAMS_INDEX/_search" -d "{
-    \"size\": $n,
-    \"_source\": [\"url\",\"program\",\"payout_tier\",\"true_fresh\"],
-    \"query\": {\"bool\": {\"filter\": [{\"term\": {\"vuln_classes\": \"$cls\"}}],
-                          \"must_not\": [{\"term\": {\"payout_tier\": \"none\"}}]}},
+    \"size\": $(( n * 6 )),
+    \"_source\": [\"url\",\"host\",\"program\",\"payout_tier\",\"true_fresh\"],
+    \"query\": {\"bool\": {\"filter\": [{\"term\": {\"vuln_classes\": \"$cls\"}}$host_clause],
+                          \"must_not\": [{\"term\": {\"payout_tier\": \"none\"}},{\"term\":{\"live_status\":\"dead\"}}]}},
     \"sort\": [{\"true_fresh\": {\"order\": \"desc\"}}, {\"cataloged_at\": {\"order\": \"desc\"}}]
   }" 2>/dev/null)"
-
+  if printf '%s' "$resp" | jq -e '.error' >/dev/null 2>&1; then
+    warn "confirm: ES error: $(printf '%s' "$resp" | jq -r '.error.root_cause[0].reason // .error.reason' 2>/dev/null)"; exit 1
+  fi
   local total; total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0' 2>/dev/null)"
+
   local WORK; WORK="$(mktemp -d)"; trap '[[ -n "${WORK:-}" ]] && rm -rf "$WORK"' EXIT
   printf '%s' "$resp" \
-    | jq -r '.hits.hits[]?._source | [.url, (.program//"?"), (.payout_tier//"?"), (if .true_fresh then "FRESH" else "" end)] | @tsv' \
-    2>/dev/null > "$WORK/urls.tsv"
+    | jq -r '.hits.hits[]?._source | [.url,(.program//"?"),(.payout_tier//"?"),(if .true_fresh then "FRESH" else "" end)] | @tsv' \
+    2>/dev/null > "$WORK/raw.tsv"
 
+  # param-set dedup: collapse N category pages sharing the same param surface to one rep
+  # (numeric path-IDs normalized), so confirm tests the surface once. Mirrors the ranker.
+  python3 - "$WORK/raw.tsv" > "$WORK/urls.tsv" <<'PY'
+import sys, re
+from urllib.parse import urlsplit, parse_qsl
+seen=set()
+for line in open(sys.argv[1]):
+    parts=line.rstrip("\n").split("\t")
+    if not parts or not parts[0]: continue
+    sp=urlsplit(parts[0])
+    names=frozenset(k.lower() for k,_ in parse_qsl(sp.query))
+    if not names: continue
+    key=(sp.netloc, re.sub(r"/\d{2,}","/{id}",sp.path), names)
+    if key in seen: continue
+    seen.add(key); sys.stdout.write(line)
+PY
+  head -n "$n" "$WORK/urls.tsv" > "$WORK/urls.head.tsv" && mv "$WORK/urls.head.tsv" "$WORK/urls.tsv"
+  cut -f1 "$WORK/urls.tsv" > "$WORK/urls.txt"
   local url_count; url_count="$(wc -l < "$WORK/urls.tsv" | tr -d ' ')"
-  if [[ "$url_count" -eq 0 ]]; then
-    log "verify($cls): no URLs in catalog — run collect first"
-    exit 0
-  fi
-  log "verify($cls): probing $url_count / $total catalog entries"
+  [[ "${url_count:-0}" -gt 0 ]] || { log "confirm($cls): no catalog URLs${host:+ for $host} — run collect first"; exit 0; }
+  log "confirm($cls): ${url_count} deduped param-surfaces${host:+ on $host} (of $total catalog URLs)"
 
-  local canary="d0kxss"
-  local sqli_re='SQL syntax|mysql_num_rows|ORA-[0-9]+|SQLSTATE|You have an error in your SQL|Microsoft OLE DB|ODBC SQL Server|Warning.*mysql_|Unclosed quotation mark|quoted string not properly terminated|pg_query\(\)|supplied argument is not a valid MySQL'
+  local out_file="$PARAMS_DIR/confirm_${cls}.jsonl"; mkdir -p "$PARAMS_DIR"
   local ua='Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0'
-  local out_file="$PARAMS_DIR/verify_${cls}.jsonl"
-  mkdir -p "$PARAMS_DIR"
 
+  if [[ "$cls" == "xss" ]]; then
+    [[ -x "$DALFOX" ]] || { warn "dalfox not found ($DALFOX) — install it; no naive-canary fallback (it mislabels reflection as confirmed)"; exit 1; }
+    log "confirm(xss): dalfox, ${DALFOX_DELAY}ms delay, 1 worker, GET-only, mining off (polite)"
+    # dalfox pipe: test ONLY the given params (--skip-mining-all), no basic-other-vuln
+    # noise (--skip-bav), GET, rate-limited. --silence prints only PoCs. A [POC] line =
+    # dalfox VERIFIED the payload reflects executably (its own headless check), not bare
+    # reflection — this is the real confirmation the old canary check lacked.
+    "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all \
+      --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" \
+      --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.out" || true
+    local pocs; pocs="$(grep -cE '\[POC\]' "$WORK/dalfox.out" 2>/dev/null || echo 0)"
+    if [[ "${pocs:-0}" -gt 0 ]]; then
+      grep -E '\[POC\]' "$WORK/dalfox.out" | while IFS= read -r poc; do
+        jq -nc --arg p "$poc" --arg c xss --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+          '{poc:$p, class:$c, confirmed:true, engine:"dalfox", confirmed_at:$ts}' >> "$out_file" 2>/dev/null || true
+      done
+    fi
+    printf -- '--- confirm(xss): %s dalfox PoC(s) / %s surfaces probed ---\n' "$pocs" "$url_count" >&2
+    [[ "${pocs:-0}" -gt 0 ]] && printf '    saved → %s  (CLAUDE VERIFY before any report)\n' "$out_file" >&2
+    return 0
+  fi
+
+  # ---- SQLi: SAFE ' vs '' differential (doctrine: injectable-or-not, never a harvest) ----
+  local sqli_re='SQL syntax|mysql_num_rows|ORA-[0-9]+|SQLSTATE|You have an error in your SQL|Microsoft OLE DB|ODBC SQL Server|Warning.*mysql_|Unclosed quotation mark|quoted string not properly terminated|pg_query\(\)|supplied argument is not a valid MySQL|PostgreSQL.*ERROR|SQLite/JDBCDriver|valid PostgreSQL result'
   local hits=0 checked=0
   while IFS=$'\t' read -r url program tier fresh_tag; do
     [[ -z "$url" ]] && continue
     checked=$((checked+1))
-
-    local probe_url payload
-    case "$cls" in
-      # PHASE 4 — XSS must BREAK OUT of context, not merely reflect. Inject a
-      # payload that closes common contexts and opens a UNIQUE tag <d0kxss>. If
-      # that tag survives UNENCODED in the response it is an executable HTML
-      # injection (CONFIRMED). If only the bare marker reflects (angle brackets
-      # entity-encoded), it is reflected-not-exploitable (LEAD, never CONFIRMED).
-      xss)  payload="'\"></script><${canary}>"
-            probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "$payload" 2>/dev/null)" ;;
-      sqli) probe_url="$(printf '%s\n' "$url" | "$QSREPLACE" "'" 2>/dev/null)" ;;
-    esac
-    [[ -z "$probe_url" ]] && continue
-
-    # anti-burn: min-gap + jitter between probes so the single Mullvad egress IP isn't
-    # hammered (the loop spans many hosts; this keeps the aggregate request rate polite).
-    sleep "0.$(( RANDOM % 6 + 2 ))"
-
-    local body
-    body="$(curl -sS -m10 -k -L --max-redirs 2 -A "$ua" "$probe_url" 2>/dev/null | head -c 65536)"
-
-    local hit=0 status="confirmed"
-    case "$cls" in
-      xss)
-        if printf '%s' "$body" | grep -qiF "<${canary}>"; then hit=1; status="confirmed"
-        elif printf '%s' "$body" | grep -qiF "$canary"; then hit=1; status="reflected-not-exploitable"
-        fi ;;
-      sqli) printf '%s' "$body" | grep -qiE "$sqli_re" && hit=1 ;;
-    esac
-
-    if [[ "$hit" -eq 1 ]]; then
-      local label
-      if [[ "$status" == "confirmed" ]]; then
-        hits=$((hits+1)); label="[${cls^^} CONFIRMED]"
-      else
-        # LEAD — reflected but break-out chars were encoded; not exploitable, not counted
-        label="[${cls^^} reflected-not-exploitable]"
+    # set ALL param values to a numeric baseline, then a single-quote inject, then an
+    # escaped (doubled) control. Error on inject but NOT on control, or a length swing
+    # back to baseline on control = the quote reached SQL = injectable (SAFE: 3 GETs, no data).
+    local u_base u_inj u_ctl
+    u_base="$(printf '%s\n' "$url" | "$QSREPLACE" "1"   2>/dev/null)"
+    u_inj="$( printf '%s\n' "$url" | "$QSREPLACE" "1'"  2>/dev/null)"
+    u_ctl="$( printf '%s\n' "$url" | "$QSREPLACE" "1''" 2>/dev/null)"
+    [[ -z "$u_inj" ]] && continue
+    sleep "0.$(( RANDOM % 6 + 3 ))"
+    local b_base b_inj b_ctl
+    b_base="$(curl -sS -m10 -k -A "$ua" "$u_base" 2>/dev/null | head -c 200000)"
+    b_inj="$( curl -sS -m10 -k -A "$ua" "$u_inj"  2>/dev/null | head -c 200000)"
+    b_ctl="$( curl -sS -m10 -k -A "$ua" "$u_ctl"  2>/dev/null | head -c 200000)"
+    local status=""
+    if printf '%s' "$b_inj" | grep -qiE "$sqli_re" && ! printf '%s' "$b_base" | grep -qiE "$sqli_re"; then
+      status="error-based"
+    else
+      # boolean/length differential: inject differs from baseline, control returns to baseline
+      local lb li lc; lb="${#b_base}"; li="${#b_inj}"; lc="${#b_ctl}"
+      local d_bi=$(( li>lb ? li-lb : lb-li )); local d_bc=$(( lc>lb ? lc-lb : lb-lc ))
+      # significant swing on ' (>500 bytes & >2%) that the '' control recovers from
+      if (( d_bi > 500 )) && (( d_bi * 50 > lb )) && (( d_bc * 4 < d_bi )); then
+        status="boolean-diff"
       fi
-      [[ "$fresh_tag" == "FRESH" ]] && label="$label [FRESH]"
-      printf '%s  %s [%s]  %s\n' "$label" "$program" "$tier" "$probe_url"
-      jq -nc --arg u "$url" --arg p "$probe_url" --arg c "$cls" \
-             --arg pr "$program" --arg ti "$tier" --arg fr "$fresh_tag" \
-             --arg st "$status" \
-             --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-        '{url:$u, probe_url:$p, class:$c, program:$pr, tier:$ti, fresh:($fr=="FRESH"), status:$st, confirmed:($st=="confirmed"), confirmed_at:$ts}' \
+    fi
+    if [[ -n "$status" ]]; then
+      hits=$((hits+1))
+      printf '[SQLI %s]  %s [%s]  %s\n' "$status" "$program" "$tier" "$u_inj"
+      jq -nc --arg u "$url" --arg p "$u_inj" --arg c sqli --arg pr "$program" --arg ti "$tier" \
+             --arg fr "$fresh_tag" --arg st "$status" --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        '{url:$u, probe_url:$p, class:$c, program:$pr, tier:$ti, fresh:($fr=="FRESH"), status:$st, confirmed:true, method:"safe-differential", confirmed_at:$ts}' \
         >> "$out_file" 2>/dev/null || true
     fi
-
-    sleep 0.3
   done < "$WORK/urls.tsv"
-
-  printf -- '--- verify(%s): %s confirmed / %s probed  (catalog total: %s) ---\n' \
-    "$cls" "$hits" "$checked" "$total" >&2
-  [[ "$hits" -gt 0 ]] && printf '    saved → %s\n' "$out_file" >&2
+  printf -- '--- confirm(sqli): %s injectable / %s probed (SAFE diff; never a data harvest) ---\n' "$hits" "$checked" >&2
+  [[ "$hits" -gt 0 ]] && printf '    saved → %s  (CLAUDE VERIFY before any report)\n' "$out_file" >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -777,11 +813,12 @@ cmd_verify_live() {
 cmd_collect() { bash "$0" enqueue || true; bash "$0" crawl || true; }
 
 case "${1:-}" in
-  enqueue)     shift; cmd_enqueue "$@" ;;
-  crawl)       shift; cmd_crawl "$@" ;;
-  collect)     shift; cmd_collect "$@" ;;
-  verify-live) shift; cmd_verify_live "$@" ;;
-  list)        shift; cmd_list "$@" ;;
-  verify)      shift; cmd_verify "$@" ;;
-  *) echo "usage: recon_params.sh {enqueue | crawl | collect | verify-live | list <class> [N] | verify <xss|sqli> [N]}" >&2; exit 2 ;;
+  enqueue)        shift; cmd_enqueue "$@" ;;
+  crawl)          shift; cmd_crawl "$@" ;;
+  collect)        shift; cmd_collect "$@" ;;
+  verify-live)    shift; cmd_verify_live "$@" ;;
+  list)           shift; cmd_list "$@" ;;
+  confirm|verify) shift; cmd_confirm "$@" ;;   # verify = back-compat alias for confirm
+  candidates)     shift; exec python3 "$SCRIPT_DIR/recon_xss_sqli_candidates.py" "$@" ;;
+  *) echo "usage: recon_params.sh {enqueue | crawl | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
 esac
