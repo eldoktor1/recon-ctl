@@ -68,21 +68,35 @@ minutes. "Haven't found it yet" ≠ "not there." Only the OPERATOR calls a targe
 `hunt`/`/hunt resume` to pick up where we left off, and UPDATE it whenever you switch host / leave a
 pending action / the operator steps away (so a comeback never loses the thread).
 0. **PREFLIGHT** Mullvad up + no `state/vpn_down` (fail-closed).
-1. **PICK (autonomous)** ES `recon_alive`: pays + in-scope + not-ignored (`must_not ignore_expires_at>now`)
-   + un-noted, ANY finding-worthy/suspicious signal (not one class), ranked by claude_worth/score; or
-   continue the current host/lane. Out of hosts ⇒ re-query/widen, never stop.
+1. **PICK (autonomous)** from TWO sources, together: (a) **pre-ranked BRIEFINGS in `~/recon/briefings/`**
+   — already scope/pays/dedup-filtered, highest signal-per-minute, START here: `2IC_tonight_<date>.md`,
+   `idor_candidates_<date>.md`, `xss_candidates_<date>.md` + `sqli_candidates_<date>.md` (rs0n lane; TOP
+   UNIQUE first, skip PRODUCT-CLASS), `tonight_<date>.md` (stale/missing ⇒ regenerate ES-only:
+   `recon-params candidates --class both`); (b) **raw ES `recon_alive`**: pays + in-scope + not-ignored
+   (`must_not ignore_expires_at>now`) + un-noted, ANY finding-worthy/suspicious signal (not one class),
+   ranked by claude_worth/score. Or continue the current host/lane. Out of picks ⇒ re-query/widen/
+   regenerate, never stop.
 2. **VERIFY BEFORE INVESTING** (a) PER-ASSET pays from `scope/raw/<platform>.json`, NOT program-level;
    (b) read host_notes + active ignores (don't re-walk); (c) check the program's OUT-OF-SCOPE rules
    (don't chase dir-listing / info-disclosure-without-impact = excludable). The 3 hard lessons.
 3. **PROBE** operator runs target traffic — I give ONE copy-paste at a time (lead with my read +
-   the decision), they paste, I hand the next. I run recon/scope/ES/notes/jsintel myself.
+   the decision), they paste, I hand the next. I run recon/scope/ES/notes/jsintel/candidates myself.
+   For an XSS/SQLi lead hand the CONFIRM cmd: `recon-params confirm xss <host>` (dalfox — must EXECUTE)
+   / `recon-params confirm sqli <host>` (SAFE `'` vs `''` diff). I read the result.
 4. **TRIAGE & EXHAUST** CONFIRMED vs LEAD vs FP/dead; honest severity, never overclaim. Keep probing
    the SAME host across every angle until all suspicion is exhausted (more probing won't yield) —
    only then move on.
 5. **NOTE EVERYTHING inline** FP/skip/disqualified/noise (clusters ⇒ 2-3 reps + class-reason). Mandatory.
 6. **LANE-MINE** fertile lane (actuator/swagger spec; source-maps→cloud-creds; unauth-GraphQL introspection;
-   open buckets; n-day; …) ⇒ keep mining fresh hosts; tapped ⇒ pivot/re-query ES. Lanes are examples,
-   not limits — chase whatever the ES signal suggests.
+   open buckets; n-day; **XSS/SQLi reflected-param**; …) ⇒ keep mining fresh hosts; tapped ⇒ pivot/re-query.
+   Lanes are examples, not limits — chase whatever the signal suggests.
+   **XSS/SQLi — SMART, not blind:** work the ranked `xss/sqli_candidates` worklist, **TOP UNIQUE LANES first**
+   (rare per-app params/deep routes), SKIP PRODUCT-CLASS (`?q=`/`_next/image?url=` dup-magnets), prefer ⚡
+   true_fresh (be first). CONFIRM is the gate, not reflection: dalfox must show EXECUTION (reflection ≠ XSS —
+   encoded/framework-safe ⇒ `reflected-not-exploitable` LEAD, move on); SQLi needs the `'`vs`''` differential
+   (never sqlmap/--dump/harvest). IMPACT-GATE: only a DEMONSTRATED executing XSS / injectable SQLi —
+   theoretical/no-impact (CORS, headers, self-XSS, error-only) gets N/A, don't burn the evening on it
+   ([[feedback_theoretical_classes_get_declined]]).
 7. **ANTI-BURN** respect 429/403/rate-limits; back off; never get the Mullvad exit banned.
 8. **AUTHED / ACCOUNT-SIGNUP ⇒ ASK FIRST** when a lead needs account signup / authed testing, ASK the
    operator "work it now or save for later?" (don't auto-proceed or auto-defer). If now: hand a
