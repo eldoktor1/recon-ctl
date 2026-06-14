@@ -88,7 +88,8 @@ apply_screenshot_mapping() {
         "screenshot_h":         {"type": "integer"},
         "screenshot_error":     {"type": "keyword", "ignore_above": 256},
         "screenshot_engine":    {"type": "keyword"},
-        "screenshot_thumb_b64": {"type": "binary", "doc_values": false, "store": false}
+        "screenshot_thumb_b64": {"type": "binary", "doc_values": false, "store": false},
+        "screenshot_thumb_img": {"type": "keyword", "index": false, "doc_values": false}
       }
     }' >/dev/null
   log "applied screenshot_* mapping"

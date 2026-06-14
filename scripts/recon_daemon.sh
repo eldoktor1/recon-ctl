@@ -543,6 +543,17 @@ AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# ---- Claude-Max VISION agent (recon_ai_vision.sh) --------------------------
+# Headless Claude (Haiku, vision) looks at each captured SCREENSHOT and classifies
+# what is actually on screen (unauth-panel / install-setup / error-disclosure /
+# login-wall / app-content / ...), surfacing the exposed-panel + misconfig money
+# that metadata-only ANALYZE is blind to; worth+probeable hits become evidence-gate
+# candidates (feeds verify). Token-frugal: thumb-only, haiku, TTL. Not target-facing
+# (reasons over stored thumbnails). Runs as d0k (Claude auth per-user).
+AI_VISION_SCRIPT="${AI_VISION_SCRIPT:-$(script_path recon_ai_vision.sh)}"
+AI_VISION_INTERVAL="${AI_VISION_INTERVAL:-3600}"
+run_ai_vision() { [[ -f "$AI_VISION_SCRIPT" ]] && bash "$AI_VISION_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- UNIQUE pillars (v3.7): go where the crowd doesn't ----------------------
 # recon_jsintel  — mine each host's JS for the HIDDEN API surface + verify LIVE secrets
 #                  (trufflehog). Target-facing -> d0k, VPN-gated. Writes endpoint feedstock.
@@ -687,6 +698,7 @@ run_discord_bot() {
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
+  supervise_loop "ai-vision"      "AI_VISION_INTERVAL"     run_ai_vision      &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &

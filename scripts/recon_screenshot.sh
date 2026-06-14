@@ -58,6 +58,7 @@ SHOT_SETTLE_MS="${SHOT_SETTLE_MS:-2000}"            # post-load idle before capt
 SHOT_CHALLENGE_WAIT_MS="${SHOT_CHALLENGE_WAIT_MS:-12000}"  # patience for a JS bot-challenge
 SHOT_PER_HOST_BUDGET="${SHOT_PER_HOST_BUDGET:-75}"  # wall-clock s (headed + challenge-wait + 1 retry)
 SHOT_BACKFILL_LIMIT="${SHOT_BACKFILL_LIMIT:-200}"   # `backfill` mode batch size
+SHOT_GALLERY_CAP="${SHOT_GALLERY_CAP:-5000}"        # max thumbs rendered into the HTML gallery
 
 # ── Anti-bot launch posture ──────────────────────────────────────────────────
 # Run the browser HEADED on a virtual display — headless detection is the single
@@ -106,9 +107,10 @@ print((datetime.utcnow()-timedelta(hours=${SHOT_COOLDOWN_HOURS})).strftime('%Y-%
 # Pulls every host with a screenshot_thumb_b64 + screenshot_status=ok and
 # writes a single static index.html that previews each thumb (inline data
 # URLs — no extra files to serve, opens cleanly in Windows Explorer).
-# Capped at 1000 to keep render under a second; "ok only" by default.
+# Capped at SHOT_GALLERY_CAP (default 5000) to keep render bounded; "ok only" by
+# default. Thumbs are inline base64, so very large caps make a heavy HTML file.
 gallery_render() {
-  local cap="${1:-1000}"
+  local cap="${1:-${SHOT_GALLERY_CAP:-5000}}"
   local out="$SCREENSHOT_DIR/index.html"
   local resp
   resp="$(es_curl -H 'Content-Type: application/json' \
@@ -300,6 +302,7 @@ es_update_from_json() {
       screenshot_w:         ($j.screenshot_w // 0),
       screenshot_h:         ($j.screenshot_h // 0),
       screenshot_thumb_b64: ($j.screenshot_thumb_b64 // null),
+      screenshot_thumb_img: ($j.screenshot_thumb_img // null),
       screenshot_engine:    ($j.screenshot_engine // ""),
       screenshot_error:     ($j.error // "")
     }
@@ -358,14 +361,14 @@ case "$MODE" in
     log "reprocess: cap=$cap (re-shoot prior blocked/timeout/blank with current worker, ignoring cooldown)"
     ;;
   gallery)
-    gallery_render "${2:-1000}"
+    gallery_render "${2:-${SHOT_GALLERY_CAP:-5000}}"
     exit 0
     ;;
   test)
     host="${2:?usage: recon_screenshot.sh test <host>}"
     log "test: single host = $host"
     shoot_one "$host"
-    gallery_render 1000
+    gallery_render "${SHOT_GALLERY_CAP:-5000}"
     exit 0
     ;;
   *)
@@ -390,7 +393,7 @@ resp="$(es_curl -H 'Content-Type: application/json' \
 total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0')"
 got="$(printf '%s' "$resp" | jq -r '.hits.hits | length')"
 log "candidates matched: total_in_es=$total, returning=$got"
-[[ "$got" -eq 0 ]] && { log "nothing to capture this cycle"; gallery_render 1000; exit 0; }
+[[ "$got" -eq 0 ]] && { log "nothing to capture this cycle"; gallery_render "${SHOT_GALLERY_CAP:-5000}"; exit 0; }
 
 ok_n=0; blk_n=0; fail_n=0
 while IFS= read -r host; do
@@ -412,4 +415,4 @@ es_curl -X POST "$ES_URL/$INDEX_NAME/_refresh" > /dev/null 2>&1 || true
 
 log "=== cycle done: ok=$ok_n blocked=$blk_n failed=$fail_n ==="
 
-gallery_render 1000
+gallery_render "${SHOT_GALLERY_CAP:-5000}"

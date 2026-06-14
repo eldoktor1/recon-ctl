@@ -36,7 +36,8 @@
 #                          blocked = genuine bot-challenge interstitial
 #                          blank   = page rendered but near-empty (no content/title)
 #   screenshot_path      absolute path of the full-size JPEG on disk
-#   screenshot_thumb_b64 200x150 JPEG re-encoded as base64 (for ES binary field)
+#   screenshot_thumb_b64 200x150 JPEG re-encoded as base64 (ES binary field; gallery)
+#   screenshot_thumb_img same base64 in a string field Kibana can render inline
 #   screenshot_title     <title> of the final page (truncated 200 chars)
 #   screenshot_w / _h    captured viewport dimensions
 #   screenshot_engine    chrome-headed | chrome-headless | chromium-headed | chromium-headless
@@ -315,6 +316,7 @@ def capture(
         "screenshot_status": "failed",
         "screenshot_path": "",
         "screenshot_thumb_b64": "",
+        "screenshot_thumb_img": "",
         "screenshot_title": "",
         "screenshot_w": 0,
         "screenshot_h": 0,
@@ -380,6 +382,9 @@ def capture(
             im.save(disk_path, format="JPEG", quality=78, optimize=True)
         result["screenshot_path"] = str(disk_path)
         result["screenshot_thumb_b64"] = _make_thumb_b64(png_bytes)
+        # Same base64, but in a string-typed field Kibana can render inline (the
+        # binary thumb_b64 cannot be formatted). Powers the Discover image column.
+        result["screenshot_thumb_img"] = result["screenshot_thumb_b64"]
     except Exception as e:
         result["screenshot_status"] = "failed"
         result["error"] = f"encode error: {type(e).__name__}: {e}"[:200]
