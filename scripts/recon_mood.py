@@ -61,12 +61,18 @@ HOST_LANE={
 # `boost` floats hosts carrying that signal to the front of the rank.
 SIGNAL={
  "cve":  {"filter":[{"exists":{"field":"triage_kev_signal"}}], "boost":"cap:p0-candidate-ungated",
-          "hint":"KEV/CVE tech matches (triage_kev_signal = the matched stack). VERSION-REASON FIRST: a "
-                 "KEV tech-class match WITHOUT a confirmed in-range version is a LEAD, never P0 (the "
-                 "documented FP — clamped by cap:kev-unverified-no-p0; cap:p0-candidate-ungated = higher "
-                 "confidence, floated up). Run `recon-nday` for version-reasoned candidates; confirm the "
-                 "RUNNING version; template-safety (OOB-canary / read-only matchers only — never "
-                 "metadata-harvest / file-read / RCE-for-harm)."},
+          "hint":"KEV/CVE tech matches (triage_kev_signal = matched stack; triage_kev_cves = the CVE IDs). "
+                 "FOLLOW EVERY SYSTEM DOCTRINE — this lane is LEAD-by-default:\n"
+                 "  • CONFIRMED-vs-LEAD: a KEV tech-class match WITHOUT a confirmed in-range RUNNING version "
+                 "is a LEAD, NEVER P0 (the documented FP; cap:kev-unverified-no-p0 = clamped LEAD, "
+                 "cap:p0-candidate-ungated = higher-confidence, floated up). [P0-cand]/[LEAD] tagged per row.\n"
+                 "  • DOCTRINE CONFIRM PATH = `recon-nday` (Claude version-reasons each host to KILL the "
+                 "tech-class FP + emits read-only confirm_signal paths → the 6:30 briefing). Don't hand-verify; "
+                 "run the engine.\n"
+                 "  • TEMPLATE-SAFETY: read any nuclei/PoC template BODY first; run ONLY OOB-canary / "
+                 "read-only-matcher templates; NEVER metadata-harvest / file-read / RCE-for-harm (hard line).\n"
+                 "  • SCOPE/PAYS/OOS gated + benched/noted excluded already; ANTI-BURN (rate-limit, no ban); "
+                 "RECON-NOT-ATTACK (prove it responds, never exploit past it); HONEST SEVERITY on report."},
  "takeover":{"filter":[{"bool":{"should":[{"term":{"triage_classes":"takeover-lead"}},
               {"term":{"triage_classes":"takeover"}},{"prefix":{"triage_signals":"takeover:"}}],
               "minimum_should_match":1}}], "boost":"takeover:confirmed",
@@ -102,7 +108,8 @@ SCOPE_MUSTNOT=[{"term":{"triage_out_of_scope":True}},{"term":{"triage_ignored":T
 def alive_query(qfilter, qshould=None, pool=500):
     body={"size":pool,
       "_source":["host","root_domain","triage_program","triage_payout_tier","triage_score",
-                 "triage_true_fresh","tech","triage_classes","triage_signals","triage_kev_signal","host_notes_count"],
+                 "triage_true_fresh","tech","triage_classes","triage_signals","triage_kev_signal",
+                 "triage_kev_cves","claude_worth","claude_suggested_class","triage_priority","host_notes_count"],
       "query":{"bool":{"filter":SCOPE_FILTER+qfilter,"must_not":SCOPE_MUSTNOT}},
       "sort":[{"triage_score":{"order":"desc","missing":"_last"}},
               {"triage_true_fresh":{"order":"desc","missing":"_last"}}]}
@@ -121,10 +128,13 @@ def rank_alive(hits, noted, top, boost=None):
         signals=s.get("triage_signals") or []
         rank=score*(TIERW.get(tier,0.5)+1)*(1.5 if fresh else 1)
         if boost and boost in signals: rank*=2.5      # float hosts carrying the boost signal up
+        cves=s.get("triage_kev_cves") or []
+        if isinstance(cves,str): cves=[cves]
         rows.append({"host":s.get("host",""),"root":s.get("root_domain",""),
                      "program":s.get("triage_program","?"),"tier":tier,"score":score,"fresh":fresh,
                      "tech":s.get("tech") or [],"classes":s.get("triage_classes") or [],
-                     "signals":signals,"kev":s.get("triage_kev_signal") or "",
+                     "signals":signals,"kev":s.get("triage_kev_signal") or "","cves":cves,
+                     "worth":s.get("claude_worth"),"suggested":s.get("claude_suggested_class") or "",
                      "noted":bool((s.get("host_notes_count") or 0)) or s.get("host") in noted or s.get("root_domain") in noted,
                      "rank":rank})
     rows.sort(key=lambda r:-r["rank"])
@@ -150,8 +160,12 @@ def write_alive_report(mood, kind, hint, rows, total, stamp, top):
     for r in rows:
         fr="⚡" if r["fresh"] else "  "
         nt=" 📝" if r["noted"] else ""
-        ctx=r.get("kev") or fmt_list(r["classes"]) or fmt_list(r["tech"]) or fmt_list(r["signals"])
-        L.append(f"{fr}[{r['tier']}] `{r['host']}`{nt}  score={r['score']}  ({r['program']})"+(f"  · {ctx}" if ctx else ""))
+        tag=""
+        if r.get("kev"):  # CVE/KEV lane: tag LEAD vs P0-candidate per doctrine
+            tag="[P0-cand] " if "cap:p0-candidate-ungated" in r.get("signals",[]) else "[LEAD·verify-version] "
+        ctx=(" ".join(filter(None,[r.get("kev"), ",".join(r.get("cves",[])[:3])])) if r.get("kev")
+             else (r.get("suggested") or fmt_list(r["classes"]) or fmt_list(r["tech"]) or fmt_list(r["signals"])))
+        L.append(f"{fr}[{r['tier']}] {tag}`{r['host']}`{nt}  score={r['score']}  ({r['program']})"+(f"  · {ctx}" if ctx else ""))
     open(outp,"w").write("\n".join(L)+"\n")
     return outp
 
@@ -183,6 +197,72 @@ def do_params_catalog(mood, top, stamp):
         print(f"   [{s.get('payout_tier','?')}] {s.get('url','')[:95]}")
     return outp
 
+# "interesting" lane: high-value/anomalous classes worth a look even without a clean single class.
+INTERESTING_BOOST={"data-leak":10,"info-disclosure":7,"takeover-lead":6,"admin-surface":4,
+  "scm-surface":4,"devops-surface":3,"storage-surface":3,"observability-surface":3,
+  "edge-access-surface":3,"rce":5,"plugin-rce":4,"injection":4,"sqli":4,"api-surface":2}
+INTERESTING_ALIASES={"interesting","interest","fun","anomaly","weird","spicy","misc","grab-bag","wtf"}
+
+def do_interesting(top, stamp, noted):
+    # surface hosts Claude flagged worth (claude_worth/claude_suggested_class) OR carrying a rare
+    # high-value class OR an ungated P0-candidate — ranked by composite "interestingness", not one class.
+    should=[{"exists":{"field":"claude_worth"}},{"exists":{"field":"claude_suggested_class"}},
+            {"term":{"triage_signals":"cap:p0-candidate-ungated"}}]+\
+           [{"term":{"triage_classes":c}} for c in INTERESTING_BOOST]
+    body={"size":800,
+      "_source":["host","root_domain","triage_program","triage_payout_tier","triage_score",
+                 "triage_true_fresh","tech","triage_classes","triage_signals","triage_kev_signal",
+                 "triage_kev_cves","claude_worth","claude_suggested_class","triage_priority","host_notes_count"],
+      "query":{"bool":{"filter":SCOPE_FILTER,
+        "must_not":SCOPE_MUSTNOT+[{"term":{"triage_signals":"penalty:cdn-no-tech"}},
+                                  {"term":{"triage_signals":"penalty:default-page"}},
+                                  {"term":{"triage_signals":"penalty:redirect-no-tech"}}],
+        "should":should,"minimum_should_match":1}},
+      "sort":[{"claude_worth":{"order":"desc","missing":"_last"}},
+              {"triage_score":{"order":"desc","missing":"_last"}}]}
+    r=es(ALIVE,body)
+    if r.get("_err") or r.get("error"):
+        print("ES error:",r.get("_err") or r.get("error")); return 1
+    rows,_=rank_alive(r.get("hits",{}).get("hits",[]),noted,10**9)  # rank all, cap later
+    total=len(rows)
+    # interestingness: claude_worth + score + rare-class boosts + signal-richness + fresh
+    def interest(rr):
+        w=rr.get("worth") or 0
+        try: w=float(w)
+        except: w=0
+        b=sum(INTERESTING_BOOST.get(c,0) for c in rr["classes"])
+        if "cap:p0-candidate-ungated" in rr["signals"]: b+=6
+        rich=len(set(rr["classes"]))+len(set(rr["signals"]))//3
+        sc=(w*2)+rr["score"]+b+rich
+        return sc*(1.5 if rr["fresh"] else 1)
+    for rr in rows: rr["rank"]=interest(rr)
+    rows.sort(key=lambda x:-x["rank"])
+    # root diversity
+    seen=collections.Counter(); out=[]
+    for rr in rows:
+        if seen[rr["root"]]>=4: continue
+        seen[rr["root"]]+=1; out.append(rr)
+        if len(out)>=top: break
+    outp=os.path.join(HOME,f"recon/briefings/mood_interesting_{stamp}.md")
+    os.makedirs(os.path.dirname(outp),exist_ok=True)
+    L=[f"# 🎯 MOOD: interesting (broad / unclassified high-signal) — {stamp}",
+       "Hosts Claude/triage flagged worth a look — rare classes (data-leak, info-disclosure, takeover,",
+       "admin/scm/devops surfaces, p0-candidate) + anything claude_worth ranked high — NO single class.",
+       "Run the FULL hunt on each: enumerate/crawl/jsintel, figure out WHAT it is, exhaust it.",
+       f"{len(out)} of {total} candidate hosts. ⚡=fresh 📝=noted.",""]
+    for rr in out:
+        fr="⚡" if rr["fresh"] else "  "; nt=" 📝" if rr["noted"] else ""
+        ctx=" · ".join(filter(None,[rr.get("suggested"), fmt_list(rr["classes"],4),
+              ("kev:"+rr["kev"]) if rr.get("kev") else "",
+              ("w="+str(rr["worth"])) if rr.get("worth") is not None else ""]))
+        L.append(f"{fr}[{rr['tier']}] `{rr['host']}`{nt}  ({rr['program']})"+(f"  · {ctx}" if ctx else ""))
+    open(outp,"w").write("\n".join(L)+"\n")
+    print(f"[interesting] {len(out)} of {total} hosts → {outp}")
+    for rr in out[:10]:
+        ctx=rr.get("suggested") or fmt_list(rr["classes"],3)
+        print(f"   {'⚡' if rr['fresh'] else ' '}[{rr['tier']}] {rr['host']}  ({rr['program']}){'  · '+ctx if ctx else ''}")
+    return 0
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("mood",nargs="?")
@@ -197,6 +277,7 @@ def main():
         print("  tech        :", " ".join(sorted(TECH)))
         print("  host-lane   :", " ".join(sorted(HOST_LANE)))
         print("  signal      :", " ".join(sorted(SIGNAL)))
+        print("  interesting :", " ".join(sorted(INTERESTING_ALIASES)), "(broad/unclassified high-signal)")
         print("  + ANY keyword (coldfusion, elasticsearch, citrix, …) via broad multi_match")
         print("\nUsage: recon-mood <mood> [--top N]   (picks the lane; the hunt then enumerates/")
         print("       scans/crawls/exhausts those hosts with every tool, per /hunt doctrine)")
@@ -204,6 +285,10 @@ def main():
 
     mood=a.mood.strip().lower()
     noted=noted_hosts()
+
+    # 0) INTERESTING — broad/unclassified high-signal lane
+    if mood in INTERESTING_ALIASES:
+        return do_interesting(a.top, a.stamp, noted)
 
     # 1) PARAM-CLASS moods
     if mood in PARAM_CLASSES:

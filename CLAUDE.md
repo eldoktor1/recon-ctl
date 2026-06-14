@@ -77,7 +77,8 @@ pending action / the operator steps away (so a comeback never loses the thread).
    ranked by claude_worth/score. Or continue the current host/lane. Out of picks ⇒ re-query/widen/
    regenerate, never stop. **MOOD HUNTING (a mood is a LENS, not a limit):** if the operator names a
    vuln-class/tech/lane/signal (`hunt xss`/`sqli`/`api`/`wordpress`/`php`/`jira`/`graphql`/`cve`/`kev`/
-   `nday`/`takeover`/…or ANY keyword — coldfusion/elasticsearch/citrix all work via broad match), run
+   `nday`/`takeover`/`interesting`/…or ANY keyword — coldfusion/elasticsearch/citrix all work via broad
+   match; `interesting` = broad/unclassified high-signal hosts Claude flagged worth), run
    `recon-mood <kw>` → a ranked scope+pays+not-benched worklist (`~/recon/briefings/mood_<kw>_<date>.md`);
    `recon-mood --list` shows the curated set. The mood only focuses WHERE you start — it does NOT cap the
    rigor: within it run the FULL hunt at full depth (ENUMERATE subfinder/permutation/CT/jsintel, SCAN,
