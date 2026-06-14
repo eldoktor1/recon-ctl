@@ -11,6 +11,7 @@
 .claude/*
 !.claude/commands/
 *.code-workspace
+.tmp
 
 # Runtime state
 recon/state/
