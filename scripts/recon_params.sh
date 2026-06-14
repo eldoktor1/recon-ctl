@@ -102,7 +102,7 @@ PARAMS_SCANNED_FIELD="${PARAMS_SCANNED_FIELD:-params_scanned_at}"   # recon_aliv
 # path: the per-host 7d cooldown means each host hits wayback ~once/7d, and the worker caches.
 PARAMS_ARCHIVE_URL="${PARAMS_ARCHIVE_URL:-$(tr -d '\r\n' < "$HOME/.recon_cdx_url" 2>/dev/null)}"
 PARAMS_ARCHIVE_KEY="${PARAMS_ARCHIVE_KEY:-$(tr -d '\r\n' < "$HOME/.recon_cdx_key" 2>/dev/null)}"
-PARAMS_ARCHIVE_TIMEOUT="${PARAMS_ARCHIVE_TIMEOUT:-30}"
+PARAMS_ARCHIVE_TIMEOUT="${PARAMS_ARCHIVE_TIMEOUT:-60}"  # big domains (superdrug/example-scale CDX histories) don't return inside 30s — they time out and we lose the param-RICH archive surface. Small/medium domains return in ~4s, so 60s only ever costs extra wall-clock on the slow tail (still well under the 1800s job TTL). 2026-06-14.
 # Liveness verification (verify-live): archive URLs (wayback/gau) are HISTORICAL, so many
 # are dead 404s. A paced, Mullvad-gated stage probes catalog URLs (deduped by path), keeps
 # the live ones, and DELETES the dead — so only worth-keeping params remain and confirmers
@@ -374,7 +374,7 @@ cmd_enqueue() {
   | grep -vE '^(mta-sts|cdn-[0-9]|assets\.|static\.|media\.)' \
   | grep -vE '^(api|apis|graphql|grpc|gql|mqtt|push|device|devices|iot|broker|smtp|imap|pop3?|mx[0-9]*|ns[0-9]+|dns)[.-]' \
   | grep -vE '^(auth|login|signin|sso|oauth|oidc|idp|saml|adfs|keycloak|prometheus|alertmanager|grafana|metrics|daemon|repo|repos|registry|artifactory|nexus)[.-]' \
-  | grep -viE '(^|[.-])(dev|test|tests|testing|qa|uat|sit|stg|stage|staging|preprod|prprd|nonprod|sandbox|sbx|demo|preview|storybook|ephemeral|internal|intranet|corp|canary|perf|loadtest|feature|pr[0-9]+)([.-]|$)' \
+  | grep -viE '(^|[.-])(dev|test|tests|testing|qa|uat|sit|stg|stage|staging|preprod|prprd|nonprod|sandbox|sbx|demo|preview|storybook|ephemeral|internal|intranet|corp|canary|perf|loadtest|feature|pr[0-9]+|ci|jenkins|gerrit|vpn|np)([.-]|$)' \
   > "$WORK/cand_clean.tsv"
   # cool the junk = (raw window) − (clean survivors): every examined zero-param-surface
   # host, regardless of root, so high-cardinality junk roots actually drain.
