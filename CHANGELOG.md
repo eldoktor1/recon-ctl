@@ -1,5 +1,40 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.7.1 - 2026-06-14 - Params engine overhaul: unfrozen, jobs-and-queues, sliding window, archive-proxy, liveness
+
+The sus_params catalog had silently frozen at ~9k and was dragging the confirmers down with it.
+Root-caused and rebuilt the whole params lane end-to-end. All changes keep the egress posture
+(Mullvad-only for target traffic) and are anti-burn by design.
+
+- **Unfroze the catalog (silent-freeze bug).** A `PARAMS_CANDIDATE_POOL` bump to 20000 made the
+  candidate query exceed ES `index.max_result_window` (10000) → `search_phase_execution_exception`
+  → jq saw 0 rows → logged the benign "no candidates" forever. Fix: `search_after` paging (page
+  ≤10000) + LOUD `.error` detection so an ES error can never again masquerade as "nothing to do".
+- **Jobs-and-queues** (matches recon_validate.sh): split `collect` into a PRODUCER (`enqueue`,
+  ES-only) that drops 50-host job files into `queue/params/`, and a CONSUMER (`crawl`) that claims
+  ONE job/cycle under the global egress governor and indexes incrementally. The old model held one
+  egress slot but fanned out 5-wide for hours (≈5× under-count) and indexed only at end-of-run.
+  `collect` kept as a one-shot alias for zero-downtime migration.
+- **Sliding-window cooldown** — per-host cooldown moved to `recon_alive.params_scanned_at` with a
+  server-side `must_not range`, so the candidate window slides through the ~619k eligible pool:
+  crawls 24/7, never goes idle, never re-hammers a host.
+- **Reach the real surface** — ephemeral/CI junk (dev/test/qa/staging/preprod) scored high and
+  filled the top tier (~77%); added a token-bounded non-prod filter + deepened the pool (30k via
+  search_after) so the producer pages past the junk to real param-bearing hosts.
+- **true-fresh cert-renewal fix** — gungnir can't tell a first cert issuance from a renewal, so
+  ~90-day renewals of long-known hosts were mislabeled `true_fresh`. recon_true_fresh.sh now drops
+  hosts already in the known_hosts ledger (`grep -a` — it has NUL bytes); existing mislabels written
+  back across ES.
+- **Archive proxy (the big yield fix)** — IA blackholes web.archive.org/CDX (and CommonCrawl) for
+  our Mullvad datacenter egress, so gau/waybackurls returned 0. Added a locked Cloudflare worker
+  (`tools/cdx_worker.js`) that proxies Wayback CDX from Cloudflare's unblocked egress; `crawl_host`
+  now does katana(live,Mullvad) + gau(otx/urlscan) + archive_fetch(worker). Only the public-archive
+  lookup leaves via Cloudflare — the target is never contacted; all target traffic stays on Mullvad.
+- **Liveness verification + tracking-param filter** — archive URLs are historical → dead 404s +
+  analytics-only params. crawl_host drops tracking-ONLY URLs (utm_*/fbclid/gclid/…); new `verify-live`
+  stage (daemon `params-live` loop) probes catalog URLs deduped by path, KEEPS live, DELETES dead
+  (404/410), leaves transient for retry — so only worth-keeping, live params remain.
+
 ## v3.7.0 - 2026-06-07 - Be UNIQUE: differentiated pillars (JS-intel, IDOR, n-day, GH-leaks, briefing)
 
 Hard pivot after an honest reckoning: the pipeline was a commodity dupe-factory (default

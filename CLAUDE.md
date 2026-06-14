@@ -276,6 +276,14 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   swap only owned IDs (never guessed third-party IDs), confirm-then-stop, no harvest.
 - Never touch nftables/iptables/VPN config. Mullvad is sole egress; `vpn_down` pauses
   all scanning (and all probing — fail-closed).
+- ARCHIVE-EGRESS CARVE-OUT (the ONE sanctioned non-Mullvad path, 2026-06-13): the Internet
+  Archive blackholes web.archive.org/CDX (and CommonCrawl) for our Mullvad datacenter ranges,
+  killing gau/waybackurls param-URL yield. `recon_params.sh` proxies ONLY the public Wayback-CDX
+  lookup through a locked Cloudflare worker (`cdx-proxy.beatmd1.workers.dev`; url+secret in
+  ~/.recon_cdx_url / ~/.recon_cdx_key, NOT git) whose egress IA does not block. This NEVER carries
+  target traffic — the bug-bounty host is never contacted by the archive call; katana/gau/probes
+  stay 100% on Mullvad. Don't burn it: gentle by the per-host 7d cooldown + worker cache; never
+  mass-blast or the CF egress gets IA-blocked too. See memory `project_archive_cloudflare_proxy`.
 
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
