@@ -83,6 +83,9 @@ LOCK_FILE="$STATE_DIR/screenshot.lock"
 mkdir -p "$STATE_DIR" "$SCREENSHOT_DIR" "$STATE_DIR/kill"
 
 [[ -f "$KILL_FILE" ]] && { warn "killswitch active (v2_screenshot)"; exit 0; }
+# Fail-closed on VPN for ALL invocations (the daemon gates its loop, but manual
+# runs — e.g. `reprocess` — are equally target-facing and must respect it too).
+[[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — skipping (fail-closed, Mullvad sole egress)"; exit 0; }
 [[ -x "$SHOT_VENV_PY" ]] || { warn "venv python missing at $SHOT_VENV_PY — run 'recon-screenshot-install'"; exit 0; }
 [[ -f "$SHOT_WORKER"  ]] || { warn "worker script missing at $SHOT_WORKER"; exit 1; }
 
@@ -208,13 +211,34 @@ HTMLFOOT
 }
 
 # ── Pick targets ───────────────────────────────────────────────────────────
-# Two query shapes:
-#   cycle:    cooldown-aware, sorted by triage_score desc (daemon mode)
-#   backfill: hosts that have NEVER been screenshotted, smaller per-cycle budget
-#             but a higher overall cap, used by `backfill` subcommand
+# Three query shapes:
+#   cycle:     cooldown-aware, sorted by triage_score desc (daemon mode)
+#   backfill:  hosts that have NEVER been screenshotted (higher overall cap)
+#   reprocess: hosts previously blocked/timeout/blank — re-shoot with the current
+#              worker IGNORING cooldown (use after a worker/anti-bot improvement)
 build_query() {
   local mode="$1" cap="$2"
-  if [[ "$mode" == "backfill" ]]; then
+  if [[ "$mode" == "reprocess" ]]; then
+    jq -nc \
+      --argjson size "$cap" \
+      --argjson min_score "$SHOT_MIN_SCORE" '{
+        size: $size,
+        _source: ["host","url","status_code","triage_priority","triage_score",
+                  "triage_program","triage_payout_tier","cdn_name"],
+        query: {bool: {
+          filter: [
+            {terms: {screenshot_status: ["blocked","timeout","blank"]}},
+            {term: {triage_in_scope: true}},
+            {term: {triage_pays: true}},
+            {range: {triage_score: {gte: $min_score}}}
+          ],
+          must_not: [
+            {exists: {field: "cdn_name"}}
+          ]
+        }},
+        sort: [{triage_score: {order: "desc"}}]
+      }'
+  elif [[ "$mode" == "backfill" ]]; then
     jq -nc \
       --argjson size "$cap" \
       --argjson min_score "$SHOT_MIN_SCORE" '{
@@ -329,6 +353,10 @@ case "$MODE" in
     cap="${2:-$SHOT_BACKFILL_LIMIT}"
     log "backfill: cap=$cap (one-shot, no cooldown — hosts with NO screenshot_at yet)"
     ;;
+  reprocess)
+    cap="${2:-$SHOT_BACKFILL_LIMIT}"
+    log "reprocess: cap=$cap (re-shoot prior blocked/timeout/blank with current worker, ignoring cooldown)"
+    ;;
   gallery)
     gallery_render "${2:-1000}"
     exit 0
@@ -342,10 +370,12 @@ case "$MODE" in
     ;;
   *)
     cat >&2 <<USAGE
-Usage: recon_screenshot.sh [cycle|backfill [N]|gallery [N]|test <host>]
+Usage: recon_screenshot.sh [cycle|backfill [N]|reprocess [N]|gallery [N]|test <host>]
 
   cycle              cooldown-aware daemon batch (default; SHOT_BATCH=$SHOT_BATCH)
   backfill [N]       hosts with NO screenshot_at yet, larger batch (default $SHOT_BACKFILL_LIMIT)
+  reprocess [N]      re-shoot prior blocked/timeout/blank hosts with the current
+                     worker, ignoring cooldown (default $SHOT_BACKFILL_LIMIT)
   gallery [N]        rebuild HTML gallery only (default 1000 entries)
   test <host>        screenshot one host now, then rebuild gallery
 USAGE
