@@ -88,13 +88,21 @@ PARAM_PARALLEL="${PARAM_PARALLEL:-5}"           # balanced safe-max: concurrent 
 PARAMS_COOLDOWN_DAYS="${PARAMS_COOLDOWN_DAYS:-7}"
 PARAMS_CANDIDATE_POOL="${PARAMS_CANDIDATE_POOL:-30000}"  # candidate reach (search_after-paged). MUST be deep: ephemeral/CI junk scores HIGH so it clusters in the top ~10k (measured ~77% junk there), while real param-bearing web apps sit DEEPER (a 40k sample was ~77% real post-filter). A shallow pool only ever sees the junk tier → ~0-yield crawls. Only queried when the queue has room (backpressure-gated), so the deeper pull is cheap. Server-side cooldown range still slides the window through the ~600k pool.
 PARAMS_INTER_HOST_SLEEP="${PARAMS_INTER_HOST_SLEEP:-5}"   # max pre-gau jitter (provider stealth)
-WAYBACKURLS="${WAYBACKURLS:-$(command -v waybackurls 2>/dev/null || echo '')}"  # gau fallback
 KATANA_DEPTH="${KATANA_DEPTH:-2}"
 KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
 KATANA_RL="${KATANA_RL:-15}"
 GAU_TIMEOUT="${GAU_TIMEOUT:-30}"    # otx+urlscan are fast; 30s is ample; 60 wasted when providers blocked
 MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
 PARAMS_SCANNED_FIELD="${PARAMS_SCANNED_FIELD:-params_scanned_at}"   # recon_alive date field = per-host cooldown ledger (ES source of truth)
+# Archive proxy (Cloudflare worker) — restores Wayback CDX param-URL discovery that the
+# Internet Archive blocks from our Mullvad datacenter egress (it blackholes wayback for
+# VPN/DC ranges). URL + secret live in FILES, never git: ~/.recon_cdx_url, ~/.recon_cdx_key.
+# Empty ⇒ archive_fetch is a no-op (katana-only). Only the public-archive lookup egresses
+# via Cloudflare; the bug-bounty host is NEVER contacted by it. Be gentle — don't burn the CF
+# path: the per-host 7d cooldown means each host hits wayback ~once/7d, and the worker caches.
+PARAMS_ARCHIVE_URL="${PARAMS_ARCHIVE_URL:-$(tr -d '\r\n' < "$HOME/.recon_cdx_url" 2>/dev/null)}"
+PARAMS_ARCHIVE_KEY="${PARAMS_ARCHIVE_KEY:-$(tr -d '\r\n' < "$HOME/.recon_cdx_key" 2>/dev/null)}"
+PARAMS_ARCHIVE_TIMEOUT="${PARAMS_ARCHIVE_TIMEOUT:-30}"
 
 mkdir -p "$PARAMS_DIR" "$STATE_DIR" "$PARAMS_INBOX" "$PARAMS_PROCESSING" "$PARAMS_DONE"
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 1; }
@@ -126,25 +134,34 @@ ensure_alive_field() {
     || warn "could not ensure $INDEX_NAME.$PARAMS_SCANNED_FIELD mapping"
 }
 
+# archive_fetch HOST — fetch the host's archived URLs (Wayback CDX) via the Cloudflare
+# worker proxy. IA blocks wayback from our Mullvad datacenter egress; Cloudflare's egress
+# isn't blocked, so we proxy ONLY this public-archive lookup through the worker — the
+# bug-bounty host itself is NEVER contacted here. No-op unless the URL+key files exist.
+archive_fetch() {
+  [[ -n "$PARAMS_ARCHIVE_URL" && -n "$PARAMS_ARCHIVE_KEY" ]] || return 0
+  curl -sS -m"$PARAMS_ARCHIVE_TIMEOUT" -H "x-auth: $PARAMS_ARCHIVE_KEY" \
+    "$PARAMS_ARCHIVE_URL/?domain=$1&limit=$MAX_URLS_PER_HOST" 2>/dev/null
+}
+
 # crawl_host — all per-host work, writing ONLY into its own dir under $wd so N copies
 # run concurrently without clobbering shared files. Emits: bulk.part (ndjson), scanned
 # (just the hostname — the consumer stamps recon_alive.params_scanned_at = the cooldown
-# ledger), cls.<class> (per-class URLs), urlcount. katana(live)+gau(archive), waybackurls
-# fallback when gau yields nothing. Target-facing; per-host rate-limited.
+# ledger), cls.<class> (per-class URLs), urlcount. Sources: katana (LIVE crawl, Mullvad)
+# + gau (otx/urlscan) + archive_fetch (Wayback CDX via the Cloudflare worker). katana/gau
+# are target-facing + per-host rate-limited; archive_fetch never touches the host.
 crawl_host() {
   local host="$1" url="$2" root="$3" program="$4" tier="$5" fresh="$6" fseen="$7" wd="$8"
   local hd="$wd/$(printf '%s' "$host" | tr '/:.' '___')"; mkdir -p "$hd"
   sleep $(( (RANDOM % PARAMS_INTER_HOST_SLEEP) + 1 ))   # jitter so N parallel gau hits don't burst a provider
   { timeout "$KATANA_CRAWL_TIMEOUT" "$KATANA" -u "$url" -d "$KATANA_DEPTH" -jc -fs rdn -silent -nc -rl "$KATANA_RL" 2>/dev/null
-    [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --threads 5 --subs 2>/dev/null
+    # gau: otx+urlscan only — wayback (web.archive.org) + commoncrawl block our Mullvad
+    # egress, so asking gau for them just burns the timeout. Wayback comes via the worker.
+    [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --providers otx,urlscan --threads 5 --subs 2>/dev/null
+    # Wayback CDX archive URLs, proxied through Cloudflare (escapes IA's Mullvad block).
+    archive_fetch "$host"
   } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
   local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
-  # gau fallback: different archive provider when gau is rate-limited / empty
-  if [[ "${raw_n:-0}" -eq 0 && -n "$WAYBACKURLS" ]]; then
-    printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$WAYBACKURLS" 2>/dev/null \
-      | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true
-    raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
-  fi
   log "  $host — ${raw_n:-0} param URLs"
   # Record the host as crawled REGARDLESS of yield — the consumer cools it so the
   # sliding window rotates past it (a param-poor host won't be retried until its
