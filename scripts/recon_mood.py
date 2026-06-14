@@ -83,6 +83,22 @@ SIGNAL={
 SIGNAL["kev"]=SIGNAL["cve"]; SIGNAL["nday"]=SIGNAL["cve"]; SIGNAL["n-day"]=SIGNAL["cve"]
 TIERW={"elite":3,"high":2,"mid":1,"low":0.5,"none":0}
 
+# ZERO-FP DISCIPLINE — stamped on EVERY mood report. A mood is a PICK-stage lens: every line it
+# emits is a LEAD, not a finding. FP-elimination happens DOWNSTREAM at the same chokepoints every
+# finding passes, no matter how it was picked. No mood can lower this bar (the bar lives after the pick).
+FP_FOOTER=(
+ "\n---\n**ZERO-FP — every line above is a LEAD, not a finding. To clear the bar:**\n"
+ "1. **CONFIRM (per-class SAFE primitive must FIRE):** a pattern/tech/host/signal match is a LEAD; only "
+ "the primitive firing = CONFIRMED — xss→dalfox EXECUTES (reflection≠XSS), sqli→`'`vs`''` differential, "
+ "takeover→claimability (NXDOMAIN/NoSuchBucket), ssrf/xxe→OOB canary, cve→in-range RUNNING version. "
+ "catch-all-200 / SPA-shell / stale-tech / version-only ≠ bug.\n"
+ "2. **CLAUDE VERIFY (hard gate):** nothing reaches a report without the consensus panel "
+ "(exploitability + scope-reward + evidence-repro) returning `real`; the reporter hard-gates on "
+ "ai_verdict='real'. Confident FPs die in one cheap pass.\n"
+ "3. **IMPACT-GATE:** theoretical/no-impact (CORS reflect, missing headers, self-XSS, "
+ "info-disclosure-without-impact) = N/A → skip. **NOTE every FP/skip inline** so it's never re-walked.\n"
+)
+
 def es(idx,body):
     try:
         r=subprocess.run(["curl","-sS","-m","40","--netrc-file",NETRC,"-H","Content-Type: application/json",
@@ -166,7 +182,7 @@ def write_alive_report(mood, kind, hint, rows, total, stamp, top):
         ctx=(" ".join(filter(None,[r.get("kev"), ",".join(r.get("cves",[])[:3])])) if r.get("kev")
              else (r.get("suggested") or fmt_list(r["classes"]) or fmt_list(r["tech"]) or fmt_list(r["signals"])))
         L.append(f"{fr}[{r['tier']}] {tag}`{r['host']}`{nt}  score={r['score']}  ({r['program']})"+(f"  · {ctx}" if ctx else ""))
-    open(outp,"w").write("\n".join(L)+"\n")
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
     return outp
 
 def do_params_catalog(mood, top, stamp):
@@ -191,7 +207,7 @@ def do_params_catalog(mood, top, stamp):
     for s in rows:
         fr="⚡" if s.get("true_fresh") else "  "
         L.append(f"{fr}[{s.get('payout_tier','?')}] ({s.get('program','?')})  `{s.get('url','')}`")
-    open(outp,"w").write("\n".join(L)+"\n")
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
     print(f"[{mood}] {len(rows)} hosts (of {total} catalog URLs) → {outp}")
     for s in rows[:10]:
         print(f"   [{s.get('payout_tier','?')}] {s.get('url','')[:95]}")
@@ -256,7 +272,7 @@ def do_interesting(top, stamp, noted):
               ("kev:"+rr["kev"]) if rr.get("kev") else "",
               ("w="+str(rr["worth"])) if rr.get("worth") is not None else ""]))
         L.append(f"{fr}[{rr['tier']}] `{rr['host']}`{nt}  ({rr['program']})"+(f"  · {ctx}" if ctx else ""))
-    open(outp,"w").write("\n".join(L)+"\n")
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
     print(f"[interesting] {len(out)} of {total} hosts → {outp}")
     for rr in out[:10]:
         ctx=rr.get("suggested") or fmt_list(rr["classes"],3)
