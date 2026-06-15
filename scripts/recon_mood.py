@@ -312,6 +312,64 @@ def do_param_tech_discovery(cls, top, stamp, noted):
         print(f"   {'⚡' if rr['fresh'] else ' '}[{rr['tier']}] {rr['host']}  ({rr['program']})  · {fmt_list(rr['tech'],3)}")
     return outp
 
+FRESH_ALIASES={"fresh","freshblood","fresh-blood","new-blood","newblood","truefresh","true-fresh","newhosts","blood"}
+TF_FEED=os.path.join(HOME,"recon/state/true_fresh.jsonl")
+TF_ROOTS=os.path.join(HOME,"recon/state/true_fresh/paying_roots.txt")
+UUIDLBL=re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-', re.I)
+
+def do_fresh(top, stamp, noted, hours=48):
+    """FRESH BLOOD lane — newly-CT-surfaced in-scope+paying hosts (gungnir true_fresh feed); race the crowd.
+    Reads true_fresh.jsonl (host + external_first_seen), keeps last <hours>, scope-gates via gungnir's
+    paying_roots.txt, drops shared-tenant UUID hosts (hard line) + already-noted, ranks freshest-first.
+    Brand-new surface = lowest dup-risk = the MOTTO's highest-EV target."""
+    import datetime
+    from datetime import timezone
+    roots=set()
+    if os.path.exists(TF_ROOTS):
+        for l in open(TF_ROOTS,encoding="utf-8",errors="ignore"):
+            r=l.strip().lower()
+            if r: roots.add(r)
+    now=datetime.datetime.now(timezone.utc)
+    rows=[]
+    if os.path.exists(TF_FEED):
+        for l in open(TF_FEED,encoding="utf-8",errors="ignore"):
+            try: d=json.loads(l)
+            except: continue
+            h=(d.get("host") or "").lower().strip()
+            if not h: continue
+            try: t=datetime.datetime.fromisoformat((d.get("external_first_seen","")).replace("Z","+00:00"))
+            except: continue
+            age=(now-t).total_seconds()/3600
+            if age>hours: continue
+            if UUIDLBL.match(h.split(".")[0]) or "unifi-hosting.ui.com" in h: continue  # shared-tenant hard line
+            parts=h.split("."); cand=set()
+            if len(parts)>=2: cand.add(".".join(parts[-2:]))
+            if len(parts)>=3: cand.add(".".join(parts[-3:]))
+            m=cand & roots
+            if not m: continue            # scope gate: registrable root must be a paying root
+            if h in noted: continue
+            rows.append((age,h,sorted(m,key=len)[-1]))
+    rows.sort()
+    seen=set(); out=[]
+    for age,h,root in rows:
+        if h in seen: continue
+        seen.add(h); out.append((age,h,root))
+        if len(out)>=top: break
+    outp=os.path.join(HOME,f"recon/briefings/fresh_{stamp}.md")
+    os.makedirs(os.path.dirname(outp),exist_ok=True)
+    L=[f"# 🩸 FRESH BLOOD — newly CT-surfaced in-scope+paying hosts (<{hours}h) — {stamp}",
+       "RACE THE CROWD: brand-new hosts (gungnir true_fresh feed, cert-renewals filtered) on PAYING roots —",
+       "lowest dup-risk = the MOTTO's highest-EV. Work each at FULL depth (enumerate/crawl/jsintel, ALL classes —",
+       "NO tunnel-vision); hit a wall → research; exhaust before pivot. VERIFY per-asset scope before deep work",
+       "(root-level gate only here). Shared-tenant UUID hosts excluded (hard line).",
+       f"{len(out)} fresh hosts, freshest first.",""]
+    for age,h,root in out:
+        L.append(f"  {age:5.1f}h  `{h}`  ({root})")
+    open(outp,"w").write("\n".join(L)+FP_FOOTER+"\n")
+    print(f"[fresh] {len(out)} fresh-blood hosts (<{hours}h, in-scope+paying, non-shared-tenant) → {outp}")
+    for age,h,root in out[:15]: print(f"   {age:5.1f}h  {h}  ({root})")
+    return 0
+
 CVE_RE=re.compile(r'^cve-\d{4}-\d{3,}$', re.I)
 
 def do_cve_lookup(cve_id, techs, top, stamp, noted):
@@ -368,6 +426,7 @@ def main():
     ap.add_argument("--top",type=int,default=40)
     ap.add_argument("--stamp",default="latest")
     ap.add_argument("--tech",action="append",help="affected Wappalyzer tech for a CVE warrant-test pool (repeatable)")
+    ap.add_argument("--hours",type=int,default=48,help="fresh-blood window in hours (mood: fresh)")
     ap.add_argument("--list",action="store_true")
     a=ap.parse_args()
 
@@ -380,6 +439,7 @@ def main():
         print("  signal      :", " ".join(sorted(SIGNAL)))
         print("  specific-CVE: recon-mood CVE-2024-1234   (or: cve CVE-2024-1234 --tech \"<product>\")")
         print("                → MATCHED hosts (triage_kev_cves) + WARRANT-TESTING hosts (affected tech)")
+        print("  fresh-blood : fresh / blood / new-hosts [--hours N]  (newly CT-surfaced in-scope hosts, race the crowd)")
         print("  interesting :", " ".join(sorted(INTERESTING_ALIASES)), "(broad/unclassified high-signal)")
         print("  + ANY keyword (coldfusion, elasticsearch, citrix, …) via broad multi_match")
         print("\nUsage: recon-mood <mood> [--top N]   (picks the lane; the hunt then enumerates/")
@@ -396,6 +456,10 @@ def main():
     elif mood=="cve" and a.extra and CVE_RE.match(a.extra.strip()): cve_arg=a.extra.strip()
     if cve_arg:
         return do_cve_lookup(cve_arg, a.tech, a.top, a.stamp, noted)
+
+    # 0b) FRESH BLOOD — newly CT-surfaced in-scope+paying hosts (race the crowd, lowest dup-risk)
+    if mood in FRESH_ALIASES:
+        return do_fresh(a.top, a.stamp, noted, a.hours)
 
     # 0) INTERESTING — broad/unclassified high-signal lane
     if mood in INTERESTING_ALIASES:
