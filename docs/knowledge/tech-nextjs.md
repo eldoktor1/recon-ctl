@@ -62,6 +62,21 @@ response. Test unkeyed params reflected into cached output.
 | `/package.json`, lockfiles, `.npmrc` | dependency-confusion (if exposed) |
 | `__NEXT_DATA__` (in page HTML) | SSR props / secrets |
 
+## 8. STATIC EXPORT (next export / output:'export') — narrows the surface
+If `__NEXT_DATA__.assetPrefix` points to a CDN/S3 bucket (e.g. `…s3…web-export…`) the app is a STATIC
+export served as files. Implications: **NO `/_next/image` optimizer** (it 404s → no image SSRF/SVG-XSS),
+**no Server Actions / getServerSideProps** (no SSR-side SSRF/cache-poison via Node). The surface shrinks to
+DOM XSS + CSP + the hosting bucket. (Observed: webviews.monzo.com, static export on S3, 2026-06-15.)
+
+## 9. CSP as the XSS gate — and the whitelist as the bypass gadget
+A tight CSP (`script-src 'self' 'nonce-…'`, no `unsafe-inline`, `object-src 'none'`) BLOCKS most DOM XSS
+execution — even `<img onerror>` won't fire. So when CSP is strong, the XSS path is a **CSP-BYPASS GADGET**:
+look at what `script-src` whitelists. If it lists **an S3 bucket / CDN** (attacker-writable or world-writable
+PUT) or **a host with a JSONP/script-reflection endpoint**, you can host/inject JS from an ALLOWED origin →
+bypass. So: enumerate every `script-src`/`default-src` origin → test each for write (anon S3 PUT, read-only
+listability first) or script-reflection. (Observed: webviews.monzo.com CSP whitelists `monzo-prod-…web-export`
++ `monzo-s101-…nonprod-web-export` S3 buckets + `internal-api.monzo.com` in script-src — the bypass candidates.)
+
 ## Quick checklist
 - [ ] Fingerprint Next.js + get buildId + routes (_buildManifest / jsintel)
 - [ ] `/_next/image?url=https://example.com/` → SSRF? + content-type for SVG-XSS
