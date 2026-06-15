@@ -137,6 +137,20 @@ searched too narrowly. LOOP until you have **≥1 verified, actionable, non-dup 
 search each round. **Widen the SEARCH, never lower the zero-FP bar** (a fabricated/dup "find" = 0 reward
 + dings signal — worse than honestly reporting the best LEAD).
 
+**HOW you work each round (operator doctrine 2026-06-15 — bind to all three):**
+- **NO TUNNEL VISION — work ANY lane that might have something, never fixate on one vuln-class.** Within the
+  in-scope+paying surface, ANY signal/class that could lead to a finding is on the table — make sense of all
+  the ES chaos; never tunnel on a single lane/vuln-type (a host dead for XSS may be alive for actuator/IDOR/
+  n-day/exposure). Chase whatever the signal suggests, across every class.
+- **HIT A WALL ⇒ RESEARCH, don't pivot.** When a lane/host/tech stalls, RESEARCH the internet for a fresh
+  angle FIRST (writeups/CVEs/PoCs/forums/framework exploitation + the tech's own docs; and for thin ES,
+  research the real enumeration fingerprints/dorks) — the internet almost always has an answer. Never declare
+  a dead end before researching. ([[feedback_research_before_acting]], [[feedback_internet_research_enumeration]])
+- **ONLY PIVOT WHEN FURTHER TRYING GENUINELY WON'T YIELD.** Exhaust each host/lane deeply — a few negative
+  probes (auth/WAF/404/SPA-catch-all) is NOT proof of absence; diamonds hide behind the 2nd/3rd/5th angle.
+  Pivot off a host/lane only after you've worked every researched angle and more probing truly won't help —
+  not after a surface pass. ([[feedback_no_premature_exhaustion]])
+
 Round loop (keep going until a confirm OR the budget below is exhausted):
 1. Tagged lanes (exposure/graphql/admin-200/data-leak/injection) — done first, fast.
 2. **KEV / n-day version-confirm** (the lane I most often skip): for every in-scope host with a KEV tech
