@@ -76,6 +76,11 @@ PUT) or **a host with a JSONP/script-reflection endpoint**, you can host/inject 
 bypass. So: enumerate every `script-src`/`default-src` origin → test each for write (anon S3 PUT, read-only
 listability first) or script-reflection. (Observed: webviews.monzo.com CSP whitelists `monzo-prod-…web-export`
 + `monzo-s101-…nonprod-web-export` S3 buckets + `internal-api.monzo.com` in script-src — the bypass candidates.)
+- **SCOPE GATE on the bucket angle:** `AccessDenied` on bucket LIST ≠ no anon WRITE (list-denied + PUT-allowed
+  is a classic misconfig). BUT before ANY write-test, verify the bucket is IN SCOPE — programs scoped to
+  `*.domain.com` often do NOT include `*.amazonaws.com` S3 assets; writing to an OOS bucket is unauthorized
+  (hard line). Monzo: S3 export buckets are `*.amazonaws.com`, scope is `*.monzo.com` only → bucket write-test
+  OOS, angle closes. So: strong nonce-CSP + only-OOS/locked bypass-origins = DOM XSS effectively non-exploitable.
 
 ## Quick checklist
 - [ ] Fingerprint Next.js + get buildId + routes (_buildManifest / jsintel)
