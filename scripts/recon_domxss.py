@@ -55,6 +55,17 @@ SRC_RE = [(re.compile(p), n) for p, n in SOURCES]
 VENDOR = re.compile(r'(jquery[.-]|react(?:-dom)?\.production|angular\.min|vue\.runtime|polyfill|'
                     r'chunk-vendors|runtime[.-]|bootstrap\.min|lodash|moment\.min)', re.I)
 
+# TRUE HTML-injection / code-exec sinks (real DOM XSS) — vs mere navigation (open-redirect-ish, lower).
+HTML_SINK = {'innerHTML=', 'outerHTML=', 'insertAdjacentHTML', 'document.write', 'eval', 'Function()',
+             'setTimeout(str)', 'jQuery.html()', 'React.dSIH', 'Vue.v-html', 'Angular.bypass',
+             'setAttribute(src/on*)'}
+NAV_SINK = {'url-sink(src/href)', 'location=', 'location.assign'}
+# library code-window signatures that produce the navigation/append FPs (FileSaver, router/history,
+# URLSearchParams builder) — if the sink window matches, it's framework plumbing, not a taint flow.
+LIB_FP = re.compile(r'createObjectURL|readAsDataURL|msSaveBlob|FileReader|saveAs|'
+                    r'pushState|replaceState|confirmTransitionTo|history|popstate|'
+                    r'URLSearchParams|\.append\([^)]{0,40}(?:date|id|page|sort|key|param)', re.I)
+
 
 def curl(url, out=None):
     cmd = ["curl", "-sSkL", "-m", "20", "-A", UA, url]
@@ -115,28 +126,33 @@ def main():
             corpus.append((u, open(f, encoding="utf-8", errors="ignore").read()))
         except Exception:
             pass
-    high, med = [], []
+    high, review, nav, libfp = [], [], [], 0
     src_seen = set()
     for name, body in corpus:
         if not body:
             continue
-        vend = bool(VENDOR.search(name))
         for h in scan(body, a.ctx):
+            if LIB_FP.search(h["snippet"]):       # FileSaver/router/URLSearchParams plumbing = drop
+                libfp += 1; continue
             src_seen |= set(h["srcs"])
-            rec = (name, h)
-            if h["srcs"] and not vend:
-                high.append(rec)
-            elif h["srcs"]:
-                high.append(rec)  # source+sink even in vendor = worth a look
-            else:
-                med.append((name, h))
-    print(f"\n===== HIGH — sink WITH a tainted source in-window (likely DOM-XSS flow): {len(high)} =====")
-    for name, h in high[:60]:
-        sn = name.split("/")[-1][:40]
+            rec = (name.split("/")[-1][:40], h)
+            if h["sink"] in HTML_SINK:
+                (high if h["srcs"] else review).append(rec)   # HTML sink: HIGH if tainted, else REVIEW
+            elif h["sink"] in NAV_SINK and h["srcs"]:
+                nav.append(rec)                                # navigation+source = open-redirect-ish
+    print(f"\n===== HIGH — HTML/exec sink WITH a tainted source in-window (likely DOM-XSS): {len(high)} =====")
+    for sn, h in high[:50]:
         print(f"\n[{h['sink']}]  src={','.join(h['srcs'])}  ({sn})")
         print("   …" + h["snippet"][:300] + "…")
-    print(f"\n===== sources seen on this host (PoC vectors): {', '.join(sorted(src_seen)) or 'none'} =====")
-    print(f"===== MED — sinks with NO in-window source ({len(med)} total; showing 0 — request if needed) =====")
+    print(f"\n===== REVIEW — HTML/exec sinks, no source in ±{a.ctx} (minified spread; trace by hand): {len(review)} =====")
+    # group by sink type so I can see what dangerous primitives exist + read a few
+    from collections import Counter
+    rc = Counter(h["sink"] for _, h in review)
+    print("   sink types: " + (", ".join(f"{k}×{v}" for k, v in rc.most_common()) or "none"))
+    for sn, h in review[:18]:
+        print(f"[{h['sink']}] ({sn})  …{h['snippet'][:170]}…")
+    print(f"\n===== sources seen (PoC vectors): {', '.join(sorted(src_seen)) or 'none'} =====")
+    print(f"===== nav/open-redirect sinks w/source: {len(nav)} | library-FP filtered: {libfp} =====")
     print(f"[domxss] done. JS cached in {wd}")
 
 
