@@ -65,6 +65,13 @@ Reflected-XSS dead ⇒ research that framework's DOM/postMessage/CVE patterns; t
 bypasses; out of ideas ⇒ research fresh recon + the program's disclosed bugs. Threat intel + research +
 studying are what turn a script kiddie into a real researcher. NEVER declare a dead end before researching
 a fresh angle; make web search a reflex at the FIRST sign of stuck, not a last resort.
+**ALL SOURCES + RECORD IT (operator 2026-06-15):** research is NOT just the general internet — also the
+target web app's OWN docs, the technology/framework docs (security model, config flags, CVEs), and ANY
+useful resource (GitHub source, changelogs, standards); don't limit yourself, triangulate. And **RECORD what
+you learn** into the repo knowledge base `docs/knowledge/` (`tech-<stack>.md`/`class-<vuln>.md`) — actionable
+paths/payloads/CVEs/sinks/bypasses + sources — so future hunts start informed. Documenting everything is what
+makes the system sharper over time. READ the matching `docs/knowledge/` file before hunting a tech; APPEND
+when you learn something reusable. (Host-specific findings → host_notes; the KB is general reusable knowledge.)
 
 ## THE HUNT FLOW — keyword `hunt` (operator-locked 2026-06-13)
 When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until
