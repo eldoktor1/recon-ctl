@@ -72,6 +72,27 @@ you learn** into the repo knowledge base `docs/knowledge/` (`tech-<stack>.md`/`c
 paths/payloads/CVEs/sinks/bypasses + sources — so future hunts start informed. Documenting everything is what
 makes the system sharper over time. READ the matching `docs/knowledge/` file before hunting a tech; APPEND
 when you learn something reusable. (Host-specific findings → host_notes; the KB is general reusable knowledge.)
+**INTERNET RESEARCH FOR ENUMERATION (operator 2026-06-15, stressed):** when ES is THIN for a class/tech,
+do NOT accept it — RESEARCH the internet for HOW TO ENUMERATE that class (the real fingerprints/headers/
+error-pages/favicon/paths/dorks), then APPLY them to pull MORE from ES (full-text the crawled data / jsintel
+endpoints / titles / headers — NOT just the shallow Wappalyzer `tech:` field) and to widen the surface
+(subfinder/CT/permutation + Shodan/FOFA dorks scoped to in-scope domains/orgs/certs). Proven: `tech:Spring`=7
+hosts, but real fingerprints (`/actuator` in jsintel + fulltext actuator/Whitelabel/X-Application-Context)=17,
+incl. high-value gateway/dev hosts. Record reusable fingerprints/dorks/queries to `docs/knowledge/`.
+
+## TONIGHT'S NEW TOOLS (2026-06-14/15) — every agent (incl. 2IC) should know + use these
+- `recon-params crawl-host <host> [url] [--cookie/--header]` — on-demand single-host param crawl (queue
+  bypass): find an interesting param-bug host → crawl it NOW (katana+gau+CDX→gf→catalog) → confirm. `--cookie`
+  = AUTHED crawl (operator session). Don't wait on the slow pipeline param producer.
+- `recon-params confirm xss|sqli <host> [--cookie/--header]` — now takes `--cookie`/`--header` for AUTHED
+  XSS/SQLi (operator's own session walks the post-login surface; SAFE primitives; human-in-loop only).
+- `recon-mood <param-class>` ALSO emits `<cls>_tech_targets` (vuln-prone-tech hosts to crawl-host).
+- `recon-mood CVE-2024-1234 [--tech …]` — specific-CVE lookup: which ES hosts MATCH it / run the affected tech.
+- `recon-account create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]` — semi-auto test-account
+  provisioner (operator solves CAPTCHA+submit; creds local-only).
+- `recon-domxss <host>` — DOM-XSS source→sink miner (the lane dalfox is blind to): fetches JS, flags HTML-sink
+  +tainted-source flows; read REVIEW for `dangerouslySetInnerHTML` rendering server data = stored-XSS leads.
+- KB at `docs/knowledge/` — READ `tech-<stack>.md`/`class-<vuln>.md` before hunting that tech; APPEND learnings.
 
 ## THE HUNT FLOW — keyword `hunt` (operator-locked 2026-06-13)
 When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until

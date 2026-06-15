@@ -76,10 +76,27 @@ tool when it fits the job, you just carry the same guarantees yourself.
 - `tools/param_confirm_worker.py <url>` — SSTI `{{a*b}}` / open-redirect canary / SQLi error-differential.
 - `tools/screenshot_worker.py <host>` — capture a screenshot to eyeball a panel/login vs exposed app.
   (xss/param/screenshot workers: gate on scope yourself first via recon_scope_check.sh; confirm Mullvad.)
+- **NEW (2026-06-14/15) — use these (full list + usage in CLAUDE.md "TONIGHT'S NEW TOOLS"):**
+  - `recon-params crawl-host <host> [--cookie]` — on-demand single-host param crawl (queue bypass); find an
+    interesting param-bug host → crawl it NOW → confirm. Don't wait on the pipeline param producer.
+  - `recon-params confirm xss|sqli <host> [--cookie]` — `--cookie` = AUTHED confirm (operator session).
+  - `recon-mood <param-class>` also emits `<cls>_tech_targets` (vuln-prone-tech hosts to crawl-host);
+    `recon-mood CVE-2024-1234 [--tech …]` = specific-CVE→affected-ES-hosts lookup.
+  - `recon-domxss <host>` — DOM-XSS source→sink miner (dalfox is blind to DOM/stored XSS); REVIEW the
+    `dangerouslySetInnerHTML` sinks rendering server data = stored-XSS leads.
+  - `recon-account create …` — semi-auto test-account provisioner (operator does CAPTCHA+submit).
+- **KNOWLEDGE BASE `docs/knowledge/`** — READ the matching `tech-<stack>.md`/`class-<vuln>.md` BEFORE hunting
+  a tech (fingerprints/CVEs/sinks/bypasses + enumeration dorks); APPEND what you learn. The system compounds
+  (operator doctrine: document everything → sharper system). When ES is thin, RESEARCH the internet for the
+  real enumeration fingerprints/dorks, then pull MORE from ES (full-text crawled data/jsintel, not just `tech:`).
 
 ## DAILY WORKFLOW
-1. RE-GROUND: read CLAUDE.md + memory (project_2ic_nightly_targetlist, reference_vpn_namespace_and_probing,
-   feedback_dedup_worked_targets, feedback_enforcer_doctrine) + this playbook + the per-program dossier
+1. RE-GROUND: read CLAUDE.md (now carries the RESEARCH MANDATE + INTERNET-RESEARCH-FOR-ENUMERATION +
+   tonight's new tools + KB doctrine — bind to all of it) + memory (project_2ic_nightly_targetlist,
+   reference_vpn_namespace_and_probing, feedback_dedup_worked_targets, feedback_enforcer_doctrine,
+   feedback_research_before_acting, feedback_internet_research_enumeration, project_knowledge_base) +
+   skim `docs/knowledge/` (read the matching tech/class file before hunting that stack) + this playbook +
+   the per-program dossier
    (`~/recon/state/program_dossier.jsonl`) + FP-pattern note (`~/recon/state/fp_patterns.md`) + the
    PERMANENT host notes (`~/recon/state/host_notes.jsonl` — worked-knowledge per host/root-domain, never
    expires). COMPOUND off them: if a candidate host has a note that an angle was tested-clean/exhausted,
