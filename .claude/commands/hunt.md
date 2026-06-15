@@ -23,7 +23,8 @@ Focus this run on: **$ARGUMENTS** — if a program/lane/host is given, work with
 pick up from the cursor; if empty, resume the cursor's current host first, then pick autonomously from ES.
 **MOOD HUNTING — a mood is a LENS, not a limit:** if the focus is a vuln-class / tech / lane / signal
 keyword (xss, sqli, ssrf, lfi, redirect, api, wordpress, php, drupal, jira, graphql, jenkins, **cve/kev/
-nday**, takeover, **interesting** (broad/unclassified high-signal), … or **ANY keyword** —
+nday**, takeover, **fresh/blood** (newly-CT-surfaced in-scope hosts — race the crowd, `--hours N`),
+**interesting** (broad/unclassified high-signal), … or **ANY keyword** —
 coldfusion/elasticsearch/citrix all work via broad match), run
 `recon-mood <kw>` — it returns a ranked, scope+pays+not-benched worklist for that mood
 (→ `~/recon/briefings/mood_<kw>_<date>.md`); `recon-mood --list` shows the curated set. The mood only

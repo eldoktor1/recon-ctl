@@ -114,7 +114,11 @@ minutes. "Haven't found it yet" ≠ "not there." Only the OPERATOR calls a targe
 `hunt`/`/hunt resume` to pick up where we left off, and UPDATE it whenever you switch host / leave a
 pending action / the operator steps away (so a comeback never loses the thread).
 0. **PREFLIGHT** Mullvad up + no `state/vpn_down` (fail-closed).
-1. **PICK (autonomous)** from TWO sources, together: (a) **pre-ranked BRIEFINGS in `~/recon/briefings/`**
+1. **PICK (autonomous)** from THREE sources, together: (0) **FRESH BLOOD FIRST — `recon-mood fresh` (race
+   the crowd):** newly-CT-surfaced in-scope+paying hosts from the gungnir true_fresh feed (renewals filtered,
+   shared-tenant excluded) → `briefings/fresh_<date>.md`. Brand-new surface the crowd hasn't hit = lowest
+   dup-risk = the MOTTO's highest-EV; start each session here, work each at full multi-class depth.
+   (a) **pre-ranked BRIEFINGS in `~/recon/briefings/`**
    — already scope/pays/dedup-filtered, highest signal-per-minute, START here: `2IC_tonight_<date>.md`,
    `idor_candidates_<date>.md`, `xss_candidates_<date>.md` + `sqli_candidates_<date>.md` (rs0n lane; TOP
    UNIQUE first, skip PRODUCT-CLASS), `tonight_<date>.md` (stale/missing ⇒ regenerate ES-only:
@@ -123,8 +127,9 @@ pending action / the operator steps away (so a comeback never loses the thread).
    ranked by claude_worth/score. Or continue the current host/lane. Out of picks ⇒ re-query/widen/
    regenerate, never stop. **MOOD HUNTING (a mood is a LENS, not a limit):** if the operator names a
    vuln-class/tech/lane/signal (`hunt xss`/`sqli`/`api`/`wordpress`/`php`/`jira`/`graphql`/`cve`/`kev`/
-   `nday`/`takeover`/`interesting`/…or ANY keyword — coldfusion/elasticsearch/citrix all work via broad
-   match; `interesting` = broad/unclassified high-signal hosts Claude flagged worth), run
+   `nday`/`takeover`/`fresh`/`interesting`/…or ANY keyword — coldfusion/elasticsearch/citrix all work via broad
+   match; `fresh`/`blood` = newly-CT-surfaced in-scope hosts to race the crowd (`--hours N`); `interesting` =
+   broad/unclassified high-signal hosts Claude flagged worth), run
    `recon-mood <kw>` → a ranked scope+pays+not-benched worklist (`~/recon/briefings/mood_<kw>_<date>.md`);
    `recon-mood --list` shows the curated set. The mood only focuses WHERE you start — it does NOT cap the
    rigor: within it run the FULL hunt at full depth (ENUMERATE subfinder/permutation/CT/jsintel, SCAN,

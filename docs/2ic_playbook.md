@@ -152,6 +152,12 @@ search each round. **Widen the SEARCH, never lower the zero-FP bar** (a fabricat
   not after a surface pass. ([[feedback_no_premature_exhaustion]])
 
 Round loop (keep going until a confirm OR the budget below is exhausted):
+0. **FRESH BLOOD FIRST (race the crowd — the MOTTO's highest-EV, lowest-dup lane).** Each round START with
+   the newly-CT-surfaced in-scope+paying hosts: **`recon-mood fresh [--hours N]`** (consumes the gungnir
+   true_fresh feed `~/recon/state/true_fresh.jsonl`, cert-renewals filtered, shared-tenant UUID hosts dropped,
+   paying-root-gated → `briefings/fresh_<date>.md`). Brand-new surface = the crowd hasn't hit it yet = lowest
+   dup-risk. Work each fresh host at FULL multi-class depth (enumerate/crawl/jsintel, every class — NO tunnel;
+   wall→research; exhaust before pivot) BEFORE falling back to the older tagged lanes. Be first.
 1. Tagged lanes (exposure/graphql/admin-200/data-leak/injection) — done first, fast.
 2. **KEV / n-day version-confirm** (the lane I most often skip): for every in-scope host with a KEV tech
    (Drupal/Magento/Confluence/Jira/Spring/GitLab/Jenkins/F5/Citrix/MOVEit/Atlassian…), CONFIRM the
