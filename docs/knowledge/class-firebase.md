@@ -50,9 +50,22 @@ GET https://<rtdb>/.json?shallow=true&timeout=3s
 - A 401 on ONE rep secures the whole shared-project cluster.
 
 ## Confirmed instances (history)
+- 2026-06-15 (r-storage): **app.mevo.com / mevo-e81f6.firebasestorage.app = OPEN/world-LISTABLE
+  Storage bucket** (unauth `GET firebasestorage.googleapis.com/v0/b/mevo-e81f6.firebasestorage.app/o`
+  = HTTP 200 + items[]: counter.json, counter_mevogo.json, counter_multicam.json — keys only, NEVER
+  downloaded). Junk-bucket control = 404 (real 200, not catch-all). LESSON: r128 marked mevo "NO-RTDB"
+  (databaseURL:"") and STOPPED — but the STORAGE surface was never tested and IS open. databaseURL:""
+  ≠ no Firebase surface; ALWAYS test Storage + Firestore on Firestore/Auth-only projects. Honest sev
+  LOW-MED (listed objects = app counters, not obvious PII — operator assesses contents + tests write).
+  logitech H1 mid. NOT a dup: kiwi finding was RTDB-read; this is the Storage primitive on a different project.
 - 2026-06-15 (r128): **app.kiwi.com / skypicker-984.firebaseio.com = OPEN read** (config-only:
   attribution/affiliates, configuration/android+ios, nationalityAlternatives, onDeviceSearch). LOW
   read-only; write-test pending (operator). kiwicom H1 mid. State id 72.
-- SECURED (401): type-mvp (Streamlabs/Logitech), ecr-prod-7de91 (CM.com), ckmobilegcm (CreditKarma),
-  api-project-518865853796 (Viator, r-2026-06-13).
-- NO-RTDB: superhuman, truecaller-web, mevo, insomnia, dpg-media-boekenwijzer, wrapped-party.
+- SECURED (401/403): type-mvp (Streamlabs/Logitech) RTDB+Storage-403, ecr-prod-7de91 (CM.com),
+  ckmobilegcm (CreditKarma) Storage-404, api-project-518865853796 (Viator, r-2026-06-13),
+  truecaller-web Storage-403, standards-site-beta (Etsy/Bugcrowd elite) RTDB-401+Storage-403,
+  skypicker-984 (Kiwi) Storage-403 + Firestore-404(no-db).
+- NO-BUCKET (Storage 404 = not provisioned): superhuman-email-blast, insomnia-api-production,
+  dpg-media-boekenwijzer, ckmobilegcm, skypicker-984(.firebasestorage.app variant).
+- NO-RTDB (databaseURL:""): superhuman, truecaller-web, mevo, insomnia, dpg-media-boekenwijzer, wrapped-party.
+  ⚠ "NO-RTDB" does NOT mean no Firebase exposure — test Storage + Firestore too (mevo proved it).
