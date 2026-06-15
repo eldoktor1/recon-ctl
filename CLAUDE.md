@@ -57,6 +57,14 @@ jhaddix/XBOW/PortSwigger, CVE/advisory writeups, technique posts) — via WebSea
 the part-time hunter beats full-timers and how the MOTTO's "use Claude's understanding where tools are
 blind" actually works: be informed, not fast-and-blind. Don't act on a hunch when the source is one
 fetch away (ties to template-safety: read before you fire). Applies to /hunt AND to me building this engine.
+**DEAD-END ⇒ RESEARCH (reinforced 2026-06-15, "very critical"):** research is also THE move whenever we
+hit a dead end / need fresh paths / are in a tough spot on ANY class/host/tech/tool/design. When stuck,
+STOP grinding and RESEARCH THE INTERNET — it ALWAYS has an answer in some form (writeups, disclosed
+reports, CVE analysis, GitHub PoCs, forum threads, talks, framework exploitation guides, threat intel).
+Reflected-XSS dead ⇒ research that framework's DOM/postMessage/CVE patterns; tech hardened ⇒ research its
+bypasses; out of ideas ⇒ research fresh recon + the program's disclosed bugs. Threat intel + research +
+studying are what turn a script kiddie into a real researcher. NEVER declare a dead end before researching
+a fresh angle; make web search a reflex at the FIRST sign of stuck, not a last resort.
 
 ## THE HUNT FLOW — keyword `hunt` (operator-locked 2026-06-13)
 When the operator says **`hunt`** / "let's hunt" / "keep hunting", run this loop AUTONOMOUSLY until
