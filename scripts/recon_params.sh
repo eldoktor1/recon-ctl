@@ -112,6 +112,17 @@ KATANA_CRAWL_TIMEOUT="${KATANA_CRAWL_TIMEOUT:-90}"
 KATANA_RL="${KATANA_RL:-15}"
 GAU_TIMEOUT="${GAU_TIMEOUT:-30}"    # otx+urlscan are fast; 30s is ample; 60 wasted when providers blocked
 MAX_URLS_PER_HOST="${PARAMS_MAX_URLS_PER_HOST:-2000}"
+# Portal product-class noise guard (crawl_host). Some CMS/portals (Liferay DXP, etc.) emit
+# thousands of param URLs that gf mistags but that are NOT injectable: the Liferay /combo
+# JS/CSS bundler (param names = asset file paths → bogus [xss]) and the document-library
+# /documents/<groupId>/0/<name>/<uuid> download URLs (file referenced by the UUID path, not
+# the param → bogus [lfi]/[cmdi]/[rce] triple-FP). These are shipped-product endpoints (same
+# templated path on every host of that stack) = duplicates, not findings. We drop the known
+# portal paths outright, then apply a CONSERVATIVE template-domination backstop: if a host
+# yields a LOT of param URLs and one normalized path-template dominates, treat that template
+# as product-class and drop it (a real app spreads params across many distinct routes).
+PARAMS_PRODUCTCLASS_MIN="${PARAMS_PRODUCTCLASS_MIN:-150}"    # only engage the backstop above this raw param-URL count
+PARAMS_PRODUCTCLASS_FRAC="${PARAMS_PRODUCTCLASS_FRAC:-60}"   # drop the top template iff it is >= this % of the set (integer %)
 PARAMS_SCANNED_FIELD="${PARAMS_SCANNED_FIELD:-params_scanned_at}"   # recon_alive date field = per-host cooldown ledger (ES source of truth)
 # Archive proxy (Cloudflare worker) — restores Wayback CDX param-URL discovery that the
 # Internet Archive blocks from our Mullvad datacenter egress (it blackholes wayback for
@@ -199,6 +210,49 @@ crawl_host() {
            for(i=1;i<=n;i++){ nm=P[i]; sub(/=.*/,"",nm);
              if (nm !~ /^(utm_[a-z_]+|fbclid|gclid|gclsrc|dclid|wbraid|gbraid|msclkid|mc_cid|mc_eid|_ga|_gl|yclid|igshid|twclid|spm|scm|fb_action_ids|fb_action_types|fb_source|ref|referrer)$/) { real=1; break } }
            if (real) print }' "$hd/raw" > "$hd/raw.f" 2>/dev/null && mv "$hd/raw.f" "$hd/raw"
+  fi
+  # Portal product-class noise: drop KNOWN gf-mistagged shipped-product paths before gf sees
+  # them. All three are Liferay's static-asset plumbing, never an injectable sink:
+  #   /combo bundler (?...js=/css= → bogus xss on asset file-paths),
+  #   /documents/<groupId>/0/<name>/<uuid> document-library downloads (bogus lfi/cmdi/rce —
+  #     the file is referenced by the UUID path, not the param),
+  #   /o/<module>/.../<file>.css|.js OSGi-module CSS/JS bundler (same as /combo: bogus xss on
+  #     a static asset whose only params are cache-busters minifierType/browserId/themeId/t).
+  # Anchored to the path component so genuine app routes survive (e.g. /combobox?,
+  # /documentsearch?, /api/x.json?id= do NOT match — only .css/.js under /o/). See PARAMS_PRODUCTCLASS_* above.
+  if [[ -s "$hd/raw" ]]; then
+    grep -avE '://[^/]+(/[^?]*)?/combo[/?]|://[^/]+(/[^?]*)?/documents/[0-9]+/|://[^/]+(/[^?]*)?/o/[^?]*\.(css|js)([?]|$)' "$hd/raw" > "$hd/raw.f" 2>/dev/null \
+      && mv "$hd/raw.f" "$hd/raw"
+  fi
+  # Conservative template-domination backstop: if this host yields a LOT of param URLs and a
+  # single normalized path-template (path with numeric/uuid/hex segments collapsed + the
+  # param-name set) accounts for the bulk of them, that template is a shipped-product endpoint
+  # repeated across the site, not real per-app surface — drop just that one dominant template.
+  if [[ -s "$hd/raw" ]]; then
+    awk -v MIN="$PARAMS_PRODUCTCLASS_MIN" -v FRAC="$PARAMS_PRODUCTCLASS_FRAC" '
+      function tmpl(line,   u,p,q,nseg,seg,i,nm,nq,P,names) {
+        u=line; sub(/^https?:\/\/[^\/]+/,"",u)        # strip scheme+host → path?query
+        p=u; q=u; sub(/\?.*$/,"",p); sub(/^[^?]*\??/,"",q)
+        nseg=split(p,seg,"/")                          # collapse volatile path segments
+        for(i=1;i<=nseg;i++){
+          if(seg[i] ~ /^[0-9]+$/) seg[i]="#"
+          else if(seg[i] ~ /^[0-9a-fA-F]{8}-[0-9a-fA-F-]{20,}$/) seg[i]="#"
+          else if(seg[i] ~ /^[0-9a-fA-F]{16,}$/) seg[i]="#"
+        }
+        p=seg[1]; for(i=2;i<=nseg;i++) p=p"/"seg[i]
+        nq=split(q,P,/&/); names=""                    # param-name list (keeps templates with same path but different params distinct)
+        for(i=1;i<=nq;i++){ nm=P[i]; sub(/=.*/,"",nm); names=names" "nm }
+        return p"|"names
+      }
+      { lines[NR]=$0; key[NR]=tmpl($0); cnt[key[NR]]++; total++ }
+      END {
+        if (total < MIN) { for(i=1;i<=NR;i++) print lines[i]; exit }
+        top=""; topn=0
+        for(k in cnt) if(cnt[k]>topn){ topn=cnt[k]; top=k }
+        if (topn*100 >= total*FRAC && topn>1) {        # dominant template → product-class, drop it
+          for(i=1;i<=NR;i++) if(key[i]!=top) print lines[i]
+        } else { for(i=1;i<=NR;i++) print lines[i] }
+      }' "$hd/raw" > "$hd/raw.f" 2>/dev/null && mv "$hd/raw.f" "$hd/raw"
   fi
   local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
   log "  $host — ${raw_n:-0} param URLs"
