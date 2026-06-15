@@ -746,7 +746,9 @@ PY
     "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all \
       --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" "${dfx_auth[@]}" \
       --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.out" || true
-    local pocs; pocs="$(grep -cE '\[POC\]' "$WORK/dalfox.out" 2>/dev/null || echo 0)"
+    # grep -c prints 0 AND exits 1 on no-match; a trailing "|| echo 0" would append a 2nd 0
+    # (pocs="0\n0") and break the arithmetic test — count safely instead.
+    local pocs; pocs="$(grep -cE '\[POC\]' "$WORK/dalfox.out" 2>/dev/null)"; pocs="${pocs//[^0-9]/}"; pocs="${pocs:-0}"
     if [[ "${pocs:-0}" -gt 0 ]]; then
       grep -E '\[POC\]' "$WORK/dalfox.out" | while IFS= read -r poc; do
         jq -nc --arg p "$poc" --arg c xss --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
