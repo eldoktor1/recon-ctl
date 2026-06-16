@@ -636,6 +636,16 @@ SCREENSHOT_SCRIPT="${SCREENSHOT_SCRIPT:-$(script_path recon_screenshot.sh)}"
 SCREENSHOT_INTERVAL="${SCREENSHOT_INTERVAL:-7200}"  # 2h
 run_screenshot() { v21_killed screenshot && return 0; [[ -f "$SCREENSHOT_SCRIPT" ]] && bash "$SCREENSHOT_SCRIPT" cycle || true; }
 
+# ---- recon-audit self-audit (recon_selfaudit.sh) -----------------------------
+# Low-frequency standing self-audit. DRY-RUN ONLY from the daemon — it never passes
+# --apply (whitelist remediation stays an operator action). Not target-facing (reads
+# ES/SQLite/state, writes the report + selfaudit_latest.json + a cooled-down #ops
+# summary). Runs as d0k. The supervise_loop VPN gate already skips it while vpn_down
+# is set, so a paused pipeline doesn't churn audits.
+SELFAUDIT_SCRIPT="${SELFAUDIT_SCRIPT:-$(script_path recon_selfaudit.sh)}"
+SELFAUDIT_INTERVAL="${SELFAUDIT_INTERVAL:-21600}"  # 6h
+run_selfaudit() { [[ -f "$SELFAUDIT_SCRIPT" ]] && bash "$SELFAUDIT_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
 # gate, and the guard must keep running while down to detect recovery). Fast
@@ -738,6 +748,7 @@ run_discord_bot() {
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
+  supervise_loop "self-audit"     "SELFAUDIT_INTERVAL"     run_selfaudit      &
 
     # Long-running — supervised with simple restart loops
   (

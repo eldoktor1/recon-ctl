@@ -243,4 +243,44 @@ if [[ -f "$THERMAL_FILE" ]]; then
   fi
 fi
 
+# ── 10. recon-audit liveness — the auditor must not silently die ─────────────
+# The self-audit loop refreshes selfaudit_latest.json every SELFAUDIT_INTERVAL (6h).
+# If it's older than that interval + grace, the auditor itself has stalled — that is
+# its own #ops alarm (action-only, anti-spam — same pattern as the 2IC/thermal alerts).
+SELFAUDIT_JSON="$STATE_DIR/selfaudit_latest.json"
+SELFAUDIT_MAX_AGE_H="${WATCHDOG_SELFAUDIT_MAX_AGE_H:-8}"   # 6h interval + 2h grace
+SELFAUDIT_REALERT_H="${WATCHDOG_SELFAUDIT_REALERT_H:-6}"
+SELFAUDIT_MARK="$STATE_DIR/.watchdog_selfaudit_alerted"
+sa_now="$(date +%s)"
+if [[ -f "$SELFAUDIT_JSON" ]]; then
+  sa_mtime="$(stat -c %Y "$SELFAUDIT_JSON" 2>/dev/null || echo 0)"
+  sa_age_h=$(( (sa_now - sa_mtime) / 3600 ))
+else
+  sa_age_h=9999
+fi
+# Only alarm while the daemon is up — a down daemon is already covered by section 1/4,
+# and the self-audit loop can't run while the pipeline is stopped or VPN-paused.
+if [[ "$sa_age_h" -ge "$SELFAUDIT_MAX_AGE_H" && "$daemon_running" -eq 1 && ! -f "$STATE_DIR/vpn_down" ]]; then
+  sa_reason="recon-audit STALE ${sa_age_h}h (selfaudit_latest.json older than ${SELFAUDIT_MAX_AGE_H}h) — the self-audit loop has stalled; check the daemon self-audit loop / recon_selfaudit.sh"
+  log "SELFAUDIT-LIVENESS ALERT: $sa_reason"
+  sa_last="$(cat "$SELFAUDIT_MARK" 2>/dev/null || echo 0)"; [[ "$sa_last" =~ ^[0-9]+$ ]] || sa_last=0
+  if (( sa_now - sa_last >= SELFAUDIT_REALERT_H * 3600 )); then
+    sa_hook=""; command -v discord_hook >/dev/null 2>&1 && sa_hook="$(discord_hook ops 2>/dev/null || true)"
+    if [[ -n "$sa_hook" ]] && command -v discord_post >/dev/null 2>&1; then
+      if discord_post "$sa_hook" "$(jq -nc --arg c "🩺 **RECON-AUDIT WATCHDOG** — ${sa_reason:0:1800}" '{content:$c}')" >/dev/null 2>&1; then
+        echo "$sa_now" > "$SELFAUDIT_MARK"; log "selfaudit-liveness alert posted to #ops"
+      else
+        log "selfaudit-liveness #ops post FAILED (will retry next cycle)"
+      fi
+    else
+      log "selfaudit-liveness: #ops webhook unset — alert not delivered"
+    fi
+  else
+    log "selfaudit-liveness alert suppressed (cooldown — last $(( (sa_now - sa_last) / 3600 ))h ago)"
+  fi
+else
+  rm -f "$SELFAUDIT_MARK" 2>/dev/null || true
+  log "recon-audit OK (selfaudit_latest.json ${sa_age_h}h old)"
+fi
+
 log "=== watchdog done ==="

@@ -725,10 +725,13 @@ def _ops_hook() -> str:
 
 
 def _ops_post(hook: str, msg: str) -> bool:
+    # Discord/Cloudflare 403s the default Python-urllib User-Agent, so a UA is REQUIRED
+    # (this is why the bash discord_post via curl works but a bare urllib post silently fails).
     import urllib.request
     try:
         req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": "recon-audit/1.0 (+selfaudit)"})
         with urllib.request.urlopen(req, timeout=15) as r:
             return 200 <= getattr(r, "status", 200) < 300
     except Exception:
