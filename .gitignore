@@ -48,3 +48,10 @@ tools/__pycache__/
 
 # github-subdomains / scanner stray outputs in repo root
 /*.txt
+
+# recon-audit runtime reports (regenerated every run / every 6h by the daemon).
+# The machine-readable source of truth is ~/recon/state/selfaudit_latest.json (outside
+# the repo). The tracked manual deep-audit (docs/audit_2026-06-11.md) stays tracked;
+# a new manual audit, if ever desired, can be force-added.
+/docs/audit_20*.md
+/docs/selfaudit_fixprompt_*.md
