@@ -393,6 +393,22 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   stay 100% on Mullvad. Don't burn it: gentle by the per-host 7d cooldown + worker cache; never
   mass-blast or the CF egress gets IA-blocked too. See memory `project_archive_cloudflare_proxy`.
 
+## Self-audit (recon-audit) — the pipeline audits itself on a schedule
+`recon-audit` (`scripts/recon_selfaudit.sh` → `engine/selfaudit.py`) is the STANDING, automated
+version of the manual `docs/audit_*.md` battery: ~25 named invariant checks (VPN/egress + vpn_down
+coherence, scope/feed freshness, ES health + doc-count sanity, findings.db integrity + reporter-feed
+sanity + FP-sig/knowledge_base, per-lane silent-zero via `observability.yield_audit`, dangling refs to
+deleted scripts, daemon/queue/spool liveness, perm drift, unbounded growth) → a dated report
+(`docs/audit_<date>.md`) + `~/recon/state/selfaudit_latest.json`; exits non-zero on any unresolved HIGH.
+**It AUTO-FIXES ONLY a narrow, reversible data/state whitelist** (stale validate locks, dead daemon
+PID-file, known-good perms, spool retry, log rotation), behind `recon-audit --apply` only, each action
+idempotent + logged to `selfaudit_actions.jsonl`. **Everything else is DETECT-ONLY** → a ready-to-paste
+Claude-Code fix-prompt (`docs/selfaudit_fixprompt_<date>.md`) + one cooled-down `#ops` alarm. HARD
+BOUNDARY (enforced in code): it NEVER edits code/config, touches egress/Mullvad/nftables/gates, clears
+`vpn_down`, auto-submits/ignores/fps, or restarts the daemon. The daemon runs it **dry every 6h** (never
+`--apply`); `--apply` is operator-only. `recon_watchdog.sh` alarms `#ops` if the auditor's own output
+goes stale (it must not silently die).
+
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
   WSL shell). NEVER invoke bare `python`/`python3`/`py`/`pip` on the Windows/MINGW side — Windows
