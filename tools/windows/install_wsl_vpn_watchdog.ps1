@@ -19,16 +19,20 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Dir   = 'C:\Users\mhabs\recon-watchdog'
-$Dest  = Join-Path $Dir 'wsl_vpn_watchdog.ps1'
-$Src   = Join-Path $PSScriptRoot 'wsl_vpn_watchdog.ps1'
+$Dir     = 'C:\Users\mhabs\recon-watchdog'
+$Dest    = Join-Path $Dir 'wsl_vpn_watchdog.ps1'
+$Src     = Join-Path $PSScriptRoot 'wsl_vpn_watchdog.ps1'
+$VbsDest = Join-Path $Dir 'run_watchdog_hidden.vbs'
+$VbsSrc  = Join-Path $PSScriptRoot 'run_watchdog_hidden.vbs'
 
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-Copy-Item -Path $Src -Destination $Dest -Force
+Copy-Item -Path $Src    -Destination $Dest    -Force
+Copy-Item -Path $VbsSrc -Destination $VbsDest -Force
 Write-Host "Deployed watchdog -> $Dest"
+Write-Host "Deployed launcher -> $VbsDest"
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NonInteractive -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Dest`""
+# Launch via wscript (no console) so the 3-min run never flashes a window.
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$VbsDest`""
 
 # repeat every $IntervalMin forever (PS 5.1: graft a .Repetition from a helper trigger)
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date)
