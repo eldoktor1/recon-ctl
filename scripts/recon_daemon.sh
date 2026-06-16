@@ -181,6 +181,34 @@ prepare_scanner_dirs
 
 log() { printf '[%s DAEMON] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# Throttled, self-diagnosing notice for the vpn_down paused state. Reads LOCAL
+# state only (vpn_status.json + the flag's own trip reason) — NO network — and
+# logs WHY egress is gated plus the concrete remedy, distinguishing a CONFIRMED
+# Mullvad leak (reconnect Mullvad) from an UNREACHABLE/wedged egress (restart
+# WSL). Emits at most one line per VPN_DOWN_NOTICE_THROTTLE seconds, shared
+# across every supervised loop via a stamp file, so the pause explains itself
+# instead of N loops printing the same opaque line every 15s.
+vpn_down_notice() {
+  local throttle="${VPN_DOWN_NOTICE_THROTTLE:-300}"
+  local stamp="$STATE_DIR/.vpn_down_notice_at" now last
+  now="$(date +%s)"; last="$(cat "$stamp" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last < throttle )) && return 0   # another loop already announced recently
+  echo "$now" > "$stamp" 2>/dev/null || true
+  local reason mv method remedy
+  reason="$(tr -d '\n' < "$STATE_DIR/vpn_down" 2>/dev/null | cut -c1-200)"
+  # NB: plain '.mullvad', NOT '.mullvad // "null"' — jq's // treats a literal
+  # false like null, which would misread a real LEAK as merely unreachable.
+  mv="$(jq -r '.mullvad' "$STATE_DIR/vpn_status.json" 2>/dev/null)"; [[ -n "$mv" ]] || mv=null
+  method="$(jq -r '.method // "?"' "$STATE_DIR/vpn_status.json" 2>/dev/null)"; [[ -n "$method" ]] || method='?'
+  case "$mv" in
+    false) remedy="CONFIRMED LEAK — Mullvad egress dropped (real IP was exposed). Remedy: reconnect Mullvad on Windows; the guard auto-resumes once a Mullvad exit is reconfirmed." ;;
+    true)  remedy="RECOVERING — egress now reports a Mullvad exit but the flag is still set; the guard should clear vpn_down within one check interval. If it persists, re-run the safe launcher." ;;
+    *)     remedy="EGRESS UNREACHABLE (method=$method) — WSL can't reach the check endpoints; Mullvad-on-Windows may be fine. Likely a wedged WSL network stack. Remedy: 'wsl --shutdown' from Windows, then re-run the safe launcher; the guard auto-clears vpn_down once egress is reconfirmed." ;;
+  esac
+  log "[vpn-gate] PAUSED on vpn_down — $remedy${reason:+ | trip: $reason}"
+}
+
 archive_file() {
   local archive_root="$1" file="$2"
   [[ -f "$file" ]] || return 0
@@ -382,7 +410,7 @@ supervise_loop() {
     # runs until Mullvad is reconfirmed and the guard clears the flag. This is
     # what stops the pipeline from scanning over the real IP if the VPN drops.
     if [[ "$name" != "vpnguard" && -f "$STATE_DIR/vpn_down" ]]; then
-      log "[$name] paused — VPN down (vpn_down set); not running until VPN restored"
+      vpn_down_notice   # throttled, self-diagnosing (reason + remedy); shared across loops
       sleep 15
       continue
     fi
