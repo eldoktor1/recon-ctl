@@ -51,6 +51,38 @@ q="$(jq -nc --argjson n "$NDAY_HOSTS" '{size:($n*4),
 resp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null)"
 mapfile -t rows < <(printf '%s' "$resp" | jq -c '.hits.hits[]._source' 2>/dev/null \
   | while IFS= read -r r; do h="$(printf '%s' "$r" | jq -r '.host // empty')"; grep -qxF "$h" "$SEEN" 2>/dev/null || printf '%s\n' "$r"; done | head -n "$NDAY_HOSTS")
+# AUDIT #8: race the EPSS / nuclei-template-available subset FIRST. recon_vuln_feed.sh already
+# joins EPSS + nuclei-template + KEV into a per-asset best_vuln_tier (T0/T1 = highest risk), but
+# nday only sorted by fresh+score and ignored it. Pull T0/T1 in-scope+paying hosts from
+# vuln_targets.jsonl and PREPEND them (one per host) so the highest-EV CVEs are version-reasoned
+# first. Purely additive: missing/empty feed => unchanged ES behaviour.
+VULN_TARGETS="${VULN_TARGETS:-$BASE_DIR/vuln/vuln_targets.jsonl}"
+NDAY_FEED="${NDAY_FEED:-8}"
+feed_rows=()
+if [[ -f "$VULN_TARGETS" ]]; then
+  declare -A _fhseen
+  while IFS= read -r fr; do
+    [[ -z "$fr" ]] && continue
+    fh="$(printf '%s' "$fr" | jq -r '.host // empty' 2>/dev/null)"; [[ -z "$fh" ]] && continue
+    [[ -n "${_fhseen[$fh]:-}" ]] && continue                 # one entry per host
+    grep -qxF "$fh" "$SEEN" 2>/dev/null && continue           # not already assessed
+    _fhseen[$fh]=1; feed_rows+=("$fr")
+    [[ "${#feed_rows[@]}" -ge "$NDAY_FEED" ]] && break
+  done < <(jq -c 'select(.triage_in_scope==true and .triage_pays==true and (.triage_out_of_scope!=true)
+                    and ((.best_vuln_tier // "")|test("^T[01]$")) and (.best_vuln_id != null))
+                  | {host, tech:(.tech//[]), triage_kev_cves:[.best_vuln_id], triage_program:"",
+                     webserver:"", status_code:(.status_code//0), title:(.title//""),
+                     triage_breaking_vuln:false, nday_tier:.best_vuln_tier}' "$VULN_TARGETS" 2>/dev/null)
+fi
+if [[ "${#feed_rows[@]}" -gt 0 ]]; then
+  declare -A _seenhost; merged=()
+  for r in "${feed_rows[@]}" "${rows[@]}"; do
+    h="$(printf '%s' "$r" | jq -r '.host // empty' 2>/dev/null)"; [[ -z "$h" ]] && continue
+    [[ -n "${_seenhost[$h]:-}" ]] && continue; _seenhost[$h]=1; merged+=("$r")
+  done
+  rows=("${merged[@]:0:$NDAY_HOSTS}")
+  log "🏁 n-day feed: ${#feed_rows[@]} T0/T1 (EPSS/template) host(s) prepended → race first"
+fi
 [[ "${#rows[@]}" -gt 0 ]] || { log "no fresh KEV/CVE-matched assets to assess"; exit 0; }
 log "🏁 ─── N-DAY RACE ─── ${#rows[@]} CVE-matched asset(s) · Claude version-reasoning (kill the KEV FP) ───"
 
