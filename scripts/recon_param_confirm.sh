@@ -31,6 +31,14 @@ WORKER="${PARAM_WORKER:-$REPO_DIR/tools/param_confirm_worker.py}"
 SEEN="${PARAM_SEEN:-$STATE_DIR/param_confirm_seen.txt}"
 PC_CLASSES="${PC_CLASSES:-ssti redirect sqli}"
 PC_BATCH="${PC_BATCH:-10}"                 # URLs per class per cycle (quota/load bound)
+# sqlmap SQLi VERIFY (operator-authorized 2026-06-17, in-scope+paying only). PoC depth only
+# (--banner/--current-db), NEVER mass --dump of third-party data, NO stacked (technique excludes S),
+# rate-limited (--delay 1 --threads 1) so it never bans the Mullvad exit, bounded per cycle (anti-burn),
+# skip "no automated scanners" programs. See CLAUDE.md SQLi hard line + project_xss_sqli_rs0n_lane.
+SQLMAP_BIN="${SQLMAP_BIN:-$(command -v sqlmap 2>/dev/null || echo '')}"
+SQLMAP_BATCH="${SQLMAP_BATCH:-3}"          # sqlmap runs per cycle (gentle; unseen overflow retried next cycle)
+SQLMAP_TIMEOUT="${SQLMAP_TIMEOUT:-240}"    # hard wall-clock cap per URL
+SQLMAP_SKIP_PROGRAMS="${SQLMAP_SKIP_PROGRAMS:-synergie}"   # programs whose rules forbid automated scanners
 es() { curl -fsS -m 20 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 # Live scope guard (authoritative at probe time): only probe a host that is CURRENTLY
 # in-scope + paying + not out-of-scope — never trust stale catalog scope.
@@ -46,6 +54,25 @@ in_scope_now() {
   fi
 }
 
+# sqlmap SQLi verify: gentle, PoC-depth, read-only. Prints JSON {dbms,evidence} on confirm, else empty.
+# technique=BEUT (Boolean/Error/Union/Time) — EXCLUDES Stacked (S) so no write/destructive queries.
+# --banner/--current-db = PoC (version + db NAME), never a data dump. Output dir is a throwaway /tmp.
+sqlmap_verify() {
+  local url="$1" od out dbms
+  [[ -n "$SQLMAP_BIN" ]] || return 0
+  od="$(mktemp -d "${TMPDIR:-/tmp}/sqlmapv.XXXXXX")"
+  out="$(timeout "$SQLMAP_TIMEOUT" "$SQLMAP_BIN" -u "$url" --batch --random-agent \
+        --level 1 --risk 1 --technique=BEUT --threads 1 --delay 1 --time-sec 5 \
+        --timeout 15 --retries 1 --crawl 0 --flush-session --banner --current-db \
+        --disable-coloring --answers="quit=N,crack=N,dict=N,continue=Y" -v1 \
+        --output-dir="$od" 2>/dev/null)"
+  rm -rf "$od" 2>/dev/null
+  printf '%s' "$out" | grep -qiE "the following injection point|sqlmap identified|is vulnerable|back-end DBMS:" || return 0
+  dbms="$(printf '%s' "$out" | grep -ioE "back-end DBMS:.*" | head -1 | sed 's/[[:space:]]*$//')"
+  [[ -n "$dbms" ]] || dbms="injection point confirmed (DBMS unidentified)"
+  jq -nc --arg d "$dbms" '{confirmed:true, dbms:$d, evidence:("sqlmap VERIFIED SQL injection — "+$d+" (PoC: --banner/--current-db; NO data dumped)")}'
+}
+
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/param_confirm.lock"; flock -n 9 || { warn "already running"; exit 0; }
 [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — refusing to probe targets"; exit 0; }
@@ -55,7 +82,7 @@ command -v python3 >/dev/null 2>&1 || { warn "python3 missing"; exit 0; }
 es "$ES_URL/$PARAMS_INDEX/_count" >/dev/null 2>&1 || { log "no params catalog ($PARAMS_INDEX) yet"; exit 0; }
 touch "$SEEN"
 
-confirmed_total=0; tested_total=0
+confirmed_total=0; tested_total=0; sqlmap_done=0
 IFS=' ' read -ra _PC_ARR <<< "$PC_CLASSES"   # split on space (global IFS=$'\n\t' would NOT)
 for cls in "${_PC_ARR[@]}"; do
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
@@ -75,6 +102,22 @@ for cls in "${_PC_ARR[@]}"; do
     [[ -f "$STATE_DIR/vpn_down" ]] && break
     host="$(printf '%s' "$url" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
     in_scope_now "$host" || { printf '%s\n' "$url" >> "$SEEN"; continue; }   # live scope guard
+    # SQLi → sqlmap VERIFY (operator-authorized; gentle, bounded, PoC-depth, skip no-scanner programs).
+    # Catches blind/time/union the cheap '-vs-'' worker misses. Falls through to the worker if sqlmap absent.
+    if [[ "$cls" == "sqli" && -n "$SQLMAP_BIN" ]]; then
+      [[ "$sqlmap_done" -ge "$SQLMAP_BATCH" ]] && break   # per-cycle cap; unseen overflow retried next cycle
+      prog="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '.triage_program // ""' 2>/dev/null)"
+      if printf '%s' "$prog" | grep -qiE "$SQLMAP_SKIP_PROGRAMS"; then printf '%s\n' "$url" >> "$SEEN"; continue; fi
+      res="$(sqlmap_verify "$url")"
+      sqlmap_done=$((sqlmap_done+1)); tested_total=$((tested_total+1)); printf '%s\n' "$url" >> "$SEEN"
+      [[ -n "$res" ]] || continue
+      ev="$(printf '%s' "$res" | jq -c --arg u "$url" '{probe:"sqlmap", dbms:.dbms, evidence:.evidence, matched_at:$u}' 2>/dev/null)"
+      V3_DB="$V3_DB" python3 "$STATE_PY" record-confirmed "$host" "$url" "$prog" "sqli" "sqli" "15" "0.92" "$ev" >/dev/null 2>&1 || true
+      es -X POST "$ES_URL/$INDEX_NAME/_update/$host" -d "$(jq -nc --argjson e "${ev:-{}}" '{doc:{triage_gate_state:"confirmed", triage_gate_class:"sqli", triage_gate_evidence:$e}}')" >/dev/null 2>&1 || true
+      confirmed_total=$((confirmed_total+1))
+      log "   💥 sqli VERIFIED (sqlmap) · $host · $(printf '%s' "$res" | jq -r '.dbms // "?"')"
+      continue
+    fi
     out="$(timeout 60 python3 "$WORKER" "$url" "$cls" 2>/dev/null)"
     printf '%s\n' "$url" >> "$SEEN"
     tested_total=$((tested_total+1))
