@@ -40,6 +40,15 @@ OBJRES=re.compile(r'/(users?|accounts?|orders?|invoices?|documents?|profiles?|me
 SENS=re.compile(r'(payment|card|invoice|transaction|balance|wallet|clabe|bank|account|kyc|ssn|salary|salaries|tax|statement|withdraw|deposit|transfer|loan|credit|billing|payout)',re.I)
 UPDL=re.compile(r'(upload|download|export|attachment|/file|/files|/blob|/media/|presigned)',re.I)
 APIV=re.compile(r'/(api|v\d|graphql|rest|service)',re.I)
+# modern-BOLA signals (audit #10, arXiv 2605.25865 taxonomy):
+# action-level/state-change BOLA = 41.7% of confirmed cases + highest severity (the largest family,
+# missed by read-only/GET-only testing); object-rebinding (owner/account/tenant id as a writable
+# param); tenant-isolation (cross-tenant /org/{id}). GraphQL global IDs (base64) are decoded→
+# incremented→re-encoded systematically.
+ACTION=re.compile(r'/(delete|remove|update|edit|modify|approve|reject|cancel|transfer|invite|revoke|disable|enable|deactivate|activate|grant|assign|reset|promote|merge|publish|unpublish|archive|restore|impersonate|switch|change)(/|$|\b)',re.I)
+REBIND=re.compile(r'[?&](owner_id|account_id|tenant_id|user_id|org_id|organization_id|customer_id|company_id|member_id|group_id|workspace_id)=',re.I)
+TENANT=re.compile(r'/(orgs?|organizations?|tenants?|workspaces?|companies|company|teams?)/:?\{?[\w-]+\}?',re.I)
+GQLID=re.compile(r'(node\(\s*id\s*:|[?&]id=[A-Za-z0-9+/_-]{16,}={0,2})')  # base64-ish GraphQL global id
 NOISE=re.compile(r'\.(js|css|png|jpe?g|svg|gif|woff2?|ttf|ico|map|json)$|/utag|/static/|/assets/|cdn|googleapis|gstatic|/cookie|/privacy|/terms|/legal|hiring-advice|market-insights',re.I)
 # full-URL endpoints pointing at a 3rd-party host are not the target's surface
 THIRDPARTY=re.compile(r'^https?://[^/]*(bugcrowd|hackerone|github|gitlab|google|gstatic|googleapis|cloudflare|sentry|datadog|amazonaws|cloudfront|segment|stripe\.com|paypal|facebook|twitter|linkedin|youtube|atlassian|onetrust|cookielaw|unpkg|jsdelivr|cdnjs|gravatar|intercom|zendesk|hubspot|launchdarkly|amplitude|optimizely)\.',re.I)
@@ -67,12 +76,17 @@ def score_ep(host, ep):
     s=0; idt=[]
     if TEMPLATE.search(p): s+=4; idt.append("templated-id(:id/{id})")
     if NUMID.search(p): s+=4; idt.append("numeric-ID(enumerable)")
-    if UUID.search(p): s+=3; idt.append("uuid")
+    if UUID.search(p): s+=4; idt.append("uuid")            # 39% of BOLA; exploitable once leaked (was +3)
     if IDPARAM.search(p): s+=3; idt.append("id-param")
     m=OBJRES.search(p)
     if m: s+=2; idt.append("obj:"+m.group(1).lower())
+    if ACTION.search(p): s+=3; idt.append("ACTION-LEVEL(state-change)")  # 41.7% of BOLA + highest sev
+    if REBIND.search(p): s+=2; idt.append("rebind(owner/tenant-id)")
+    if TENANT.search(p): s+=2; idt.append("tenant-isolation")
     if APIV.search(p) or host.startswith("api.") or ".api." in host: s+=2; idt.append("api")
-    if "graphql" in p.lower(): s+=2; idt.append("graphql")
+    if "graphql" in p.lower():
+        s+=2; idt.append("graphql")
+        if GQLID.search(p): s+=1; idt.append("graphql-global-id(decode/increment)")
     if UPDL.search(p): s+=2; idt.append("file")
     if SENS.search(p): s+=3; idt.append("SENSITIVE")
     return s, ",".join(idt) if idt else "-"
