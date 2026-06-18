@@ -622,6 +622,13 @@ run_ssrf_oob() { v21_killed ssrf_oob && return 0; [[ -f "$SSRF_OOB_SCRIPT" ]] &&
 DOMXSS_SCRIPT="${DOMXSS_SCRIPT:-$(script_path recon_domxss_confirm.sh)}"
 DOMXSS_INTERVAL="${DOMXSS_INTERVAL:-7200}"   # 2h
 run_domxss() { v21_killed domxss && return 0; [[ -f "$DOMXSS_SCRIPT" ]] && run_scanner bash "$DOMXSS_SCRIPT" || true; }
+# recon_exposed_files — audit fix #9: actively probe high-signal exposed paths (.git/.env/Spring
+# actuator/swagger) with CONTENT-SIGNATURE confirms -> record-confirmed -> 2IC -> SUBMIT. The
+# classic exposed surface U1 (JS-route mining) never actively checked. Target-facing -> run_scanner.
+# Killswitch: state/kill/v2_exposed_files. See docs/detection_verification_audit_2026-06-17.md.
+EXPOSED_FILES_SCRIPT="${EXPOSED_FILES_SCRIPT:-$(script_path recon_exposed_files.sh)}"
+EXPOSED_FILES_INTERVAL="${EXPOSED_FILES_INTERVAL:-3600}"   # 1h
+run_exposed_files() { v21_killed exposed_files && return 0; [[ -f "$EXPOSED_FILES_SCRIPT" ]] && run_scanner bash "$EXPOSED_FILES_SCRIPT" || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -774,6 +781,7 @@ run_discord_bot() {
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
+  supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &

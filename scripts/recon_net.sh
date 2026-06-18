@@ -150,7 +150,11 @@ browser_curl() {
 # of -u "user:pass".  Silent no-op when running as reconrun (no write access to
 # d0k home) — the daemon writes the file as d0k and grants reconrun read via setfacl.
 setup_es_netrc() {
-  local ep; ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+  # NB: group-redirect so the '< file' permission error is ALSO swallowed — when a reconrun
+  # child sources this, ~/.recon_es_pass (d0k 0600) is unreadable and setup_es_netrc is a no-op
+  # (the daemon already wrote a reconrun-readable netrc as d0k); the bare redirect used to spam
+  # "Permission denied" into the daemon log. netrc is authoritative; this only (re)generates it as d0k.
+  local ep; ep="$( { tr -d '[:space:]' < "$HOME/.recon_es_pass"; } 2>/dev/null || true)"
   [[ -z "$ep" ]] && return 0
   if ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null; then
     chmod 600 "$HOME/.recon_es_netrc"
