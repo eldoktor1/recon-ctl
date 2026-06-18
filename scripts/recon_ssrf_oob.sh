@@ -111,22 +111,42 @@ done
 log "injected $injected canaries · waiting ${OOB_WAIT}s for callbacks…"
 sleep "$OOB_WAIT"
 
-# ---- harvest: a callback to canary[i] => sink[i] is SSRF (server fetched it) --
-confirmed=0
+# ---- harvest: a callback to canary[i] => sink[i] fetched it. ATTRIBUTION GATE: a callback
+# proves SOMETHING fetched the canary, but link-unfurlers / WAF-prefetch / AV / crawlers fire
+# callbacks from NON-target IPs (FP). Auto-confirm (0.9) only when the caller IP correlates to
+# the TARGET (= server-side SSRF). Uncorrelated => record at 0.6 + flag so the 2IC/operator
+# adjudicates (real SSRF whose egress IP differs still surfaces as a LEAD; a true unfurler-FP
+# does NOT mint an auto-confirmed report). DNS-protocol callbacks are inherently stronger
+# (the target's resolver looked us up). ---
+confirmed=0; flagged=0
 for ((i=0; i<N; i++)); do
   payload="${PAY[$i]}"
   hit="$(grep -aF "$payload" "$OOB_LOG" 2>/dev/null | head -1)"
   [[ -n "$hit" ]] || continue
   proto="$(printf '%s' "$hit" | jq -r '.protocol // "?"' 2>/dev/null || echo '?')"
   remote="$(printf '%s' "$hit" | jq -r '."remote-address" // .remote_address // "?"' 2>/dev/null || echo '?')"
+  remote="${remote%%:*}"   # strip :port if present
   host="${MAP_HOST[$i]}"; url="${MAP_URL[$i]}"; program="${MAP_PROG[$i]}"
-  ev="$(jq -nc --arg u "$url" --arg c "$payload" --arg pr "$proto" --arg rip "$remote" \
-        '{sink_url:$u, canary:$c, callback_protocol:$pr, callback_remote_ip:$rip,
-          reason:("OOB \($pr) callback to a unique canary planted only in this sink = server-side request forgery (blind, confirmed). Escalate (operator): metadata/internal — DIG.")}' 2>/dev/null)"
+  tips="$(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+  corr="uncorrelated"
+  if [[ -n "$remote" && "$remote" != "?" ]]; then
+    for tip in $tips; do
+      if [[ "$tip" == "$remote" ]]; then corr="exact"; break
+      elif [[ "${tip%.*}" == "${remote%.*}" ]]; then corr="same-/24"; fi
+    done
+  fi
+  if [[ "$corr" == "uncorrelated" ]]; then
+    conf="0.6"; note="remote-ip ${remote:-?} NOT correlated to target {${tips:-?}} — verify it is the server (not a link-unfurler/WAF-prefetch/crawler) before reporting"
+  else
+    conf="0.9"; note="remote-ip $remote $corr to target = server-side SSRF"
+  fi
+  ev="$(jq -nc --arg u "$url" --arg c "$payload" --arg pr "$proto" --arg rip "$remote" --arg t "$tips" --arg cr "$corr" --arg n "$note" \
+        '{sink_url:$u, canary:$c, callback_protocol:$pr, callback_remote_ip:$rip, target_ips:$t, attribution:$cr,
+          reason:("OOB \($pr) callback to a unique canary planted only in this sink = SSRF. "+$n+". Escalate (operator): metadata/internal — DIG.")}' 2>/dev/null)"
   V3_DB="$V3_DB" python3 "$STATE_PY" record-confirmed \
-    "$host" "$url" "$program" "ssrf-oob" "ssrf" "$SCORE" "0.9" "$ev" >/dev/null 2>&1 \
-    && { confirmed=$((confirmed+1)); log "CONFIRMED SSRF ($proto) on $host via planted canary"; }
+    "$host" "$url" "$program" "ssrf-oob" "ssrf" "$SCORE" "$conf" "$ev" >/dev/null 2>&1 \
+    && { confirmed=$((confirmed+1)); [[ "$corr" == "uncorrelated" ]] && flagged=$((flagged+1)); log "SSRF callback ($proto) on $host · attribution=$corr conf=$conf"; }
 done
 
-log "cycle done · candidates=$N injected=$injected CONFIRMED=$confirmed"
+log "cycle done · candidates=$N injected=$injected SSRF-callbacks=$confirmed (uncorrelated/flagged=$flagged)"
 exit 0

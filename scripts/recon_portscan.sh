@@ -518,15 +518,6 @@ for host in "${!HOST_PORTS[@]}"; do
     -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
     -d "$update_body" 2>/dev/null)"
 
-  # Everything gets verified: a CONFIRMED-open critical port (not a CDN/artifact suspect)
-  # routes to Claude VERIFY too — it adversarially kills the documented portscan FPs
-  # (CDN-fronted ACKs, >6-port scan artifacts) before they reach #review.
-  if [[ "${port_suspect:-0}" -eq 0 && "${is_critical:-0}" -gt 0 ]]; then
-    db_confirm "$host" "https://$host" "" "portscan" "critical-port" "15" "0.85" \
-      "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" \
-          '{probe:"portscan-confirmed-open", open_ports:$p, critical:$c}' 2>/dev/null)"
-  fi
-
   if ! printf '%s' "$update_result" | grep -q '"result"'; then
     warn "ES update failed for $host: $update_result"
   fi
@@ -550,19 +541,40 @@ Tier: \`$tier\`  Score bonus: +${score_bonus}
 Run: \`recon-inspect $host\`"
   fi
 
-  # ── Nuclei targeted sweep for services with known templates ───────────────
+  # ── Nuclei targeted sweep = the SERVICE-level confirm. A TCP-open is NOT a finding; an
+  # unauth service ANSWERING is. svc_confirmed=1 only when a template actually matches. ──────
+  svc_confirmed=0; svc_evidence="[]"
   if [[ -n "$NUCLEI_BIN" ]]; then
+    nuclei_hits=""
     for p in "${port_arr[@]}"; do
       tmpl="${NUCLEI_TEMPLATES[$p]:-}"
       [[ -z "$tmpl" ]] && continue
       scheme="http"; [[ "$p" == "443" || "$p" == "8443" || "$p" == "2376" ]] && scheme="https"
       target_url="${scheme}://${host}:${p}"
       log "    nuclei: $target_url → $tmpl"
-      timeout 120 "$NUCLEI_BIN" \
-        -target "$target_url" -t "$tmpl" \
-        -silent -json \
-        >> "$BASE_DIR/nuclei/portscan_confirmed.jsonl" 2>/dev/null || true
+      hit="$(timeout 120 "$NUCLEI_BIN" -target "$target_url" -t "$tmpl" -silent -json 2>/dev/null)"
+      if [[ -n "$hit" ]]; then
+        printf '%s\n' "$hit" >> "$BASE_DIR/nuclei/portscan_confirmed.jsonl" 2>/dev/null || true
+        nuclei_hits="${nuclei_hits}${hit}"$'\n'; svc_confirmed=1
+      fi
     done
+    [[ "$svc_confirmed" -eq 1 ]] && svc_evidence="$(printf '%s' "$nuclei_hits" | jq -sc '[.[]?|{template:(."template-id"//"?"),matched:(."matched-at"//."host"//"?"),name:(.info.name//"")}]' 2>/dev/null || echo '[]')"
+  fi
+
+  # ── CONFIRM GATE (doctrine: "critical port from the number alone" is an FP) ────────────────
+  # service template FIRED  => CONFIRMED critical-port (0.9, service evidence attached)
+  # bare TCP-open only       => LEAD critical-port-open (0.5 -> weekly tier; verify unauth first)
+  # Either way Claude VERIFY adversarially re-checks (CDN ACKs / >6-port artifacts) before #review.
+  if [[ "${port_suspect:-0}" -eq 0 && "${is_critical:-0}" -gt 0 ]]; then
+    if [[ "$svc_confirmed" -eq 1 ]]; then
+      db_confirm "$host" "https://$host" "" "portscan" "critical-port" "15" "0.9" \
+        "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" --argjson e "$svc_evidence" \
+            '{probe:"portscan+service-confirmed", open_ports:$p, critical:$c, service_evidence:$e}' 2>/dev/null)"
+    else
+      db_confirm "$host" "https://$host" "" "portscan" "critical-port-open" "10" "0.5" \
+        "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" \
+            '{probe:"portscan-open-UNVERIFIED-service", open_ports:$p, critical:$c, note:"TCP-open only; no unauth service template fired = LEAD. A critical port from the number alone is an FP — verify the service answers UNAUTHENTICATED before reporting."}' 2>/dev/null)"
+    fi
   fi
 done
 

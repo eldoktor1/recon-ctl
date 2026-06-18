@@ -70,19 +70,36 @@ for dom in "${domains[@]}"; do
   log "   🐙 $dom — ${#repos[@]} candidate repo(s) → trufflehog verify"
 
   # C) verify LIVE secrets in each candidate repo
+  # OWNERSHIP heuristic inputs (lowercased-alnum): a secret only counts as the program's asset
+  # if the repo OWNER plausibly belongs to the domain/program. domain root label + program token.
+  dom_label="$(printf '%s' "${dom%%.*}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')"
+  prog_token="$(printf '%s' "$prog" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')"
   for repo in "${repos[@]}"; do
     [[ -z "$repo" ]] && continue
+    # OWNERSHIP GATE: a verified secret in a THIRD-PARTY repo that merely MENTIONS the domain is
+    # NOT the program's asset (the documented third-party-repo FP our KB hard-lines). owned => the
+    # owner matches the domain/program => CONFIRMED 0.95; otherwise => LEAD 0.5 + flag for the 2IC.
+    owner="$(printf '%s' "${repo%%/*}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')"
+    owned=0
+    [[ -n "$dom_label"  && ( "$owner" == *"$dom_label"*  || ( ${#owner} -ge 4 && "$dom_label"  == *"$owner"* ) ) ]] && owned=1
+    [[ -n "$prog_token" && ${#prog_token} -ge 4 && ( "$owner" == *"$prog_token"* || "$prog_token" == *"$owner"* ) ]] && owned=1
     th="$(GITHUB_TOKEN="$TOKEN" timeout 180 trufflehog github --repo="https://github.com/$repo" --only-verified --json --no-update 2>/dev/null)"
     [[ -n "$th" ]] || continue
     while IFS= read -r sline; do
       [[ -z "$sline" ]] && continue
       det="$(printf '%s' "$sline" | jq -r '.DetectorName // empty' 2>/dev/null)"; [[ -z "$det" ]] && continue
-      ev="$(jq -nc --arg d "$det" --arg r "$repo" --arg dom "$dom" \
-            '{probe:"trufflehog-github-verified",detector:$d,verified:true,repo:$r,domain:$dom}' 2>/dev/null)"
-      # attribute to the domain's apex host as the asset
-      db_confirm "$dom" "https://github.com/$repo" "$prog" "data-leak" "verified-secret-github" "70" "0.95" "$ev" 2>/dev/null || true
+      if [[ "$owned" -eq 1 ]]; then
+        ev="$(jq -nc --arg d "$det" --arg r "$repo" --arg dom "$dom" --arg o "$owner" \
+              '{probe:"trufflehog-github-verified",detector:$d,verified:true,repo:$r,domain:$dom,owner:$o,ownership:"owned"}' 2>/dev/null)"
+        db_confirm "$dom" "https://github.com/$repo" "$prog" "data-leak" "verified-secret-github" "70" "0.95" "$ev" 2>/dev/null || true
+        log "   💥 LIVE SECRET (GitHub, OWNED repo $repo) · $det → SQLite → Claude verify"
+      else
+        ev="$(jq -nc --arg d "$det" --arg r "$repo" --arg dom "$dom" --arg o "$owner" \
+              '{probe:"trufflehog-github-verified",detector:$d,verified:true,repo:$r,domain:$dom,owner:$o,ownership:"third-party",note:"verified secret in a repo that MENTIONS the domain but whose owner does NOT match the program/domain — likely NOT the program asset (third-party-repo FP/dup). Verify ownership before reporting."}' 2>/dev/null)"
+        db_confirm "$dom" "https://github.com/$repo" "$prog" "data-leak" "verified-secret-github-thirdparty" "40" "0.5" "$ev" 2>/dev/null || true
+        log "   ⚠️  LIVE SECRET (GitHub, THIRD-PARTY repo $repo) · $det — LEAD, verify ownership"
+      fi
       secrets=$((secrets+1))
-      log "   💥 LIVE SECRET (GitHub) · $det in $repo (mentions $dom) → SQLite → Claude verify"
     done <<< "$th"
   done
 done
