@@ -1,0 +1,83 @@
+# OPERATING — the one page. Read this when lost.
+
+This is the source of truth for how we hunt. When in doubt, this page wins over any
+research pile. Methodology depth lives in `docs/knowledge/class-unauth-hunting.md`
+(unauth) and the private-program plan in `~/recon/state/private_programs/scopes.md` (authed).
+
+## The doctrine: WIDE EYES, NARROW HANDS
+
+The fear of missing out is the bug. A wide net catches trash; that's why 22 reports
+returned 0 paid. We don't win by missing nothing — we win by deliberately ignoring 95%
+and going deep on a tiny, confirmed set.
+
+- **Wide eyes:** the machine watches ALL surface 24/7 (fresh-CT + wildcard enum). We miss
+  nothing on the INPUT side.
+- **Narrow hands:** only a finding that already **fired a confirm primitive** reaches your
+  eyes. Everything else is logged to a backlog you never open. The FP problem disappears
+  structurally — you're not filtering a noisy net, you replaced it.
+
+**Detection ≠ exploitation.** A 200, a reflection, a version banner, a token-shaped string
+are NOT findings. The gate promotes only at **0.85 confidence** (high/critical fire);
+"medium" stays a logged LEAD.
+
+## Focus: UNAUTHENTICATED, high-severity
+
+Unauth is the only severity class the machine can take from detection → submittable WITHOUT
+your accounts — so it earns while you're at work, and it's higher-severity (network-reachable,
+no privileges) = higher pay. WIDE unauth scanning is dead (the dup flood); NARROW unauth wins:
+**fresh surface + the classes templates miss + a real confirm.**
+
+## The 5 plays (everything else is ignored on purpose)
+
+The machine confirms these while you're at work → **SUBMIT** pile:
+1. **Shadow-endpoint unauth data exposure** — no-auth 200 returning real sensitive data
+   (not the SPA shell). Most machine-confirmable high-sev play.
+2. **Exposed secrets / services / takeover / buckets** — live-validated, not public-by-design,
+   not a login wall, takeover claimability-confirmed.
+3. **n-day (straight-shot unauth-RCE subset)** — version-in-range confirmed, inside the
+   1–7 day race window. You sanity-check before firing.
+
+You hunt these in the evening (the machine surfaces fresh candidates) → **DIG** pile:
+4. **SSRF (hidden sinks)** — OOB-confirmed by the machine, you escalate to metadata/RCE.
+5. **Request smuggling / cache poisoning / auth-bypass** — pure skill, near-zero dup.
+
+If a thing isn't one of these five, the system does not surface it. That sentence is the
+whole anti-FOMO discipline. (Full real-vs-FP discriminators per play: the KB.)
+
+## The week
+
+| Day | Mode | What you do |
+|---|---|---|
+| **Mon / Tue / Wed** | **Unauth** | 20 min: review + submit the SUBMIT pile. Rest: ONE DIG lead (SSRF / smuggling) on a fresh host. |
+| **Thu / Sat** | **Authed / Private** | ENGIE DCP greybox BOLA — your 2 accounts, the swap playbook. Highest pay, lowest dup. |
+| **Fri** | **Cleanup** | Finish/submit any half-done report. Learn ONE technique (an SSRF / smuggling writeup). |
+| **Sun** | **Off** | Rest. The machine keeps watching. |
+
+The machine runs all 7 days. The schedule only changes what the nightly card EMPHASIZES
+(see the 2IC routine `mode`), never the rigor.
+
+## Monday-morning runbook
+
+1. Open tonight's card (`~/recon/briefings/` + Discord #digest).
+2. **SUBMIT** section: each item already fired a confirm primitive — verify the PoC screenshot,
+   submit. 5 quality > 50 FP. Honest severity (overclaim → N/A → dinged signal).
+3. **DIG** section: pick ONE fresh-host lead and go deep (the 80%).
+4. On authed days: open the ENGIE DCP swap playbook instead.
+5. Never re-walk a noted/closed host. The card flags 📝 already-worked.
+
+## Where things live
+
+- **Nightly card:** `recon_briefing.sh` → `~/recon/briefings/tonight_<date>.md` + #digest.
+- **The brain (curation):** 2IC routine `~/.claude/scheduled-tasks/2ic-nightly-recon/SKILL.md`.
+- **Confirm gate:** `scripts/recon_evidence_gate.sh` (`GATE_PROMOTE_CONF=0.85`).
+- **Safe probe (autonomous, read-only):** `scripts/recon_safe_probe.sh`.
+- **Unauth methodology:** `docs/knowledge/class-unauth-hunting.md`.
+- **Private/authed plan:** `~/recon/state/private_programs/scopes.md`.
+- **Submission ledger (dedup):** `~/.recon_submissions.jsonl`.
+
+## Hard lines (never crossed)
+
+Recon confirms exposure EXISTS — never exploit past it, never harvest data, never enumerate
+IDs that aren't yours, never bypass a login to get in, no autonomous RCE. SSRF/n-day
+escalation is operator-overseen + minimal. Mullvad is sole egress (fail-closed on vpn_down).
+Never touch VPN/nftables.

@@ -42,12 +42,14 @@ NUCLEI_BIN="${NUCLEI_BIN:-$(command -v nuclei 2>/dev/null || echo '')}"
 PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 REPORTER_QUEUE="${REPORTER_QUEUE:-$V3_DIR/reporter_queue.jsonl}"
 # v3 SQLite bridge + confidence routing (article-style): a bare nuclei fire is NOT
-# a P0 — confidence gates promotion. <0.70 stays LEAD; 0.70-0.84 confirmed/batch
-# (P1); >=0.85 confirmed/immediate (P0). FP signatures learned from exhausted leads
-# are queried before probing so the gate goes quieter over time.
+# a P0 — confidence gates promotion. The promote bar is 0.85 (the field's near-zero-FP
+# threshold, per chudi/XBOW): only high/critical fires (0.85/0.95) promote to confirmed;
+# a bare "medium" (0.72) stays a LEAD — logged, never surfaced as a finding. Precision
+# over recall = "wide eyes, narrow hands" (see docs/OPERATING.md). FP signatures learned
+# from exhausted leads are queried before probing so the gate goes quieter over time.
 V3_DB="${V3_DB:-$V3_DIR/findings.db}"
 STATE_PY="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
-GATE_PROMOTE_CONF="${GATE_PROMOTE_CONF:-0.70}"
+GATE_PROMOTE_CONF="${GATE_PROMOTE_CONF:-0.85}"
 GATE_IMMEDIATE_CONF="${GATE_IMMEDIATE_CONF:-0.85}"
 
 # Gate policy (decisions: N=5, 3h cooldown, 5d TTL)
