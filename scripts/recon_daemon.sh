@@ -667,6 +667,13 @@ SELFAUDIT_SCRIPT="${SELFAUDIT_SCRIPT:-$(script_path recon_selfaudit.sh)}"
 SELFAUDIT_INTERVAL="${SELFAUDIT_INTERVAL:-21600}"  # 6h
 run_selfaudit() { [[ -f "$SELFAUDIT_SCRIPT" ]] && bash "$SELFAUDIT_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# ---- nuclei template refresh (audit fix: the evidence gate ran -duc with NO -update-templates
+# anywhere = a FROZEN template set, missing every monthly FP-fix + new CVE). Refresh out-of-band
+# (weekly); the gate keeps -duc at probe time for speed. Not target-facing (fetches from GitHub),
+# runs as d0k; the supervise_loop vpn gate skips it while vpn_down (harmless to defer). ----
+NUCLEI_UPDATE_INTERVAL="${NUCLEI_UPDATE_INTERVAL:-604800}"   # weekly
+run_nuclei_update() { command -v nuclei >/dev/null 2>&1 && nuclei -update-templates -silent >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
 # gate, and the guard must keep running while down to detect recovery). Fast
@@ -773,6 +780,7 @@ run_discord_bot() {
   supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
   supervise_loop "self-audit"     "SELFAUDIT_INTERVAL"     run_selfaudit      &
+  supervise_loop "nuclei-update"  "NUCLEI_UPDATE_INTERVAL" run_nuclei_update  &
 
     # Long-running — supervised with simple restart loops
   (
