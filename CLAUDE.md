@@ -36,8 +36,12 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   → `~/recon/briefings/{xss,sqli}_candidates_<date>.md`, surfaced in the 6:30 briefing. CONFIRM on-demand
   (`recon-params confirm xss|sqli <host>`): XSS via **dalfox** (context-aware — break-out must EXECUTE,
   reflection≠XSS, killing the old canary-FP) rate-limited + mining-off; SQLi via the SAFE `'` vs `''`
-  differential (error + boolean length-diff). HARD LINE: never sqlmap / `--dump` / data-harvest / "large
-  traffic"; confirm is manual/on-demand only (never a daemon loop — dalfox fan-out would burn the egress).
+  differential (error + boolean length-diff) THEN **sqlmap to VERIFY** (operator-authorized 2026-06-17,
+  in-scope+paying ONLY): PoC/verification depth (`--banner`/`--current-db`/`--current-user`/`--dbs`),
+  NEVER mass `--dump` of third-party PII, no destructive/stacked-write; rate-limited (`--delay 1 --threads 1`
+  so it never bans the Mullvad exit); SKIP "no automated scanners" programs (e.g. Synergie). DOM-XSS →
+  **dalfox `--deep-domxss --force-headless-verification`** (confirms EXECUTION; better than a static miner;
+  DOMDig is the deep-SPA v2/on-demand). Confirm runs autonomously (gentle/second-stage) AND on-demand.
   Mass-XSS on saturated programs IS the dup trap (the MOTTO); the uniqueness-split + freshness-first +
   real-PoC confirm is what keeps it an edge, not noise. Added 2026-06-14.
 - **n-day racing** (`recon_nday.sh`) — Claude version-reasons KEV/CVE matches to KILL the
@@ -154,7 +158,8 @@ pending action / the operator steps away (so a comeback never loses the thread).
    (rare per-app params/deep routes), SKIP PRODUCT-CLASS (`?q=`/`_next/image?url=` dup-magnets), prefer ⚡
    true_fresh (be first). CONFIRM is the gate, not reflection: dalfox must show EXECUTION (reflection ≠ XSS —
    encoded/framework-safe ⇒ `reflected-not-exploitable` LEAD, move on); SQLi needs the `'`vs`''` differential
-   (never sqlmap/--dump/harvest). IMPACT-GATE: only a DEMONSTRATED executing XSS / injectable SQLi —
+   THEN sqlmap to VERIFY (in-scope+paying; PoC depth, never mass --dump of third-party data, rate-limited).
+   DOM-XSS via dalfox `--deep-domxss --force-headless-verification` (EXECUTION). IMPACT-GATE: only a DEMONSTRATED executing XSS / injectable SQLi —
    theoretical/no-impact (CORS, headers, self-XSS, error-only) gets N/A, don't burn the evening on it
    ([[feedback_theoretical_classes_get_declined]]).
 7. **ANTI-BURN** respect 429/403/rate-limits; back off; never get the Mullvad exit banned.

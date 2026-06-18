@@ -191,20 +191,24 @@ The live, lower-dup surface has shifted:
   the most elusive; needs store-then-trigger reasoning.
 - **JSON columns**, and **NoSQLi operator injection** (Mongo `{"$gt":""}` / `{"$ne":null}` passed
   to a query constructor) — a distinct sub-class.
-- **Confirm (safe):** the `'`vs`''` differential still works, plus boolean true/false and
-  **time-based** (50ms→5s) where reflected error is hidden; NoSQLi via operator-vs-literal diff.
-  HARD LINE unchanged: never sqlmap / `--dump` / harvest.
+- **Confirm:** cheap `'`vs`''` differential + boolean true/false + **time-based** (50ms→5s) as the
+  pre-filter, THEN **sqlmap to VERIFY** (operator-authorized 2026-06-17, in-scope+paying only) — PoC
+  depth (`--banner`/`--current-db`/`--current-user`/`--dbs`), gentle (`--delay 1 --threads 1
+  --level 1 --risk 1`), bounded (`timeout`). HARD LINE: **never mass `--dump` of third-party PII**, no
+  destructive/stacked-write, never get the Mullvad exit banned, skip "no automated scanners" programs.
+  NoSQLi via operator-vs-literal diff (`{"$gt":""}` vs literal — sqlmap is SQL-only).
 
 **Where our AUTONOMOUS coverage actually sits (honest):** the daemon confirmers cover the
 **reflected/param tail** — `recon_params` crawl → `recon_xss_sqli_candidates.py` rs0n ranker
 (~18k XSS / ~3k SQLi catalog, ranked by param-injectability + freshness, UNIQUE-vs-PRODUCT-CLASS
 split → `briefings/{xss,sqli}_candidates_<date>.md`) → `xss-confirm` (headless EXECUTION;
 reflection≠XSS) + `param-confirm` (`'`vs`''`). **The MODERN surface above is NOT autonomously
-confirmed yet:** DOM-XSS is on-demand only (`recon-domxss <host>` source→sink miner —
-`dangerouslySetInnerHTML` rendering server data = stored-XSS lead); GraphQL/header/JSON/ORM/NoSQLi
-SQLi is not in `param-confirm`. **→ enhancement (queued): wire `recon-domxss` into the rotation +
-extend the SQLi confirm to GraphQL-variables/JSON-body/NoSQL-operator.** Until then, treat DOM-XSS
-+ GraphQL/NoSQLi as operator-DIG (the system surfaces hosts; you confirm with DOM Invader / manual).
+confirmed yet:** DOM-XSS best tool = **dalfox `--deep-domxss --force-headless-verification`**
+(installed; confirms EXECUTION headlessly — strictly better than the static `recon_domxss.py` miner,
+now just a cheap pre-filter; DOMDig = deep-SPA v2/on-demand, needs Node). GraphQL/header/JSON/ORM/NoSQLi
+SQLi is not yet in `param-confirm`. **→ enhancement (queued): dalfox-DOM confirm lane + sqlmap-verify on
+SQLi + extend to GraphQL-variables/JSON-body/NoSQL-operator.** Until each lands, the uncovered modern
+surface is operator-DIG (DOM Invader / domloggerpp for DOM; manual for GraphQL/NoSQLi).
 
 **Flow:** confirmer FIRES → `record-confirmed` → `ai-pending` → 2IC verify → **SUBMIT** (same path
 as U1/U4). The ranked `{xss,sqli}_candidates` lists are the to-CONFIRM worklist (card 💉 / DIG):
