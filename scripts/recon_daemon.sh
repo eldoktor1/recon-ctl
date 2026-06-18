@@ -608,6 +608,13 @@ run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FIL
 UNAUTH_EXPOSE_SCRIPT="${UNAUTH_EXPOSE_SCRIPT:-$(script_path recon_unauth_expose.sh)}"
 UNAUTH_EXPOSE_INTERVAL="${UNAUTH_EXPOSE_INTERVAL:-3600}"
 run_unauth_expose() { v21_killed unauth_expose && return 0; [[ -f "$UNAUTH_EXPOSE_SCRIPT" ]] && run_scanner bash "$UNAUTH_EXPOSE_SCRIPT" || true; }
+# recon_ssrf_oob — U4 lane: UNAUTH SSRF discovery, OOB-confirmed (interactsh). Injects a unique
+# canary per sink via recon_safe_probe (GET, in-scope, benign OUR-canary only) -> a callback =
+# CONFIRMED SSRF -> state.py record-confirmed (signal_class=ssrf-oob) -> 2IC verify -> DIG (operator
+# escalates; never autonomous). Target-facing -> run_scanner. Killswitch: state/kill/v2_ssrf_oob.
+SSRF_OOB_SCRIPT="${SSRF_OOB_SCRIPT:-$(script_path recon_ssrf_oob.sh)}"
+SSRF_OOB_INTERVAL="${SSRF_OOB_INTERVAL:-7200}"   # 2h (each cycle holds a short interactsh session)
+run_ssrf_oob() { v21_killed ssrf_oob && return 0; [[ -f "$SSRF_OOB_SCRIPT" ]] && run_scanner bash "$SSRF_OOB_SCRIPT" || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -751,6 +758,7 @@ run_discord_bot() {
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
+  supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
