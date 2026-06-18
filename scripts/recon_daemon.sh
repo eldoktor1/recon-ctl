@@ -615,6 +615,13 @@ run_unauth_expose() { v21_killed unauth_expose && return 0; [[ -f "$UNAUTH_EXPOS
 SSRF_OOB_SCRIPT="${SSRF_OOB_SCRIPT:-$(script_path recon_ssrf_oob.sh)}"
 SSRF_OOB_INTERVAL="${SSRF_OOB_INTERVAL:-7200}"   # 2h (each cycle holds a short interactsh session)
 run_ssrf_oob() { v21_killed ssrf_oob && return 0; [[ -f "$SSRF_OOB_SCRIPT" ]] && run_scanner bash "$SSRF_OOB_SCRIPT" || true; }
+# recon_domxss_confirm — U6 DOM-XSS lane: dalfox --deep-domxss --force-headless-verification on XSS
+# catalog candidates; a [POC] = headless-verified EXECUTION -> record-confirmed (signal_class=dom-xss)
+# -> 2IC verify -> SUBMIT. Headless is heavy -> small batch, 2h. Target-facing -> run_scanner.
+# Killswitch: state/kill/v2_domxss. See docs/knowledge/class-unauth-hunting.md U6.
+DOMXSS_SCRIPT="${DOMXSS_SCRIPT:-$(script_path recon_domxss_confirm.sh)}"
+DOMXSS_INTERVAL="${DOMXSS_INTERVAL:-7200}"   # 2h
+run_domxss() { v21_killed domxss && return 0; [[ -f "$DOMXSS_SCRIPT" ]] && run_scanner bash "$DOMXSS_SCRIPT" || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -759,6 +766,7 @@ run_discord_bot() {
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
+  supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
