@@ -164,32 +164,55 @@ The system surfaces fresh candidates; you confirm.
 Unauthenticated, machine-confirmable — but mass param-fuzzing on saturated programs IS the
 commodity flood (the MOTTO). It wins ONLY when kept SMART + dup-managed + confirm-gated.
 
-**Where it hides:** reflected/injectable query params, especially the injectable-by-name ones
-(kxss insight): `q`/`search`/`redirect`/`callback`/`url`/`next` reflect (XSS); `id`/`cat`/
-`pid`/numeric inject (SQLi). Handler/path signal: `.php`/`/api/`.
+### WHERE TO LOOK THESE DAYS (2026 — the surface has MOVED; researched 2026-06-17)
 
-**Discover (already autonomous):** `recon_params` crawl (katana+gau+CDX→gf→catalog) →
-`recon_xss_sqli_candidates.py` ranks the ~18k XSS / ~3k SQLi in-scope+paying catalog by
-param-injectability + freshness + payout, dedups by (host, normalized-path, param-set)
-template, and SPLITS rare per-app UNIQUE lanes from high-fan-out PRODUCT-CLASS dup-magnets
-(`?q=`, `_next/image?url=`). Output → `briefings/{xss,sqli}_candidates_<date>.md`.
+The classic surface (reflected `?q=`/`?id=` params) is the saturated, mostly-caught tail.
+The live, lower-dup surface has shifted:
 
-**REAL-vs-FP discriminator (the confirm — already autonomous + on-demand):**
-- XSS → **dalfox / headless Chromium: a marker must EXECUTE** (`recon_xss_confirm.sh`,
-  `params-verify`→`xss-confirm` loops). **Reflection ≠ XSS** — break-out chars (`"><'/`) must
-  survive UNENCODED in an executable context; encoded/JSON/framework-safe reflection =
-  `reflected-not-exploitable` LEAD, move on.
-- SQLi → the SAFE **`'` vs `''` differential** (error + boolean length-diff) via
-  `recon_param_confirm.sh`. HARD LINE: never sqlmap / `--dump` / data-harvest.
-- On-demand: `recon-params confirm xss|sqli <host>` (+`--cookie`/`--header` for authed).
+**XSS → DOM-based, not reflected** ([PortSwigger PP/DOM](https://portswigger.net/web-security/prototype-pollution/client-side), [DOM Invader](https://portswigger.net/burp/documentation/desktop/tools/dom-invader)):
+- **Sources:** `location.hash` (the #1 bounty winner — server-invisible, used for SPA routing +
+  "welcome, <name>", almost never sanitized), `location.search`, `document.referrer`,
+  **`postMessage`/web messages** with missing/weak origin checks, and **prototype pollution**
+  (`__proto__`/`constructor.prototype` via URL params or JSON web-messages).
+- **Sinks:** `innerHTML`, `outerHTML`, `document.write`, `eval`, `setTimeout`/`setInterval`,
+  `location.href`/`.assign`, `jQuery $()`/`.html()`, `Function()`.
+- **The modern chain:** pollute `Object.prototype.<x>` via `__proto__` → an existing **gadget**
+  (legit code that reads `<x>`) → the value reaches a sink → DOM XSS. Real: DOMPurify bypass
+  CVE-2026-41238 (PP gadget defeats sanitizer). mXSS (mutation) is the other frontier.
+- **Why it's EV:** server-side scanners + reflected-fuzzers are BLIND to it (nothing on the
+  wire) → far less hunted. Trace source→sink in the JS; DOM Invader auto-PoCs source/gadget/sink.
 
-**Flow:** confirmer FIRES → `record-confirmed` → `ai-pending` → 2IC verify → **SUBMIT** (same
-path as U1/U4). The ranked `{xss,sqli}_candidates` lists are the to-CONFIRM worklist (card's
-💉 section / DIG), TOP UNIQUE first, skip PRODUCT-CLASS, prefer ⚡ fresh.
+**SQLi → API / GraphQL / ORM / NoSQL, not login forms** ([Hive SQLi 2026](https://hivesecurity.gitlab.io/blog/sql-injection-complete-guide-2026/), [APIsec](https://www.apisec.ai/blog/api-sql-injection-testing-payloads-guide)):
+- **API surfaces:** JSON **body** params, query strings, **HTTP headers**, and **GraphQL
+  variables / filter clauses** (nested args → tenant-isolation/access bypass).
+- **ORM raw escape hatches:** Django `.raw()`, SQLAlchemy `text()` w/o bound params — "every ORM
+  has a raw hatch, and that's where injection re-enters."
+- **Second-order (stored):** input (`admin'--`) detonates LATER in a different query/context —
+  the most elusive; needs store-then-trigger reasoning.
+- **JSON columns**, and **NoSQLi operator injection** (Mongo `{"$gt":""}` / `{"$ne":null}` passed
+  to a query constructor) — a distinct sub-class.
+- **Confirm (safe):** the `'`vs`''` differential still works, plus boolean true/false and
+  **time-based** (50ms→5s) where reflected error is hidden; NoSQLi via operator-vs-literal diff.
+  HARD LINE unchanged: never sqlmap / `--dump` / harvest.
 
-**Dup-trap discipline (why this lane doesn't sink us):** fresh-first + unique-split + the
-confirm-is-the-gate + impact-gate (theoretical CORS/header/self-XSS = N/A). Never mass-blast
-saturated programs with defaults.
+**Where our AUTONOMOUS coverage actually sits (honest):** the daemon confirmers cover the
+**reflected/param tail** — `recon_params` crawl → `recon_xss_sqli_candidates.py` rs0n ranker
+(~18k XSS / ~3k SQLi catalog, ranked by param-injectability + freshness, UNIQUE-vs-PRODUCT-CLASS
+split → `briefings/{xss,sqli}_candidates_<date>.md`) → `xss-confirm` (headless EXECUTION;
+reflection≠XSS) + `param-confirm` (`'`vs`''`). **The MODERN surface above is NOT autonomously
+confirmed yet:** DOM-XSS is on-demand only (`recon-domxss <host>` source→sink miner —
+`dangerouslySetInnerHTML` rendering server data = stored-XSS lead); GraphQL/header/JSON/ORM/NoSQLi
+SQLi is not in `param-confirm`. **→ enhancement (queued): wire `recon-domxss` into the rotation +
+extend the SQLi confirm to GraphQL-variables/JSON-body/NoSQL-operator.** Until then, treat DOM-XSS
++ GraphQL/NoSQLi as operator-DIG (the system surfaces hosts; you confirm with DOM Invader / manual).
+
+**Flow:** confirmer FIRES → `record-confirmed` → `ai-pending` → 2IC verify → **SUBMIT** (same path
+as U1/U4). The ranked `{xss,sqli}_candidates` lists are the to-CONFIRM worklist (card 💉 / DIG):
+TOP UNIQUE first, skip PRODUCT-CLASS, prefer ⚡ fresh.
+
+**Dup-trap discipline (why this lane doesn't sink us):** fresh-first + unique-split + DOM/API
+surface (less-hunted than reflected) + confirm-is-the-gate + impact-gate (theoretical CORS/header/
+self-XSS = N/A). Never mass-blast saturated programs with defaults.
 
 ---
 
