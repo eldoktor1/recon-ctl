@@ -27,7 +27,7 @@ your accounts — so it earns while you're at work, and it's higher-severity (ne
 no privileges) = higher pay. WIDE unauth scanning is dead (the dup flood); NARROW unauth wins:
 **fresh surface + the classes templates miss + a real confirm.**
 
-## The 5 plays (everything else is ignored on purpose)
+## The 6 plays (everything else is ignored on purpose)
 
 The machine confirms these while you're at work → **SUBMIT** pile:
 1. **Shadow-endpoint unauth data exposure** — no-auth 200 returning real sensitive data
@@ -36,12 +36,16 @@ The machine confirms these while you're at work → **SUBMIT** pile:
    not a login wall, takeover claimability-confirmed.
 3. **n-day (straight-shot unauth-RCE subset)** — version-in-range confirmed, inside the
    1–7 day race window. You sanity-check before firing.
+4. **Reflected XSS / unauth SQLi** — the confirmer must FIRE (dalfox EXECUTES a marker /
+   SQLi `'`-vs-`''` differential), never reflection-only. Highest dup-risk class, so it's
+   dup-managed by the rs0n ranker (unique-first, skip product-class, fresh-first) and
+   impact-gated (theoretical/encoded reflection = N/A). Already running autonomously.
 
 You hunt these in the evening (the machine surfaces fresh candidates) → **DIG** pile:
-4. **SSRF (hidden sinks)** — OOB-confirmed by the machine, you escalate to metadata/RCE.
-5. **Request smuggling / cache poisoning / auth-bypass** — pure skill, near-zero dup.
+5. **SSRF (hidden sinks)** — OOB-confirmed by the machine, you escalate to metadata/RCE.
+6. **Request smuggling / cache poisoning / auth-bypass** — pure skill, near-zero dup.
 
-If a thing isn't one of these five, the system does not surface it. That sentence is the
+If a thing isn't one of these six, the system does not surface it. That sentence is the
 whole anti-FOMO discipline. (Full real-vs-FP discriminators per play: the KB.)
 
 ## The week

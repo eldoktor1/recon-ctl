@@ -241,7 +241,16 @@ md="$BRIEF_DIR/tonight_$today.md"
       "- \($tag)**\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
   fi
 
-  # --- 🔑 AUTHED lane: BAC/IDOR + XSS/SQLi (your 2 accounts; led on AUTHED nights) ---
+  # --- 💉 XSS / SQLi (unauth) — ranked candidates to CONFIRM (rs0n dup-proof lane).
+  #     Confirmed ones (dalfox executes / SQLi diff) already promote to SUBMIT above. ---
+  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
+    printf '\n\n## 💉 XSS / SQLi (unauth — confirm to promote) — rs0n dup-proof, ranked\n'
+    [[ -n "$XSS_CAND_LINE" ]]  && printf '**XSS** — %s · `xss_candidates_%s.md`\n%s\n'  "${XSS_CAND_LINE#\[xss\] }"  "$today" "$(printf '%s' "$XSS_TOP"  | sed 's/^/  /')"
+    [[ -n "$SQLI_CAND_LINE" ]] && printf '\n**SQLi** — %s · `sqli_candidates_%s.md`\n%s\n' "${SQLI_CAND_LINE#\[sqli\] }" "$today" "$(printf '%s' "$SQLI_TOP" | sed 's/^/  /')"
+    printf '_Confirm:_ `recon-params confirm xss <host>` _(dalfox, executes — reflection≠XSS)_ · `recon-params confirm sqli <host>` _(SAFE `'"'"'`vs`'"'"''"'"'` diff)._\n'
+  fi
+
+  # --- 🔑 AUTHED lane: BAC/IDOR (your 2 accounts; led on AUTHED nights) ---
   if [[ "${nidor:-0}" -gt 0 ]]; then
     printf '\n\n## 🔑 Authed lane — BAC/IDOR (your two accounts) — %s\n' "$nidor"
     printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
@@ -254,12 +263,6 @@ md="$BRIEF_DIR/tonight_$today.md"
            then "\n- **routes to test (\(.route_count)):** " + ((.routes // []) | map("`"+.+"`") | join(", "))
            else "\n- **endpoint:** `\(loc)`" end)
       + "\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
-  fi
-  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
-    printf '\n\n## 💉 XSS / SQLi lanes (rs0n — dup-proof, ranked)\n'
-    [[ -n "$XSS_CAND_LINE" ]]  && printf '**XSS** — %s · `xss_candidates_%s.md`\n%s\n'  "${XSS_CAND_LINE#\[xss\] }"  "$today" "$(printf '%s' "$XSS_TOP"  | sed 's/^/  /')"
-    [[ -n "$SQLI_CAND_LINE" ]] && printf '\n**SQLi** — %s · `sqli_candidates_%s.md`\n%s\n' "${SQLI_CAND_LINE#\[sqli\] }" "$today" "$(printf '%s' "$SQLI_TOP" | sed 's/^/  /')"
-    printf '_Confirm:_ `recon-params confirm xss <host>` _(dalfox, executes)_ · `recon-params confirm sqli <host>` _(SAFE diff)._\n'
   fi
 
   # --- 🟡 If time (medium dup-risk) ---
@@ -299,18 +302,18 @@ if [[ -n "$rh" ]]; then
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
   [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
+  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
+    card+="$(printf '\n\n💉 **XSS/SQLi (unauth — confirm to promote):**')"
+    [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
+    [[ -n "$SQLI_CAND_LINE" ]] && card+="$(printf '\n• %s' "${SQLI_CAND_LINE#\[sqli\] }")"
+    card+="$(printf '\n_see xss/sqli_candidates_%s.md · confirm: recon-params confirm xss|sqli <host>_' "$today")"
+  fi
   if [[ "${nidor:-0}" -gt 0 ]]; then
     card+="$(printf '\n\n🔑 **Authed — BAC/IDOR (your 2 accounts) (%s):**\n' "$nidor")"
     card+="$(printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
       def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
       def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
       .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
-  fi
-  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
-    card+="$(printf '\n\n💉 **XSS/SQLi lanes (rs0n):**')"
-    [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
-    [[ -n "$SQLI_CAND_LINE" ]] && card+="$(printf '\n• %s' "${SQLI_CAND_LINE#\[sqli\] }")"
-    card+="$(printf '\n_see xss/sqli_candidates_%s.md · confirm: recon-params confirm xss|sqli <host>_' "$today")"
   fi
   [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 300)"; }
   [[ "$(( ${nsupp:-0} + GATE_SUPP ))" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s lead(s) suppressed (%s noise-class/dup, %s adjudicated-FP at render)_' "$(( ${nsupp:-0} + GATE_SUPP ))" "${nsupp:-0}" "$GATE_SUPP")"

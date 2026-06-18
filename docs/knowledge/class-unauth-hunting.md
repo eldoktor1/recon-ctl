@@ -159,6 +159,40 @@ The system surfaces fresh candidates; you confirm.
 
 ---
 
+## Lane U6 — reflected XSS / unauth SQLi  [machine-confirmable, but the #1 dup trap]
+
+Unauthenticated, machine-confirmable — but mass param-fuzzing on saturated programs IS the
+commodity flood (the MOTTO). It wins ONLY when kept SMART + dup-managed + confirm-gated.
+
+**Where it hides:** reflected/injectable query params, especially the injectable-by-name ones
+(kxss insight): `q`/`search`/`redirect`/`callback`/`url`/`next` reflect (XSS); `id`/`cat`/
+`pid`/numeric inject (SQLi). Handler/path signal: `.php`/`/api/`.
+
+**Discover (already autonomous):** `recon_params` crawl (katana+gau+CDX→gf→catalog) →
+`recon_xss_sqli_candidates.py` ranks the ~18k XSS / ~3k SQLi in-scope+paying catalog by
+param-injectability + freshness + payout, dedups by (host, normalized-path, param-set)
+template, and SPLITS rare per-app UNIQUE lanes from high-fan-out PRODUCT-CLASS dup-magnets
+(`?q=`, `_next/image?url=`). Output → `briefings/{xss,sqli}_candidates_<date>.md`.
+
+**REAL-vs-FP discriminator (the confirm — already autonomous + on-demand):**
+- XSS → **dalfox / headless Chromium: a marker must EXECUTE** (`recon_xss_confirm.sh`,
+  `params-verify`→`xss-confirm` loops). **Reflection ≠ XSS** — break-out chars (`"><'/`) must
+  survive UNENCODED in an executable context; encoded/JSON/framework-safe reflection =
+  `reflected-not-exploitable` LEAD, move on.
+- SQLi → the SAFE **`'` vs `''` differential** (error + boolean length-diff) via
+  `recon_param_confirm.sh`. HARD LINE: never sqlmap / `--dump` / data-harvest.
+- On-demand: `recon-params confirm xss|sqli <host>` (+`--cookie`/`--header` for authed).
+
+**Flow:** confirmer FIRES → `record-confirmed` → `ai-pending` → 2IC verify → **SUBMIT** (same
+path as U1/U4). The ranked `{xss,sqli}_candidates` lists are the to-CONFIRM worklist (card's
+💉 section / DIG), TOP UNIQUE first, skip PRODUCT-CLASS, prefer ⚡ fresh.
+
+**Dup-trap discipline (why this lane doesn't sink us):** fresh-first + unique-split + the
+confirm-is-the-gate + impact-gate (theoretical CORS/header/self-XSS = N/A). Never mass-blast
+saturated programs with defaults.
+
+---
+
 ## The non-negotiables (every lane)
 
 - **Impact-gate (theoretical → N/A):** CORS-reflect-without-sensitive-data, missing headers,
