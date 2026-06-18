@@ -212,23 +212,48 @@ if [[ -f "$SCRIPT_DIR/recon_xss_sqli_candidates.py" ]]; then
 fi
 
 # --- compile the card + durable .md ---
+# day-mode banner (emphasis only — see docs/OPERATING.md; matches the 2IC routine modes)
+case "$(date '+%u')" in
+  1|2|3) mode_banner=" · UNAUTH night (lead: SUBMIT + DIG)" ;;
+  4|6)   mode_banner=" · AUTHED night (ENGIE DCP / TOTO — your 2 accounts)" ;;
+  5)     mode_banner=" · CLEANUP night" ;;
+  7)     mode_banner=" · light" ;;
+  *)     mode_banner="" ;;
+esac
+
 md="$BRIEF_DIR/tonight_$today.md"
 {
-  printf '# 🌙 TONIGHT — %s\n\n' "$today"
-  printf '## 🎯 Test these (BAC/IDOR — the money class) — %s winnable lead(s)\n' "$nidor"
-  printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
-    def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
-    def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
-    def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
-    .[] |
-    "\n### " + mark + "[\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)`"
-    + (if (.route_count // 1) > 1
-         then "\n- **routes to test (\(.route_count)):** " + ((.routes // []) | map("`"+.+"`") | join(", "))
-         else "\n- **endpoint:** `\(loc)`" end)
-    + "\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  printf '# 🌙 TONIGHT — %s%s\n\n' "$today" "$mode_banner"
+
+  # --- ✅ SUBMIT first: machine-CONFIRMED (a confirm primitive fired) — ready to report ---
+  printf '## ✅ Ready to submit (validated, confirm-fired) — %s\n' "$nsub"
+  printf '%s' "$subs" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
+
+  # --- 🔬 DIG: unauth leads to work tonight (n-day version-reasoned + exposure/bypass) ---
   if [[ "${nnday:-0}" -gt 0 ]]; then
     printf '\n\n## ⚡ n-day CVE candidates (version-reasoned) — %s\n' "$nnday"
     printf '%s' "$show_nday" | jq -r '.[] | "\n### [\(.impact|ascii_upcase) · conf \(.confidence)] \(.host) — \(.cve // .endpoint // "?")\n- **why:** \(.why)\n- **verify:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+  fi
+  if [[ "${nvln:-0}" -gt 0 ]]; then
+    printf '\n\n## 🧪 Vuln leads (KEV / exposure / bypass — verify before trusting) — %s\n' "$nvln"
+    printf '%s' "$vleads" | jq -r '.[] |
+      (if ._noise_action=="downgrade" then "LEAD · version-unconfirmed — " else "" end) as $tag |
+      "- \($tag)**\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
+  fi
+
+  # --- 🔑 AUTHED lane: BAC/IDOR + XSS/SQLi (your 2 accounts; led on AUTHED nights) ---
+  if [[ "${nidor:-0}" -gt 0 ]]; then
+    printf '\n\n## 🔑 Authed lane — BAC/IDOR (your two accounts) — %s\n' "$nidor"
+    printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
+      def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
+      def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
+      def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
+      .[] |
+      "\n### " + mark + "[\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)`"
+      + (if (.route_count // 1) > 1
+           then "\n- **routes to test (\(.route_count)):** " + ((.routes // []) | map("`"+.+"`") | join(", "))
+           else "\n- **endpoint:** `\(loc)`" end)
+      + "\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
   fi
   if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
     printf '\n\n## 💉 XSS / SQLi lanes (rs0n — dup-proof, ranked)\n'
@@ -236,11 +261,21 @@ md="$BRIEF_DIR/tonight_$today.md"
     [[ -n "$SQLI_CAND_LINE" ]] && printf '\n**SQLi** — %s · `sqli_candidates_%s.md`\n%s\n' "${SQLI_CAND_LINE#\[sqli\] }" "$today" "$(printf '%s' "$SQLI_TOP" | sed 's/^/  /')"
     printf '_Confirm:_ `recon-params confirm xss <host>` _(dalfox, executes)_ · `recon-params confirm sqli <host>` _(SAFE diff)._\n'
   fi
+
+  # --- 🟡 If time (medium dup-risk) ---
   if [[ "${nheld:-0}" -gt 0 ]]; then
     printf '\n\n## 🟡 If time (medium dup-risk) — %s\n' "$nheld"
     printf '%s' "$held" | jq -r 'def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
       .[] | "- [\(.impact)] \(.vuln_type) `\(loc)` — \(.hold_reason // "")"' 2>/dev/null
   fi
+
+  # --- 🔍 Needs a human eye ---
+  if [[ "${nneed:-0}" -gt 0 ]]; then
+    printf '\n\n## 🔍 Needs a human eye (Claude unsure) — %s\n' "$nneed"
+    printf '%s' "$needh" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
+  fi
+
+  # --- 🔕 Suppressed (logged, not worked — the narrow-hands discipline) ---
   nsupp_total=$(( ${nsupp:-0} + GATE_SUPP ))
   if [[ "$nsupp_total" -gt 0 ]]; then
     printf '\n\n## 🔕 Suppressed — %s lead(s)' "$nsupp_total"
@@ -249,20 +284,9 @@ md="$BRIEF_DIR/tonight_$today.md"
     [[ "$GATE_SUPP" -gt 0 ]] && printf '_(+%s dropped at render by the FP-class rules + fp-signature/KB gate — adjudicated/known noise never re-queued)_\n' "$GATE_SUPP"
     printf '_(product-class duplicates and shared-tenant/third-party-data landmines — not worth your evening, kept here for audit)_\n'
   fi
-  printf '\n\n## ✅ Ready to submit (validated) — %s\n' "$nsub"
-  printf '%s' "$subs" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
-  if [[ "${nneed:-0}" -gt 0 ]]; then
-    printf '\n\n## 🔍 Needs a human eye (Claude unsure) — %s\n' "$nneed"
-    printf '%s' "$needh" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null
-  fi
-  if [[ "${nvln:-0}" -gt 0 ]]; then
-    printf '\n\n## 🧪 Vuln leads (KEV / exposure / bypass — verify before trusting) — %s\n' "$nvln"
-    printf '%s' "$vleads" | jq -r '.[] |
-      (if ._noise_action=="downgrade" then "LEAD · version-unconfirmed — " else "" end) as $tag |
-      "- \($tag)**\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
-  fi
+
   printf '\n\n_Deep-check any lead before you spend time on it:_ `recon-verify <host>` _(Claude + safe probes)._\n'
-  printf '_Test BAC/IDOR with your own two accounts. Submission is always your call._\n'
+  printf '_SUBMIT = a confirm primitive fired. DIG = work it tonight. Authed/IDOR uses your own two accounts. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
 log "🌙 briefing compiled · 🎯 $nidor host-lead(s) ($nshow pre-collapse) · 🟡 $nheld hold · 🔕 $nsupp dup + $GATE_SUPP render-gated · ✅ $nsub to-submit · 🔍 $nneed needs-human · 🧪 $nvln vuln-leads → $md"
@@ -271,21 +295,23 @@ log "🌙 briefing compiled · 🎯 $nidor host-lead(s) ($nshow pre-collapse) ·
 rh="$(discord_hook digest 2>/dev/null || true)"
 [[ -n "$rh" ]] || rh="$(discord_hook review 2>/dev/null || true)"   # fallback if #digest unset
 if [[ -n "$rh" ]]; then
-  card="$(printf '🌙 **TONIGHT — %s**\n\n🎯 **Test these (BAC/IDOR — %s winnable):**\n' "$today" "$nidor")"
-  card+="$(printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
-    def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
-    def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
-    .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
+  card="$(printf '🌙 **TONIGHT — %s%s**\n\n✅ **Ready to submit (%s):**\n' "$today" "$mode_banner" "$nsub")"
+  card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
+  [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
+  if [[ "${nidor:-0}" -gt 0 ]]; then
+    card+="$(printf '\n\n🔑 **Authed — BAC/IDOR (your 2 accounts) (%s):**\n' "$nidor")"
+    card+="$(printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
+      def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
+      def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
+      .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
+  fi
   if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
     card+="$(printf '\n\n💉 **XSS/SQLi lanes (rs0n):**')"
     [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
     [[ -n "$SQLI_CAND_LINE" ]] && card+="$(printf '\n• %s' "${SQLI_CAND_LINE#\[sqli\] }")"
     card+="$(printf '\n_see xss/sqli_candidates_%s.md · confirm: recon-params confirm xss|sqli <host>_' "$today")"
   fi
-  card+="$(printf '\n\n✅ **Ready to submit (%s):**\n' "$nsub")"
-  card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
-  [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
   [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 300)"; }
   [[ "$(( ${nsupp:-0} + GATE_SUPP ))" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s lead(s) suppressed (%s noise-class/dup, %s adjudicated-FP at render)_' "$(( ${nsupp:-0} + GATE_SUPP ))" "${nsupp:-0}" "$GATE_SUPP")"
   discord_post "$rh" "$(jq -nc --arg c "${card:0:1950}" '{content:$c}')" >/dev/null 2>&1 \
