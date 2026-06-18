@@ -30,6 +30,7 @@ EP_STORE   = os.environ.get("EP_STORE",   os.path.expanduser("~/recon/js_recon/e
 ES_URL     = os.environ.get("ES_URL",     "http://127.0.0.1:9200")
 INDEX_NAME = os.environ.get("INDEX_NAME", "recon_alive")
 ES_PASS_F  = os.path.expanduser("~/.recon_es_pass")
+ES_NETRC_F = os.path.expanduser("~/.recon_es_netrc")
 FANOUT_DUP   = int(os.environ.get("FANOUT_DUP",   "5"))    # endpoint on >=N hosts => product-class dup
 TENANT_MANY  = int(os.environ.get("TENANT_MANY",  "40"))   # >=N siblings under one apex => mass-tenant wildcard
 ENTROPY_MIN  = float(os.environ.get("ENTROPY_MIN","3.2"))  # Shannon bits/char over the leftmost label
@@ -82,13 +83,28 @@ def load_fanout():
 
 
 def es_auth_header():
+    """ES basic-auth header. Prefer the netrc credential (the pipeline rotated ES auth to
+    ~/.recon_es_netrc on 2026-06-14); fall back to the legacy ~/.recon_es_pass. Without this
+    the old pass file 401s -> es_sibling_count() returns -1 -> the shared-tenant / third-party-
+    data suppression silently degrades to entropy-only (a safety-filter failure)."""
+    pw = None
     try:
-        with open(ES_PASS_F) as f:
-            pw = f.read().strip()
-        tok = base64.b64encode(f"elastic:{pw}".encode()).decode()
-        return {"Authorization": "Basic " + tok}
+        import netrc as _netrc
+        host = (ES_URL.split("//", 1)[-1].split("/", 1)[0].split(":")[0]) or "127.0.0.1"
+        n = _netrc.netrc(ES_NETRC_F)
+        auth = n.authenticators(host) or n.authenticators("127.0.0.1") or n.authenticators("localhost")
+        if auth and auth[2]:
+            pw = auth[2]
     except Exception:
-        return {}
+        pw = None
+    if not pw:
+        try:
+            with open(ES_PASS_F) as f:
+                pw = f.read().strip()
+        except Exception:
+            return {}
+    tok = base64.b64encode(f"elastic:{pw}".encode()).decode()
+    return {"Authorization": "Basic " + tok}
 
 
 def es_sibling_count(apex):
