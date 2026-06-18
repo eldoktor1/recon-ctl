@@ -601,6 +601,13 @@ run_nday() { [[ -f "$NDAY_SCRIPT" ]] && bash "$NDAY_SCRIPT" >>"$LOG_FILE" 2>&1 |
 GHLEAKS_SCRIPT="${GHLEAKS_SCRIPT:-$(script_path recon_ghleaks.sh)}"
 GHLEAKS_INTERVAL="${GHLEAKS_INTERVAL:-10800}"
 run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_unauth_expose — U1 lane: shadow-endpoint UNAUTHENTICATED data-exposure confirmer.
+# jsintel endpoints -> recon_safe_probe GET -> precision classifier -> state.py record-confirmed
+# -> ai-pending -> 2IC verify -> SUBMIT. Target-facing -> run_scanner (reconrun, egress slot +
+# vpn gate). Killswitch: state/kill/v2_unauth_expose. See docs/knowledge/class-unauth-hunting.md U1.
+UNAUTH_EXPOSE_SCRIPT="${UNAUTH_EXPOSE_SCRIPT:-$(script_path recon_unauth_expose.sh)}"
+UNAUTH_EXPOSE_INTERVAL="${UNAUTH_EXPOSE_INTERVAL:-3600}"
+run_unauth_expose() { v21_killed unauth_expose && return 0; [[ -f "$UNAUTH_EXPOSE_SCRIPT" ]] && run_scanner bash "$UNAUTH_EXPOSE_SCRIPT" || true; }
 
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
@@ -743,6 +750,7 @@ run_discord_bot() {
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
+  supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
