@@ -105,6 +105,23 @@ def confirm(url, cls):
                 res.update(confirmed=True, param=param, payload="' (single quote)",
                            evidence=f"DB error on ' not on '' : {hit}", context="sqli-error-diff")
                 return res
+
+        elif cls == "nosqli":
+            # NoSQL operator injection (Mongo/Express+qs): a GET query like `param[$ne]=x` is parsed
+            # to {param:{$ne:"x"}} server-side. CONFIRMED only on a clear AUTH/FILTER BYPASS signal —
+            # the literal value is denied/empty (4xx/short) but the operator form is allowed (200 +
+            # materially more data). Differential only — never a data harvest. (GraphQL / JSON-body
+            # NoSQLi need POST and stay operator-DIG: this safe worker is GET-only.)
+            rnd = str(random.randint(100000, 999999))
+            lit_q = list(q); lit_q[idx] = (param, rnd)
+            st_l, _, b_l = _fetch(up.urlunparse(pu._replace(query=up.urlencode(lit_q, doseq=True))))
+            op_pairs = [kv for kv in q if kv[0] != param] + [(f"{param}[$ne]", rnd)]
+            st_o, _, b_o = _fetch(up.urlunparse(pu._replace(query=up.urlencode(op_pairs, doseq=True))))
+            if st_l in (400, 401, 403, 404) and st_o == 200 and len(b_o) > len(b_l) + 64:
+                res.update(confirmed=True, param=param, payload=f"{param}[$ne]={rnd}",
+                           evidence=f"NoSQL operator injection: literal -> {st_l}, [$ne] -> {st_o} (+{len(b_o)-len(b_l)}B)",
+                           context="nosqli-operator-diff")
+                return res
     return res
 
 

@@ -29,7 +29,7 @@ PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 NETRC="${NETRC:-$HOME/.recon_es_netrc}"
 WORKER="${PARAM_WORKER:-$REPO_DIR/tools/param_confirm_worker.py}"
 SEEN="${PARAM_SEEN:-$STATE_DIR/param_confirm_seen.txt}"
-PC_CLASSES="${PC_CLASSES:-ssti redirect sqli}"
+PC_CLASSES="${PC_CLASSES:-ssti redirect sqli nosqli}"
 PC_BATCH="${PC_BATCH:-10}"                 # URLs per class per cycle (quota/load bound)
 # sqlmap SQLi VERIFY (operator-authorized 2026-06-17, in-scope+paying only). PoC depth only
 # (--banner/--current-db), NEVER mass --dump of third-party data, NO stacked (technique excludes S),
@@ -86,8 +86,12 @@ confirmed_total=0; tested_total=0; sqlmap_done=0
 IFS=' ' read -ra _PC_ARR <<< "$PC_CLASSES"   # split on space (global IFS=$'\n\t' would NOT)
 for cls in "${_PC_ARR[@]}"; do
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
+  # per-class seen ledger so classes don't starve each other's candidate pool — nosqli rides the
+  # SAME sqli param surface (no gf "nosqli" class) and must not consume sqli's sqlmap candidates.
+  SEEN="$STATE_DIR/param_confirm_seen_${cls}.txt"; touch "$SEEN"
+  qcls="$cls"; [[ "$cls" == "nosqli" ]] && qcls="sqli"
   # in-scope paying candidates for this class, freshest first
-  q="$(jq -nc --arg c "$cls" --argjson n "$PC_BATCH" \
+  q="$(jq -nc --arg c "$qcls" --argjson n "$PC_BATCH" \
         '{size:($n*3), _source:["url","host","program"],
           query:{bool:{filter:[{term:{vuln_classes:$c}}],
                        must_not:[{term:{payout_tier:"none"}}]}},
@@ -133,5 +137,5 @@ for cls in "${_PC_ARR[@]}"; do
   done
 done
 
-tail -n 8000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
+for _sf in "$STATE_DIR"/param_confirm_seen_*.txt; do [[ -f "$_sf" ]] && { tail -n 8000 "$_sf" > "$_sf.tmp" 2>/dev/null && mv "$_sf.tmp" "$_sf" 2>/dev/null; }; done
 log "🧪 param-confirm done · 💥 $confirmed_total confirmed / $tested_total tested"
