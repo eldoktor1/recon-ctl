@@ -33,14 +33,21 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-}"
-[[ -z "$ES_PASS" && -f "$HOME/.recon_es_pass" ]] && ES_PASS="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-[[ -z "$ES_PASS" ]] && die "ES password not set"
-if [[ -f "$HOME/.recon_es_pass" ]]; then
-  _netrc_ep="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
-  [[ -n "$_netrc_ep" ]] && { ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$_netrc_ep" > "$HOME/.recon_es_netrc" ) 2>/dev/null && chmod 600 "$HOME/.recon_es_netrc" && { command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$HOME/.recon_es_netrc" 2>/dev/null || true; }; }
-  unset _netrc_ep
+NETRC="${NETRC:-$HOME/.recon_es_netrc}"
+# Read the pass file ONLY if readable (-r): validate runs as reconrun, which CANNOT read
+# d0k's 0600 ~/.recon_es_pass — guarding on -r avoids both the FATAL and the "Permission
+# denied" redirect-error spam (the bug that wedged validate; same class as recon_net.sh #11).
+[[ -z "$ES_PASS" && -r "$HOME/.recon_es_pass" ]] && ES_PASS="$(tr -d '[:space:]' < "$HOME/.recon_es_pass" 2>/dev/null || true)"
+# If we COULD read the pass (d0k context), (re)generate the reconrun-readable netrc.
+if [[ -n "$ES_PASS" ]]; then
+  ( printf 'machine 127.0.0.1\nlogin elastic\npassword %s\n' "$ES_PASS" > "$NETRC" ) 2>/dev/null \
+    && chmod 600 "$NETRC" \
+    && { command -v setfacl >/dev/null 2>&1 && setfacl -m u:reconrun:r "$NETRC" 2>/dev/null || true; }
 fi
-ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
+# Auth needs EITHER an inline pass OR a readable netrc (the ACL-shared one a d0k-context run
+# already wrote). Die only when BOTH are absent — reconrun proceeds on the netrc.
+[[ -n "$ES_PASS" || -r "$NETRC" ]] || die "ES auth unavailable (no readable $NETRC and no ES_PASS — run as d0k once to seed the netrc)"
+ES_AUTH=(--netrc-file "$NETRC")
 
 # httpx tuning (set by daemon based on mode)
 HTTPX_THREADS="${HTTPX_THREADS:-40}"     # balanced safe-max: aggregate prober concurrency (per-host = 1 req)
