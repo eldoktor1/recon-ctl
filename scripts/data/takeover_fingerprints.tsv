@@ -86,3 +86,9 @@ cloudflare_pages^\.pages\.dev\.?$^no^NOT_FOUND|There is no Pages project with th
 koyeb^\.koyeb\.app\.?$^no^404 - App Not Found|This Koyeb app does not exist^404^medium^$200-$1000^Koyeb account (koyeb.com); create service with matching app name. App names are globally unique.
 supabase^\.supabase\.co\.?$^yes^404: Supabase project not found|Project not found^404^medium^$300-$2000^Supabase account; create project — project ref (subdomain prefix) must match dangling hostname prefix. Project refs are permanent.
 deno_deploy^\.deno\.dev\.?$^no^404: Deployment not found|Deploy project not found^404^easy^$200-$1000^Deno Deploy account (deno.com/deploy); create project with matching name. Deploy any script via deployctl or GitHub Actions.
+bitbucket^\.bitbucket\.io\.?$^no^Repository not found^404^easy^$500-$2000^Register the Bitbucket repo/workspace matching the dangling host and set its custom domain / Pages.
+gemfury^\.furyns\.com\.?$^no^404: This page could not be found\.^404^medium^$500-$1500^Claim the Gemfury account/subdomain referenced by the dangling CNAME.
+youtrack^\.youtrack\.cloud\.?$^no^is not a registered InCloud YouTrack^404^medium^$500-$2000^Register the JetBrains InCloud YouTrack instance name shown in the CNAME.
+surveysparrow^\.surveysparrow\.com\.?$^no^Account not found\.^404^easy^$500-$1500^Create the SurveySparrow account/subdomain matching the dangling host.
+uptimerobot^stats\.uptimerobot\.com\.?$^no^page not found^404^easy^$250-$1000^Claim the UptimeRobot status-page subdomain referenced by the dangling CNAME.
+anima^\.animaapp\.io\.?$^no^The page you were looking for does not exist\.^404^medium^$500-$1500^Register the Anima project matching the dangling host and set its custom domain.
