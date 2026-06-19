@@ -601,6 +601,12 @@ run_nday() { [[ -f "$NDAY_SCRIPT" ]] && bash "$NDAY_SCRIPT" >>"$LOG_FILE" 2>&1 |
 GHLEAKS_SCRIPT="${GHLEAKS_SCRIPT:-$(script_path recon_ghleaks.sh)}"
 GHLEAKS_INTERVAL="${GHLEAKS_INTERVAL:-10800}"
 run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
+# CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
+# target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
+DANGLING_DNS_SCRIPT="${DANGLING_DNS_SCRIPT:-$(script_path recon_dangling_dns.sh)}"
+DANGLING_DNS_INTERVAL="${DANGLING_DNS_INTERVAL:-21600}"   # 6h
+run_dangling_dns() { v21_killed dangling_dns && return 0; [[ -f "$DANGLING_DNS_SCRIPT" ]] && bash "$DANGLING_DNS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 # recon_unauth_expose — U1 lane: shadow-endpoint UNAUTHENTICATED data-exposure confirmer.
 # jsintel endpoints -> recon_safe_probe GET -> precision classifier -> state.py record-confirmed
 # -> ai-pending -> 2IC verify -> SUBMIT. Target-facing -> run_scanner (reconrun, egress slot +
@@ -778,6 +784,7 @@ run_discord_bot() {
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
+  supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
