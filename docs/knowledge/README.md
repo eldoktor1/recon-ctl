@@ -21,7 +21,10 @@ useful resource. Then RECORD what's reusable here.
 ## Index
 - `tech-nextjs.md` — Next.js / React app attack surface (DOM XSS, /_next/image SSRF+SVG-XSS, __NEXT_DATA__
   leak, CVE-2025-29927 middleware bypass, Server-Actions SSRF, route/build enumeration).
-- _add more as we learn: tech-liferay.md, tech-aem.md, class-domxss.md, …_
+- `class-cache-deception.md` — Web Cache Deception + poisoning (U5 DIG): path-confusion arsenal
+  (static-ext/delimiter/encoded/normalization), the unauth discrepancy detect (X-Cache miss→hit),
+  owned-account-only impact confirm, real-vs-FP (cache-key/no-store/armor). PortSwigger "Gotta cache 'em all".
+- _add more as we learn: tech-liferay.md, tech-wordpress.md, class-ssrf.md, …_
 
 ## Naming
 - `tech-<stack>.md` (nextjs, liferay, aem, wordpress, coldfusion, …)
