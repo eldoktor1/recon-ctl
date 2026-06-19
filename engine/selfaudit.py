@@ -183,13 +183,25 @@ def chk_feed_stale() -> list:
     return out
 
 
-def _es_get(path: str):
-    import urllib.request, base64
-    pw = ""
+def _es_pw() -> str:
+    """ES password, netrc-FIRST then the legacy ~/.recon_es_pass. Parses the netrc file by hand
+    (NOT the stdlib netrc module — it rejects a file it doesn't OWN, blocking reconrun on the
+    d0k-owned ACL-shared netrc). Direct read honours the ACL — robust to which user runs us."""
     try:
-        pw = open(os.path.join(HOME, ".recon_es_pass"), encoding="utf-8").read().strip()
+        toks = open(os.path.join(HOME, ".recon_es_netrc"), encoding="utf-8").read().split()
+        if "password" in toks:
+            return toks[toks.index("password") + 1]
     except Exception:
         pass
+    try:
+        return open(os.path.join(HOME, ".recon_es_pass"), encoding="utf-8").read().strip()
+    except Exception:
+        return ""
+
+
+def _es_get(path: str):
+    import urllib.request, base64
+    pw = _es_pw()
     headers = {}
     if pw:
         headers["Authorization"] = "Basic " + base64.b64encode(f"elastic:{pw}".encode()).decode()

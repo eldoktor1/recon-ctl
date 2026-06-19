@@ -37,12 +37,29 @@ def _today():
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
+def _es_pw() -> str:
+    """ES password, netrc-FIRST then the legacy ~/.recon_es_pass. Parses the netrc file by
+    hand (NOT the stdlib netrc module — that rejects a file it doesn't OWN, which would block
+    reconrun on the d0k-owned, ACL-shared ~/.recon_es_netrc). Direct read honours the ACL, so
+    this works regardless of which user runs the engine (the recon_validate #11/reconrun lesson)."""
+    try:
+        toks = open(os.path.expanduser("~/.recon_es_netrc"), encoding="utf-8").read().split()
+        if "password" in toks:
+            return toks[toks.index("password") + 1]
+    except Exception:
+        pass
+    try:
+        return open(os.path.expanduser("~/.recon_es_pass"), encoding="utf-8").read().strip()
+    except Exception:
+        return ""
+
+
 def _es_count(index: str) -> int:
     """ES doc count for a catalog index. -1 on unreachable/missing (caller must NOT
     treat -1 as silent-zero — an unknown source is not proof of wasted resources)."""
     import urllib.request, base64
     try:
-        pw = open(os.path.expanduser("~/.recon_es_pass"), encoding="utf-8").read().strip()
+        pw = _es_pw()
         tok = base64.b64encode(f"elastic:{pw}".encode()).decode()
         req = urllib.request.Request(f"{ES_URL}/{index}/_count", headers={"Authorization": "Basic " + tok})
         with urllib.request.urlopen(req, timeout=8) as r:
