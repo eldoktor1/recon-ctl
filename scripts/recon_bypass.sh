@@ -90,7 +90,12 @@ NOMORE403_DIR="${NOMORE403_DIR:-$HOME/Tools/nomore403}"
 NOMORE403_BIN="${NOMORE403_BIN:-$NOMORE403_DIR/nomore403}"
 NOMORE403_PAYLOADS="${NOMORE403_PAYLOADS:-$NOMORE403_DIR/payloads}"
 # GET-ONLY technique set (no verbs/verbs-case → no POST/PUT/DELETE; unattended-safe).
-NOMORE403_TECHNIQUES="${NOMORE403_TECHNIQUES:-headers,endpaths,midpaths,double-encoding,unicode,http-versions,path-case}"
+# Audit #10c: expanded after upgrading nomore403 (Mar-2025 build had only 8 techniques; the
+# upgrade adds parser-confusion / trust-header families that beat modern CDN/WAF/proxy stacks —
+# header-confusion=X-Original-URL is the classic 403→200). KEEP EXCLUDING state-change/smuggling
+# for the unattended daemon: verbs/verbs-case/method-override (POST/PUT/DELETE) + raw-desync/
+# raw-duplicates/raw-authority/http-parser (need --raw-http, desync-adjacent) = operator-only.
+NOMORE403_TECHNIQUES="${NOMORE403_TECHNIQUES:-headers,endpaths,midpaths,double-encoding,unicode,http-versions,path-case,hop-by-hop,absolute-uri,path-normalization,suffix-tricks,header-confusion,host-override,forwarded-trust,proto-confusion,ip-encoding}"
 NOMORE403_DELAY="${NOMORE403_DELAY:-100}"      # ms between requests (anti-burn)
 NOMORE403_CONC="${NOMORE403_CONC:-10}"         # max goroutines
 NOMORE403_PATH_TIMEOUT="${NOMORE403_PATH_TIMEOUT:-60}" # wall-seconds per path run
