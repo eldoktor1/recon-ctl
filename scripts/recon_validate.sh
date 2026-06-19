@@ -221,6 +221,25 @@ LANE_KEY="all"
 LANE_LOCK_FILE="$STATE_DIR/validate.${LANE_KEY}.lock"
 exec 9>"$LANE_LOCK_FILE"; flock -n 9 || { warn "validate (lane=$LANE_KEY) already running"; exit 0; }
 
+# ---- Reclaim orphaned processing batches (audit queue.state HIGH) ----
+# A prior validate that hung or was killed mid-batch leaves files stranded in processing/ —
+# they never reach done/ and are silently lost (16 such orphans dated back to May 29 when a
+# Jun-15 stall wedged the lane). At cycle start, move any processing batch older than
+# VALIDATE_ORPHAN_MIN (>> HTTPX_MAX_RUNTIME, so a *live* batch is never touched) back to inbox
+# for a fresh claim. The .retryN→spool/failed poison-guard in process_batch still bounds
+# genuinely-bad batches, so reclaim can't loop them forever. mv is atomic → safe across lanes.
+VALIDATE_ORPHAN_MIN="${VALIDATE_ORPHAN_MIN:-120}"   # minutes
+reclaim_orphans() {
+  local f n=0
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    mv "$f" "$INBOX/$(basename "$f")" 2>/dev/null && n=$((n+1))
+  done < <(find "$PROCESSING" -maxdepth 1 -name '*.txt' -type f -mmin +"$VALIDATE_ORPHAN_MIN" 2>/dev/null)
+  [[ "$n" -gt 0 ]] && log "reclaimed $n orphaned processing batch(es) (>${VALIDATE_ORPHAN_MIN}min) → inbox"
+  return 0
+}
+reclaim_orphans
+
 # ---- Claim a batch atomically ----
 claim_batch() {
   local pattern="*.txt"

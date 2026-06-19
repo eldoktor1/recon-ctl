@@ -90,12 +90,21 @@ for cls in "${_PC_ARR[@]}"; do
   # SAME sqli param surface (no gf "nosqli" class) and must not consume sqli's sqlmap candidates.
   SEEN="$STATE_DIR/param_confirm_seen_${cls}.txt"; touch "$SEEN"
   qcls="$cls"; [[ "$cls" == "nosqli" ]] && qcls="sqli"
-  # in-scope paying candidates for this class, freshest first
-  q="$(jq -nc --arg c "$qcls" --argjson n "$PC_BATCH" \
-        '{size:($n*3), _source:["url","host","program"],
-          query:{bool:{filter:[{term:{vuln_classes:$c}}],
-                       must_not:[{term:{payout_tier:"none"}}]}},
-          sort:[{true_fresh:{order:"desc",missing:"_last"}},{cataloged_at:{order:"desc"}}]}')"
+  # in-scope paying candidates for this class. RANDOM-SAMPLE the catalog (true_fresh boosted),
+  # not a frozen freshest-N sort: the old sort always returned the SAME top-N, which the seen-
+  # ledger then filtered to empty within a few cycles ("no fresh candidates" forever despite a
+  # 25k catalog — the yield.params silent-zero). A per-cycle random_score slides the window
+  # across the whole catalog so the lane keeps surfacing un-probed URLs. Pull a wide window
+  # (n*10) so the client-side seen-filter still leaves a full batch.
+  seed=$(( (RANDOM << 15) | RANDOM ))
+  q="$(jq -nc --arg c "$qcls" --argjson n "$PC_BATCH" --argjson seed "$seed" \
+        '{size:($n*10), _source:["url","host","program"],
+          query:{function_score:{
+            query:{bool:{filter:[{term:{vuln_classes:$c}}],
+                         must_not:[{term:{payout_tier:"none"}}]}},
+            functions:[{random_score:{seed:$seed,field:"_seq_no"}},
+                       {filter:{term:{true_fresh:true}},weight:2}],
+            score_mode:"sum", boost_mode:"replace"}}}')"
   resp="$(es "$ES_URL/$PARAMS_INDEX/_search" -d "$q" 2>/dev/null)" || continue
   mapfile -t urls < <(printf '%s' "$resp" | jq -r '.hits.hits[]._source.url // empty' 2>/dev/null \
                       | awk 'NF && !seen[$0]++' | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$PC_BATCH")

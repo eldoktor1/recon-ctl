@@ -38,7 +38,7 @@ LATEST_JSON = os.path.join(STATE_DIR, "selfaudit_latest.json")
 ACTIONS_LOG = os.path.join(STATE_DIR, "selfaudit_actions.jsonl")
 
 # thresholds (hours unless noted)
-SCOPE_MAX_AGE_H   = float(os.environ.get("AUDIT_SCOPE_MAX_AGE_H", "8"))
+SCOPE_MAX_AGE_H   = float(os.environ.get("AUDIT_SCOPE_MAX_AGE_H", "26"))  # scope_db cadence is 24h (SCOPE_DB_INTERVAL) — 8h guaranteed a daily false-warn; 26h = 2h margin
 KEV_MAX_AGE_H     = float(os.environ.get("AUDIT_KEV_MAX_AGE_H", "12"))
 VULNFEED_MAX_AGE_H = float(os.environ.get("AUDIT_VULNFEED_MAX_AGE_H", "3"))
 LOCK_STALE_MIN    = float(os.environ.get("AUDIT_LOCK_STALE_MIN", "120"))
@@ -156,7 +156,7 @@ def chk_scope_fresh() -> dict:
                        remediation_class="claude-code")
     if age > SCOPE_MAX_AGE_H:
         return finding("scope.fresh", "MEDIUM", "warn",
-                       f"scope/programs.json is {age}h old (> {SCOPE_MAX_AGE_H}h) — scope-watch may be stalled.",
+                       f"scope/programs.json is {age}h old (> {SCOPE_MAX_AGE_H}h) — scope-db (24h cadence) may be stalled.",
                        remediation_class="claude-code")
     return finding("scope.fresh", "OK", "ok", f"scope fresh ({age}h); inscope_patterns.tsv non-empty.",
                    remediation_class="none")
