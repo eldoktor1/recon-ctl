@@ -31,6 +31,8 @@ ENDPOINTS_STORE   = os.path.expanduser(os.environ.get("JS_ENDPOINT_STORE", "~/re
 IDOR_WORKLIST     = os.path.expanduser(os.environ.get("IDOR_WORKLIST", "~/recon/idor_worklist.jsonl"))
 # the param catalog feeds BOTH param_confirm (ssti/sqli/redirect/open-redirect) and xss_confirm (xss)
 _PARAM_OUT_CLASSES = ("ssti", "sqli", "redirect", "open-redirect", "xss", "reflected-xss")
+PARAM_STATUS      = os.path.join(STATE_DIR, "param_confirm_status.json")  # heartbeat: written only on a tested>0 cycle
+OBS_PARAM_ACTIVE_DAYS = float(os.environ.get("OBS_PARAM_ACTIVE_DAYS", "3"))
 
 
 def _today():
@@ -102,6 +104,17 @@ def _file_age_days(path: str):
         return None
 
 
+def _param_lane_active() -> bool:
+    """Is the param-confirm lane actually PROBING candidates? recon_param_confirm writes
+    PARAM_STATUS only on a cycle that tested>0, so a fresh file = a live lane. A strict,
+    FP-averse confirm lane (reflection≠XSS, error-diff SQLi) legitimately confirms 0 for
+    long stretches — 'live but nothing met the bar' is HEALTHY, not silent-zero. Only an
+    INACTIVE lane (no tested>0 cycle in OBS_PARAM_ACTIVE_DAYS = genuinely starved, the
+    pre-de-starvation state) is a real silent-zero."""
+    age = _file_age_days(PARAM_STATUS)
+    return age is not None and age <= OBS_PARAM_ACTIVE_DAYS
+
+
 def yield_audit(conn, window_d: int = OBS_YIELD_WINDOW_D) -> dict:
     """Per-lane production self-audit over a rolling window. For every lane reports
     confirmed produced vs reals (ai_verdict='real') vs fps. A lane that spent resources
@@ -133,9 +146,13 @@ def yield_audit(conn, window_d: int = OBS_YIELD_WINDOW_D) -> dict:
     cat = _es_count("recon_params")
     ph = "(" + ",".join("?" * len(_PARAM_OUT_CLASSES)) + ")"
     pc, pr, pf = _counts(f"signal_class IN {ph}", _PARAM_OUT_CLASSES)
+    p_active = _param_lane_active()
     lanes.append({"lane": "params", "kind": "catalog", "input_label": "recon_params catalog (ES)",
                   "input": cat, "confirmed": pc, "real": pr, "fp": pf,
-                  "silent_zero": (cat > 0 and pc == 0 and pr == 0), "critical": False})
+                  "age_days": _file_age_days(PARAM_STATUS), "active": p_active,
+                  # silent-zero ONLY when the lane isn't even probing — a live-but-unconfirmed
+                  # FP-averse lane is healthy (see _param_lane_active).
+                  "silent_zero": (cat > 0 and pc == 0 and pr == 0 and not p_active), "critical": False})
 
     # jsintel: endpoints.jsonl production feeds the IDOR pillar (+ its verified-secret findings)
     ep = _linecount(ENDPOINTS_STORE)

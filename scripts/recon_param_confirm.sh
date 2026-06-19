@@ -147,4 +147,11 @@ for cls in "${_PC_ARR[@]}"; do
 done
 
 for _sf in "$STATE_DIR"/param_confirm_seen_*.txt; do [[ -f "$_sf" ]] && { tail -n 8000 "$_sf" > "$_sf.tmp" 2>/dev/null && mv "$_sf.tmp" "$_sf" 2>/dev/null; }; done
+# Activity heartbeat for the yield self-audit: write ONLY when we actually PROBED candidates
+# (tested>0). A strict FP-averse confirm lane legitimately confirms 0 for long stretches — that
+# is healthy, not a silent-zero. observability checks this file's freshness to tell a LIVE lane
+# (probing, just nothing met the bar) from a genuinely starved/broken one (the pre-fix state).
+[[ "$tested_total" -gt 0 ]] && printf '{"ts":"%s","tested":%s,"confirmed":%s}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tested_total" "$confirmed_total" \
+  > "$STATE_DIR/param_confirm_status.json" 2>/dev/null || true
 log "🧪 param-confirm done · 💥 $confirmed_total confirmed / $tested_total tested"
