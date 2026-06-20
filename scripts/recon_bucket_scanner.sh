@@ -88,6 +88,29 @@ vpn_gate() {
   fi
 }
 
+# ES full-text widening: pull IN-SCOPE recon_alive docs whose url/final_url/cname reference a
+# bucket provider. The triage_in_scope filter makes .host trustworthy provenance; cname-fronted
+# buckets surfaced here aren't in jsintel/params (the widening). Emits {host,program,text} JSONL.
+es_bucket_refs() {
+  local q
+  q='{"size":3000,"_source":["host","triage_program","url","final_url","cname","title"],
+      "query":{"bool":{
+        "filter":[{"term":{"triage_in_scope":true}}],
+        "must_not":[{"range":{"ignore_expires_at":{"gt":"now"}}}],
+        "minimum_should_match":1,
+        "should":[
+          {"wildcard":{"url":"*amazonaws.com*"}},{"wildcard":{"final_url":"*amazonaws.com*"}},{"wildcard":{"cname":"*amazonaws.com*"}},
+          {"wildcard":{"url":"*storage.googleapis.com*"}},{"wildcard":{"final_url":"*storage.googleapis.com*"}},{"wildcard":{"cname":"*storage.googleapis.com*"}},
+          {"wildcard":{"url":"*digitaloceanspaces.com*"}},{"wildcard":{"final_url":"*digitaloceanspaces.com*"}},{"wildcard":{"cname":"*digitaloceanspaces.com*"}},
+          {"wildcard":{"url":"*blob.core.windows.net*"}},{"wildcard":{"final_url":"*blob.core.windows.net*"}},{"wildcard":{"cname":"*blob.core.windows.net*"}}
+        ]}}}'
+  curl -sS -m30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
+    -X POST "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
+    | jq -c '.hits.hits[]?._source
+        | {host:(.host//""), program:(.triage_program//""),
+           text:([.url,.final_url,.cname,.title]|map(select(.!=null))|join(" "))}' 2>/dev/null || true
+}
+
 es_stamp() {   # best-effort: stamp bucket result onto the source host's recon_alive doc
   local host="$1" bucket="$2" access="$3" sev="$4"
   [[ -z "$host" ]] && return 0
@@ -271,8 +294,10 @@ cmd_scan() {
   local cand="$WORK/candidates.jsonl" gated="$WORK/gated.jsonl"
   : > "$cand"; : > "$gated"
 
-  # ---- 1) Lane A: mine the target's OWN surface for bucket refs ----
-  python3 "$HELPER" extract --jsintel "$JSINTEL" --params-dir "$PARAMS_DIR" > "$cand" 2>/dev/null || true
+  # ---- 1) Lane A: mine the target's OWN surface for bucket refs (jsintel + params + ES full-text) ----
+  local esrefs="$WORK/es_refs.jsonl"; es_bucket_refs > "$esrefs" 2>/dev/null || : > "$esrefs"
+  log "ES full-text refs: $(wc -l < "$esrefs" | tr -d ' ') in-scope host(s) referencing a bucket"
+  python3 "$HELPER" extract --jsintel "$JSINTEL" --params-dir "$PARAMS_DIR" --es-refs "$esrefs" > "$cand" 2>/dev/null || true
   local ncand; ncand="$(wc -l < "$cand" | tr -d ' ')"
   [[ "$ncand" -eq 0 ]] && { log "no bucket references mined from surface"; exit 0; }
   log "mined $ncand candidate bucket(s) from target surface"
@@ -406,7 +431,9 @@ case "${1:-scan}" in
   writecheck)     shift; cmd_writecheck "$@" ;;
   seed)           shift
                   mx=100000; [[ "${1:-}" == "--max" ]] && mx="${2:-100000}"
-                  python3 "$HELPER" extract --jsintel "$JSINTEL" --params-dir "$PARAMS_DIR" --max "$mx" ;;
+                  seed_es="$(mktemp)"; es_bucket_refs > "$seed_es" 2>/dev/null || true
+                  python3 "$HELPER" extract --jsintel "$JSINTEL" --params-dir "$PARAMS_DIR" --es-refs "$seed_es" --max "$mx"
+                  rm -f "$seed_es" ;;
   results|list)   shift; cmd_results "$@" ;;
   *) echo "usage: $0 [scan|check <bucket> [provider]|writecheck <bucket> [region]|seed|results [N]]" >&2; exit 2 ;;
 esac

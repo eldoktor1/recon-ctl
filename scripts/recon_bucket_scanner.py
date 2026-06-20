@@ -145,6 +145,35 @@ def cmd_extract(args):
                 if len(seen) >= cap:
                     break
 
+    # --- ES full-text refs: in-scope recon_alive docs whose cname/final_url/url/title
+    #     reference a bucket (the bash layer pre-filters to triage_in_scope, so .host is
+    #     in-scope provenance). cname-fronted buckets here aren't in jsintel — the widening. ---
+    ef = args.es_refs
+    if ef and os.path.exists(ef) and len(seen) < cap:
+        with open(ef, "r", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or "{" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                host = (rec.get("host") or "").lower()
+                program = rec.get("program") or ""
+                for field in ("text", "cname", "final_url", "url", "title"):
+                    val = rec.get(field)
+                    if not isinstance(val, str):
+                        continue
+                    for provider, bucket, region in _scan_text(val):
+                        # don't let the bucket's own provider host pose as provenance
+                        sh = host if all(d not in host for d in (
+                            "amazonaws.com", "googleapis.com",
+                            "digitaloceanspaces.com", "windows.net")) else ""
+                        add(provider, bucket, region, sh, program, val)
+                if len(seen) >= cap:
+                    break
+
     # --- params catalog *.txt (lines are target URLs; provenance = URL host) ---
     pdir = args.params_dir
     if pdir and os.path.isdir(pdir) and len(seen) < cap:
@@ -302,6 +331,7 @@ def main():
     e = sub.add_parser("extract")
     e.add_argument("--jsintel", default="")
     e.add_argument("--params-dir", default="")
+    e.add_argument("--es-refs", default="")
     e.add_argument("--max", type=int, default=0)
     e.set_defaults(func=cmd_extract)
     c = sub.add_parser("classify")
