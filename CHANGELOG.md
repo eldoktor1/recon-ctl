@@ -1,5 +1,27 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.10 - 2026-06-20 - Standing Claude research routines (recon-research) — keep the system updated
+
+The pipeline had DATA feeds (CVE/KEV, nuclei-update, self-audit) but no Claude-driven RESEARCH layer.
+`recon_research.sh` + `recon_research.py` add it: headless Claude on the Max subscription (no API key)
+with WebSearch/WebFetch, on a cadence, feeding tooling/detection/verification/vuln knowledge into the repo.
+
+- **Four topics** (daemon loops, killswitch v2_research): vulns (daily — new CVE/KEV + writeups
+  version-reasoned to OUR top tech from ES), tooling (weekly — new/better tools per lane, skeptical
+  adopt/evaluate/skip), kb-enrich (weekly — deepen KB docs), detect-tune (weekly — fingerprints/dorks/
+  FP patterns/confirm primitives).
+- **Web research is NOT target traffic** (Anthropic→web) → runs as d0k, no Mullvad/run_scanner gate.
+  Self-serializes (flock) so the 4 topics never run Claude concurrently. ~6-8 search budget/run.
+- **Autonomy (operator-chosen):** dated digest (docs/research/<topic>_<date>.md) + brand-NEW KB docs
+  auto-commit+push; edits to EXISTING KB → review-only proposals (docs/research/proposals/) — never a
+  silent rewrite. bash controls ALL file writes; Claude gets only WebSearch/WebFetch (no Write/Edit/Bash).
+  Router (recon_research.py) enforces the new-vs-existing split. One Discord summary per run.
+- **Validated live:** the vulns run found in-range CVEs for our actual stack (nginx 1.29.7, PHP SOAP,
+  Varnish, Apache 2.4.66, Drupal JSON:API SQLi) with detection fingerprints + n-day actions, auto-created
+  a high-quality tech-wordpress.md, and queued cache-deception/domxss enrichment proposals. LLM-search CVE
+  IDs are self-flagged ⚠️ for NVD verification (LEAD-not-P0, per the KEV doctrine).
+- Wiring: daemon loops, recon-ctl `research` dispatch + usage, `recon-research` alias, CLAUDE.md section.
+
 ## v3.9.1 - 2026-06-20 - GraphQL: Clairvoyance-style field-suggestion recovery (introspection OFF)
 
 When introspection is disabled, `recon_graphql.py` now recovers the schema via field-suggestion leakage:

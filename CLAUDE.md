@@ -459,6 +459,23 @@ BOUNDARY (enforced in code): it NEVER edits code/config, touches egress/Mullvad/
 `--apply`); `--apply` is operator-only. `recon_watchdog.sh` alarms `#ops` if the auditor's own output
 goes stale (it must not silently die).
 
+## Standing research routines (recon-research) — automate "research is the edge"
+The pipeline has DATA feeds (CVE/KEV intel, nuclei-update, self-audit); `recon_research.sh` adds the
+missing **Claude-driven RESEARCH layer** so tooling/detection/verification/vuln knowledge stays current
+without a human pulling it. Runs headless Claude on the Max subscription (`~/.local/bin/claude -p
+--allowedTools "WebSearch WebFetch" --permission-mode dontAsk`) — web research is Anthropic→web, NOT
+target traffic, so it runs as **d0k, no Mullvad/run_scanner gate**. Four topics on a cadence (daemon
+loops, killswitch `state/kill/v2_research`): **vulns** (daily — new CVE/KEV + writeups version-reasoned
+to OUR top tech), **tooling** (weekly — new/better tools per lane, skeptical: adopt/evaluate/skip, not
+dup-traps), **kb-enrich** (weekly — deepen KB docs), **detect-tune** (weekly — fingerprints/dorks/FP
+patterns/confirm-primitive ideas). Output autonomy (operator-chosen): a dated **digest**
+(`docs/research/<topic>_<date>.md`) + brand-NEW KB docs auto-commit+push; edits to EXISTING KB are
+written as **review-only proposals** (`docs/research/proposals/`) — never a silent KB rewrite. `bash`
+controls all file writes; Claude gets only WebSearch/WebFetch (no Write/Edit/Bash). One Discord summary
+per run. On-demand: `recon-research <topic|all>`. The CVE IDs LLM-search returns can be hallucinated —
+the digest self-flags ⚠️ and items must be NVD/version-verified before they mint anything (LEAD-not-P0,
+same as every KEV match).
+
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
   WSL shell). NEVER invoke bare `python`/`python3`/`py`/`pip` on the Windows/MINGW side — Windows

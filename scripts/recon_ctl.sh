@@ -2428,6 +2428,7 @@ usage() {
   printf "  ${G}recon-buckets${R} [scan|check <b> [prov]|writecheck <b> [region]|results]  Cloud-bucket exposure (S3Scanner; provenance-seeded, read-only)\n"
   printf "  ${G}recon-graphql${R} [scan|check <url>|results]  GraphQL schema→worklist (read-only introspection; sensitive ops + IDOR/injectable args)\n"
   printf "  ${G}recon-wcd${R} [scan|confirm <host>|results]   Web-cache deception/poisoning LEADs (detect-only, cache-busted — never poisons real cache)\n"
+  printf "  ${G}recon-research${R} <tooling|vulns|kb-enrich|detect-tune|all>  Claude research routine → digest + KB (auto-commit; keeps the system updated)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
@@ -2552,6 +2553,9 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_wcd.sh" "${@:-scan}" ;;
+  research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
+                shift
+                bash "$SCRIPT_DIR/recon_research.sh" "${@:-vulns}" ;;
   account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;
   domxss)       shift; python3 "$SCRIPT_DIR/recon_domxss.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;

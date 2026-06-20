@@ -617,6 +617,19 @@ run_graphql() { v21_killed graphql && return 0; [[ -f "$GRAPHQL_SCRIPT" ]] && ru
 WCD_SCRIPT="${WCD_SCRIPT:-$(script_path recon_wcd.sh)}"
 WCD_INTERVAL="${WCD_INTERVAL:-21600}"           # 6h (heavier per-host probe set)
 run_wcd() { v21_killed wcd && return 0; [[ -f "$WCD_SCRIPT" ]] && run_scanner bash "$WCD_SCRIPT" scan || true; }
+# recon_research — standing Claude RESEARCH routine (tooling/vulns/kb/detect-tune) that keeps the
+# system UPDATED. Web research (Anthropic→web, NOT target traffic) → runs as d0k, no run_scanner/vpn
+# gate. Auto-commits dated digests + brand-NEW KB; edits to existing KB → review proposals. The script
+# self-serializes (flock) so the 4 topics never run Claude concurrently. Killswitch: state/kill/v2_research.
+RESEARCH_SCRIPT="${RESEARCH_SCRIPT:-$(script_path recon_research.sh)}"
+RESEARCH_VULNS_INTERVAL="${RESEARCH_VULNS_INTERVAL:-86400}"        # daily
+RESEARCH_TOOLING_INTERVAL="${RESEARCH_TOOLING_INTERVAL:-604800}"   # weekly
+RESEARCH_KB_INTERVAL="${RESEARCH_KB_INTERVAL:-604800}"             # weekly
+RESEARCH_DETECT_INTERVAL="${RESEARCH_DETECT_INTERVAL:-604800}"     # weekly
+run_research_vulns()   { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" vulns       >>"$LOG_FILE" 2>&1 || true; }
+run_research_tooling() { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" tooling     >>"$LOG_FILE" 2>&1 || true; }
+run_research_kb()      { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" kb-enrich   >>"$LOG_FILE" 2>&1 || true; }
+run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" detect-tune >>"$LOG_FILE" 2>&1 || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
 # CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
 # target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
@@ -803,6 +816,10 @@ run_discord_bot() {
   supervise_loop "buckets"        "BUCKETS_INTERVAL"       run_buckets        &
   supervise_loop "graphql"        "GRAPHQL_INTERVAL"       run_graphql        &
   supervise_loop "wcd"            "WCD_INTERVAL"           run_wcd            &
+  supervise_loop "research-vulns"   "RESEARCH_VULNS_INTERVAL"   run_research_vulns   &
+  supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
+  supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
+  supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
