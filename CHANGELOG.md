@@ -1,5 +1,16 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.9.1 - 2026-06-20 - GraphQL: Clairvoyance-style field-suggestion recovery (introspection OFF)
+
+When introspection is disabled, `recon_graphql.py` now recovers the schema via field-suggestion leakage:
+it sends GUARANTEED-INVALID 1-char near-miss field names (`<candidate>z`) — so a real field/mutation can
+NEVER validly execute (no side effects, no data) — and harvests the engine's "did you mean <real field>"
+error suggestions to reconstruct the query/mutation op set, ranked by name (sensitive-op patterns). The
+1-char suffix stays inside graphql-js's edit-distance suggestion threshold (~floor(len*0.4)+1); a longer
+nonce defeats it. Bounded (GQL_SUGGEST_MAX≈140) + rate-limited; early-bails after 12 no-suggestion probes
+(suggestions off). Recovered endpoints flow to the worklist/briefing/ES (graphql_recovery field) exactly
+like introspected ones. Validated: full op set recovered from a graphql-js endpoint via suggestions alone.
+
 ## v3.9 - 2026-06-20 - Three new lanes: GraphQL schema→worklist, active param discovery (arjun), web-cache deception
 
 Tool-gap research (VulnAPI evaluated + rejected — it doesn't beat existing coverage and its safe parts

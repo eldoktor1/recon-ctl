@@ -15,8 +15,10 @@ introspection query. NEVER a mutation, never a data-returning field query, never
 See docs/knowledge/class-graphql.md for the methodology + severity ladder.
 """
 import json
+import os
 import re
 import sys
+import time
 
 try:
     import requests
@@ -26,6 +28,13 @@ except Exception:
 
 TIMEOUT = 12
 UA = "Mozilla/5.0 (compatible; recon-graphql/1.0)"
+# Clairvoyance-style field-suggestion recovery (when introspection is OFF). Bounded + polite.
+SUGGEST_MAX = int(os.environ.get("GQL_SUGGEST_MAX", "140"))    # max probe requests per endpoint
+SUGGEST_DELAY = float(os.environ.get("GQL_SUGGEST_DELAY", "0.2"))
+# 1-char suffix: keeps every probe GUARANTEED-invalid (never a real field → never executes / returns
+# data) while staying within GraphQL's edit-distance suggestion threshold (~floor(len*0.4)+1), so a
+# near-miss still triggers "did you mean <real field>". A longer nonce defeats the suggestion.
+NONCE = "z"
 
 # Minimal-but-sufficient introspection: roots + every type's fields + each field's args.
 INTROSPECTION = """
@@ -148,12 +157,115 @@ def rank_schema(schema):
     return summary, cands
 
 
+# ---------------------------------------------------------------------------
+# Clairvoyance-style field-suggestion recovery (introspection OFF, suggestions ON)
+# ---------------------------------------------------------------------------
+# graphql-js & many engines leak the schema via "Did you mean ..." error suggestions even with
+# introspection disabled. We send GUARANTEED-INVALID near-miss field names (candidate+NONCE) so a
+# real field/mutation can NEVER be validly invoked (no side effects) — the error suggests the real
+# fields close to our probe, which we harvest. Read-only, bounded, rate-limited.
+SUGGEST_RE = re.compile(r'did you mean', re.I)
+QUOTED_RE = re.compile(r'["\'`]([A-Za-z_][A-Za-z0-9_]*)["\'`]')
+
+# compact, sensitivity-weighted candidate field/op names (near-miss seeds for the suggestion sweep)
+SUGGEST_WORDS = [
+    "user", "users", "me", "viewer", "currentUser", "whoami", "account", "accounts", "node",
+    "search", "admin", "admins", "order", "orders", "product", "products", "customer", "customers",
+    "payment", "payments", "invoice", "transaction", "transactions", "profile", "settings", "config",
+    "organization", "team", "teams", "member", "members", "project", "report", "file", "files",
+    "document", "documents", "message", "messages", "notification", "session", "sessions", "token",
+    "tokens", "apiKey", "apiKeys", "secret", "secrets", "role", "roles", "permission", "permissions",
+    "group", "employee", "employees", "billing", "subscription", "card", "cards", "address", "email",
+    "phone", "userById", "internalUser",
+    # mutation-leaning
+    "createUser", "updateUser", "deleteUser", "resetPassword", "changePassword", "login", "register",
+    "signup", "createOrder", "cancelOrder", "createPayment", "refund", "transfer", "withdraw",
+    "updateRole", "grantRole", "inviteUser", "impersonate", "createApiKey", "revokeApiKey",
+    "updateSettings", "uploadFile", "sendEmail", "verifyEmail", "disableUser", "approve", "promote",
+]
+
+
+def _extract_suggestions(js, txt):
+    """Harvest suggested field names from a GraphQL error response."""
+    out = set()
+    msgs = []
+    if isinstance(js, dict):
+        for e in (js.get("errors") or []):
+            if isinstance(e, dict) and e.get("message"):
+                msgs.append(e["message"])
+    if not msgs and txt:
+        msgs.append(txt)
+    for m in msgs:
+        if not SUGGEST_RE.search(m or ""):
+            continue
+        tail = m[SUGGEST_RE.search(m).end():]          # only names AFTER "did you mean"
+        for name in QUOTED_RE.findall(tail):
+            if name not in ("Query", "Mutation", "Subscription"):
+                out.add(name)
+    return out
+
+
+def score_name(op_type, name):
+    """Score a recovered field by NAME only (suggestion recovery gives no args)."""
+    score = 5 if op_type == "mutation" else 2
+    sens = bool(SENSITIVE_OP.search(name))
+    idor = bool(IDOR_ARG.match(name)) or name.lower().endswith("byid")
+    reasons = []
+    if sens:
+        score += 3; reasons.append("sensitive-op-name")
+    if idor:
+        score += 1; reasons.append("object-ref naming (likely takes an id)")
+    return {"op_type": op_type, "name": name, "args": [], "idor_args": [],
+            "injectable_args": [], "returns": "", "sensitive": sens,
+            "score": score, "reason": "; ".join(reasons) or "recovered field (args unknown — introspection off)"}
+
+
+def recover_via_suggestions(url, headers=None):
+    """Sweep near-miss field names, harvest 'did you mean' suggestions → recovered op set.
+    Detection IS the sweep: if the first probes yield no suggestions, the engine has suggestions
+    off (or the wordlist doesn't fit this schema) → bail early so we don't probe a dead endpoint."""
+    q_fields, m_fields = set(), set()
+    probes = 0
+    # query-root sweep (early-bail if suggestions appear to be off)
+    for i, w in enumerate(SUGGEST_WORDS):
+        if probes >= SUGGEST_MAX:
+            break
+        _, js, txt = _gql(url, "query { %s }" % (w + NONCE), headers)
+        q_fields |= _extract_suggestions(js, txt)
+        probes += 1
+        time.sleep(SUGGEST_DELAY)
+        if i >= 11 and not q_fields:        # 12 probes, zero suggestions → suggestions off
+            return None
+    # mutation-root sweep (only if the engine exposes a Mutation type)
+    _, mjs, mtxt = _gql(url, "mutation { %s }" % (SUGGEST_WORDS[0] + NONCE), headers)
+    mblob = json.dumps(mjs).lower() if mjs else (mtxt or "").lower()
+    if "mutation" in mblob and "cannot query field" in mblob:
+        for w in SUGGEST_WORDS:
+            if probes >= SUGGEST_MAX:
+                break
+            _, js, txt = _gql(url, "mutation { %s }" % (w + NONCE), headers)
+            m_fields |= _extract_suggestions(js, txt)
+            probes += 1
+            time.sleep(SUGGEST_DELAY)
+    m_fields -= q_fields   # a name suggested in mutation context but already a query field stays query
+    if not q_fields and not m_fields:
+        return None
+    cands = [score_name("mutation", n) for n in sorted(m_fields)] + \
+            [score_name("query", n) for n in sorted(q_fields)]
+    cands.sort(key=lambda c: -c["score"])
+    return {
+        "n_queries": len(q_fields), "n_mutations": len(m_fields),
+        "n_sensitive": sum(1 for c in cands if c["sensitive"]),
+        "candidates": cands[:25], "probes": probes,
+    }
+
+
 def analyze_url(url, headers=None):
     """Probe one URL: confirm GraphQL, introspect, rank. Returns a record or None."""
     st, js, txt = _gql(url, "{__typename}", headers)
     if not is_graphql(st, js, txt):
         return None
-    rec = {"endpoint": url, "introspection_enabled": False,
+    rec = {"endpoint": url, "introspection_enabled": False, "recovery": "none",
            "query_root": None, "mutation_root": None,
            "n_queries": 0, "n_mutations": 0, "n_sensitive": 0, "candidates": []}
     ist, ijs, _ = _gql(url, INTROSPECTION, headers)
@@ -162,9 +274,21 @@ def analyze_url(url, headers=None):
         schema = (ijs["data"] or {}).get("__schema")
     if schema:
         rec["introspection_enabled"] = True
+        rec["recovery"] = "introspection"
         summary, cands = rank_schema(schema)
         rec.update(summary)
         rec["candidates"] = cands[:25]   # top operations per endpoint
+    else:
+        # introspection OFF → Clairvoyance-style field-suggestion recovery
+        try:
+            rcv = recover_via_suggestions(url, headers)
+        except Exception:
+            rcv = None
+        if rcv:
+            rec["recovery"] = "field-suggestion"
+            rec["query_root"] = "Query"; rec["mutation_root"] = "Mutation" if rcv["n_mutations"] else None
+            rec["n_queries"] = rcv["n_queries"]; rec["n_mutations"] = rcv["n_mutations"]
+            rec["n_sensitive"] = rcv["n_sensitive"]; rec["candidates"] = rcv["candidates"]
     return rec
 
 
@@ -184,11 +308,22 @@ def cmd_analyze(_args):
             sys.stdout.flush()
 
 
+def cmd_recover(args):
+    """Debug: force field-suggestion recovery on one URL (introspection-off path)."""
+    url = args[0] if args else ""
+    if not url:
+        sys.stderr.write("usage: recon_graphql.py recover <url>\n"); sys.exit(2)
+    rcv = recover_via_suggestions(url)
+    print(json.dumps(rcv or {"recovered": False}, indent=2))
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "analyze":
         cmd_analyze(sys.argv[2:])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "recover":
+        cmd_recover(sys.argv[2:])
     else:
-        sys.stderr.write("usage: recon_graphql.py analyze  (URLs on stdin)\n")
+        sys.stderr.write("usage: recon_graphql.py analyze (URLs on stdin) | recover <url>\n")
         sys.exit(2)
 
 

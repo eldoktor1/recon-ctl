@@ -190,7 +190,7 @@ GQL_WORKLIST="${GQL_WORKLIST:-$BASE_DIR/graphql/graphql_worklist.jsonl}"
 gql="[]"
 if [[ -s "$GQL_WORKLIST" ]]; then
   gql="$(tail -n 300 "$GQL_WORKLIST" 2>/dev/null | jq -c '.' 2>/dev/null \
-    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)) and .introspection_enabled and ((.n_sensitive//0)>0)))
+    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)) and (.introspection_enabled or .recovery=="field-suggestion") and ((.n_sensitive//0)>0)))
              | unique_by(.endpoint) | sort_by(.n_sensitive//0) | reverse | .[0:8]' 2>/dev/null || echo '[]')"
 fi
 [[ -n "$gql" ]] || gql="[]"
@@ -287,8 +287,8 @@ md="$BRIEF_DIR/tonight_$today.md"
 
   # --- 🔮 GraphQL worklist (introspection-on; sensitive ops + IDOR/injectable args — human 2-acct test) ---
   if [[ "${ngql:-0}" -gt 0 ]]; then
-    printf '\n\n## 🔮 GraphQL (introspection ON — human 2-account / injection test) — %s\n' "$ngql"
-    printf '%s' "$gql" | jq -r '.[] | "- **`\(.host)`** `\(.endpoint)` — \(.n_sensitive) sensitive op(s) [\(.program // "?")]\n" + ([.candidates[]? | select(.sensitive or (.idor_args|length>0) or (.injectable_args|length>0)) | "  - [\(.score)] \(.op_type) **\(.name)** — \(.reason)"] | .[0:5] | join("\n"))' 2>/dev/null
+    printf '\n\n## 🔮 GraphQL (schema exposed — human 2-account / injection test) — %s\n' "$ngql"
+    printf '%s' "$gql" | jq -r '.[] | "- **`\(.host)`** `\(.endpoint)` — \(if .recovery=="field-suggestion" then "RECOVERED (introspection off)" else "introspection ON" end) · \(.n_sensitive) sensitive op(s) [\(.program // "?")]\n" + ([.candidates[]? | select(.sensitive or (.idor_args|length>0) or (.injectable_args|length>0)) | "  - [\(.score)] \(.op_type) **\(.name)** — \(.reason)"] | .[0:5] | join("\n"))' 2>/dev/null
   fi
 
   # --- ☁️ Web-cache deception/poisoning LEADs (detect-only; impact = owned account) ---

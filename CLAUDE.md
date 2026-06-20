@@ -63,9 +63,11 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   class made dup-proof: the crowd at most flags "introspection enabled" (Info/dup); we harvest the
   introspection SCHEMA and REASON over the graph — sensitive unauth mutations, object-ref args (IDOR),
   injectable args (SQLi/NoSQLi), PII-returning queries — into a ranked human-test worklist
-  (`briefings/graphql_candidates_<date>.md` + the briefing). Read-only (`{__typename}` + introspection
-  ONLY — never a mutation/auth/data-query); LEADs only — IDOR/injection/auth-bypass = human 2-account
-  test (never third-party IDs). KB: `class-graphql.md`. Added 2026-06-20.
+  (`briefings/graphql_candidates_<date>.md` + the briefing). Introspection OFF ⇒ **Clairvoyance-style
+  field-suggestion recovery** (guaranteed-invalid 1-char near-miss probes harvest "did you mean" field
+  names — nothing executes). Read-only (`{__typename}` + introspection/suggestions ONLY — never a
+  mutation/auth/data-query); LEADs only — IDOR/injection/auth-bypass = human 2-account test (never
+  third-party IDs). KB: `class-graphql.md`. Added 2026-06-20.
 - **Web-cache deception/poisoning** (`recon_wcd.sh`, native; `recon-wcd`) — SAFE detect-only LEAD
   surfacer for CDN-fronted in-scope hosts. Every probe carries a UNIQUE cache-buster so we test under
   OUR OWN key and NEVER poison the shared cache real users hit (the critical safety primitive). WCD =

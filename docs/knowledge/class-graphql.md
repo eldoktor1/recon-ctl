@@ -211,8 +211,15 @@ Built NATIVELY (no graphw00f/graphql-cop dep — the value is reasoning over the
 is requests+JSON). Lane: discover in-scope GraphQL endpoints (jsintel + ES url/title/tech, bounded
 path-expansion) → scope+pays gate → read-only `{__typename}` liveness + standard introspection →
 rank ops (sensitive mutations + IDOR object-ref args + injectable args + PII-returning queries via
-the recon_idor_candidates.py scoring) → `briefings/graphql_candidates_<date>.md` + graphql_worklist.jsonl
-+ ES stamp (graphql_endpoint/introspection/sensitive_ops) + 6:30 briefing. LEADs only — IDOR/injection/
+the recon_idor_candidates.py scoring). **Introspection OFF → Clairvoyance-style field-suggestion
+recovery** (`recon_graphql.py recover <url>`): sends GUARANTEED-INVALID 1-char near-miss field names
+(`<candidate>z`) so a real field/mutation can NEVER validly execute, and harvests the engine's "did you
+mean <real field>" error suggestions to reconstruct the op set (graphql-js suggestion threshold
+≈floor(len*0.4)+1, so a 1-char-off probe stays in range; a longer nonce defeats it). Recovered fields
+have names but no args → ranked by NAME (sensitive-op patterns). Bounded (GQL_SUGGEST_MAX≈140) + delayed;
+early-bails if the first 12 probes yield no suggestions (engine has suggestions off too). Either path →
+`briefings/graphql_candidates_<date>.md` + graphql_worklist.jsonl
++ ES stamp (graphql_endpoint/introspection/recovery/sensitive_ops) + 6:30 briefing. LEADs only — IDOR/injection/
 auth-bypass confirmation is human (2 owned accounts). Sends NO mutations/auth/data-queries. Daemon 3h
 loop (killswitch v2_graphql); `recon-graphql [scan|check <url>|results]`. graphw00f can enrich
 fingerprinting on-demand if cloned, not required.

@@ -94,11 +94,11 @@ discover_endpoints() {   # -> host<TAB>url<TAB>program  on stdout
 }
 
 es_stamp() {   # stamp graphql posture onto the host doc (best-effort)
-  local host="$1" intro="$2" nsens="$3"; [[ -z "$host" ]] && return 0
+  local host="$1" intro="$2" nsens="$3" rcv="${4:-none}"; [[ -z "$host" ]] && return 0
   local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   es_curl -X POST "$ES_URL/$INDEX_NAME/_update/$host" \
-    -d "$(jq -nc --argjson i "$intro" --argjson n "$nsens" --arg t "$now" \
-      '{doc:{graphql_endpoint:true,graphql_introspection:$i,graphql_sensitive_ops:$n,graphql_scan_at:$t}}')" \
+    -d "$(jq -nc --argjson i "$intro" --argjson n "$nsens" --arg r "$rcv" --arg t "$now" \
+      '{doc:{graphql_endpoint:true,graphql_introspection:$i,graphql_sensitive_ops:$n,graphql_recovery:$r,graphql_scan_at:$t}}')" \
     >/dev/null 2>&1 || true
 }
 note_host() { local h="$1" t="$2"; [[ -z "$h" ]] && return 0; bash "$SCRIPT_DIR/recon_ctl.sh" note "$h" "$t" >/dev/null 2>&1 || true; }
@@ -140,7 +140,7 @@ cmd_scan() {
   local nowep; nowep="$(date +%s)"
   cut -f2 "$batch" | while IFS= read -r u; do printf '%s\t%s\n' "$u" "$nowep" >> "$SCANNED"; done
 
-  local nlive nsens_total=0 nintro=0
+  local nlive nsens_total=0 nintro=0 nrecover=0
   nlive="$(wc -l < "$live" | tr -d ' ')"
   [[ "$nlive" -eq 0 ]] && { log "no live graphql endpoints this cycle"; exit 0; }
 
@@ -148,25 +148,29 @@ cmd_scan() {
   : > "$WORK/enriched.jsonl"
   while IFS= read -r rec; do
     [[ -z "$rec" ]] && continue
-    local ep host prog intro nsens
+    local ep host prog intro rcv nsens
     ep="$(jq -r '.endpoint' <<<"$rec")"
     host="$(awk -F'\t' -v u="$ep" '$2==u{print $1; exit}' "$batch")"; [[ -n "$host" ]] || host="$(printf '%s' "$ep" | sed -E 's#https?://([^/]+).*#\1#')"
     prog="$(awk -F'\t' -v u="$ep" '$2==u{print $3; exit}' "$batch")"
     intro="$(jq -r '.introspection_enabled' <<<"$rec")"
+    rcv="$(jq -r '.recovery // "none"' <<<"$rec")"
     nsens="$(jq -r '.n_sensitive // 0' <<<"$rec")"
     local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     jq -c --arg h "$host" --arg p "$prog" --arg ts "$now" '. + {host:$h,program:$p,ts:$ts,status:"to-test"}' <<<"$rec" >> "$WORK/enriched.jsonl"
-    es_stamp "$host" "$intro" "$nsens"
+    es_stamp "$host" "$intro" "$nsens" "$rcv"
     nsens_total=$(( nsens_total + nsens ))
     [[ "$intro" == "true" ]] && nintro=$((nintro+1))
-    if [[ "$intro" == "true" && "$nsens" -gt 0 ]]; then
-      note_host "$host" "graphql: introspection ON, $nsens sensitive op(s) — see graphql_worklist (human 2-acct/injection test)"
+    [[ "$rcv" == "field-suggestion" ]] && nrecover=$((nrecover+1))
+    # surface introspection-ON or suggestion-RECOVERED endpoints that expose sensitive ops
+    if [[ "$nsens" -gt 0 && ( "$intro" == "true" || "$rcv" == "field-suggestion" ) ]]; then
+      local how; [[ "$rcv" == "field-suggestion" ]] && how="schema RECOVERED via field-suggestion (introspection off)" || how="introspection ON"
+      note_host "$host" "graphql: $how, $nsens sensitive op(s) — see graphql_worklist (human 2-acct/injection test)"
     fi
   done < "$live"
 
   cat "$WORK/enriched.jsonl" >> "$WORKLIST" 2>/dev/null || true
   write_briefing
-  log "cycle done — 🔮 $nlive live · introspection-on $nintro · sensitive ops $nsens_total → worklist"
+  log "cycle done — 🔮 $nlive live · introspection-on $nintro · suggestion-recovered $nrecover · sensitive ops $nsens_total → worklist"
 }
 
 # ---- ranked briefing markdown ----
@@ -174,14 +178,14 @@ write_briefing() {
   local today md; today="$(date '+%Y-%m-%d')"; md="$BRIEF_DIR/graphql_candidates_$today.md"
   # recent (3d) live endpoints, deduped by endpoint, introspection-on + sensitive first
   local recent; recent="$(tail -n 400 "$WORKLIST" 2>/dev/null | jq -c '.' 2>/dev/null \
-    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)))) | unique_by(.endpoint)
-             | sort_by( (if .introspection_enabled then 1000 else 0 end) + (.n_sensitive//0)*10 ) | reverse' 2>/dev/null || echo '[]')"
+    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)) and (.introspection_enabled or .recovery=="field-suggestion"))) | unique_by(.endpoint)
+             | sort_by( (if .introspection_enabled then 1000 else 500 end) + (.n_sensitive//0)*10 ) | reverse' 2>/dev/null || echo '[]')"
   {
     printf '# 🔮 GraphQL worklist — %s\n\n' "$today"
-    printf '_Read-only introspection only. IDOR/injection/auth-bypass = human test with 2 OWNED accounts (never third-party IDs)._\n\n'
+    printf '_Read-only introspection / field-suggestion recovery only. IDOR/injection/auth-bypass = human test with 2 OWNED accounts (never third-party IDs)._\n\n'
     printf '%s' "$recent" | jq -r '.[] |
       "## \(.host) — `\(.endpoint)`",
-      "- introspection: \(if .introspection_enabled then "**ENABLED**" else "off (consider field-suggestion recovery)" end) · queries \(.n_queries) · mutations \(.n_mutations) · sensitive \(.n_sensitive) · program \(.program // "?")",
+      "- schema: \(if .introspection_enabled then "**introspection ENABLED**" elif .recovery=="field-suggestion" then "**RECOVERED via field-suggestion** (introspection off; args unknown)" else "off" end) · queries \(.n_queries) · mutations \(.n_mutations) · sensitive \(.n_sensitive) · program \(.program // "?")",
       ( .candidates[]? | select(.sensitive or (.idor_args|length>0) or (.injectable_args|length>0))
         | "  - [\(.score)] **\(.op_type) \(.name)** — \(.reason)" ),
       ""' 2>/dev/null
