@@ -54,6 +54,13 @@ PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 GOBIN="$HOME/go/bin"
 KATANA="${KATANA:-$GOBIN/katana}"; GAU="${GAU:-$GOBIN/gau}"
 GF="${GF:-$(command -v gf 2>/dev/null || echo "$GOBIN/gf")}"; QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
+# arjun — ACTIVE hidden-param discovery (sends LIVE traffic → ON-DEMAND ONLY, never the daemon
+# crawl; gated by PARAMS_ARJUN=1, set by `crawl-host --arjun` / `arjun`). Polite by default.
+ARJUN="${ARJUN:-$(command -v arjun 2>/dev/null)}"
+ARJUN_WORDLIST="${ARJUN_WORDLIST:-/usr/lib/python3/dist-packages/arjun/db/medium.txt}"
+ARJUN_DELAY="${ARJUN_DELAY:-2}"        # seconds between requests (forces single-thread)
+ARJUN_RATELIMIT="${ARJUN_RATELIMIT:-3}" # hard ceiling req/s (anti-burn backstop)
+ARJUN_TIMEOUT="${ARJUN_TIMEOUT:-20}"
 
 # Classify against EVERY gf pattern installed in ~/.gf — not a fixed list — so
 # adding a new pattern automatically extends the catalog. Override with PARAMS_CLASSES.
@@ -253,6 +260,34 @@ crawl_host() {
           for(i=1;i<=NR;i++) if(key[i]!=top) print lines[i]
         } else { for(i=1;i<=NR;i++) print lines[i] }
       }' "$hd/raw" > "$hd/raw.f" 2>/dev/null && mv "$hd/raw.f" "$hd/raw"
+  fi
+  # Active hidden-param discovery (arjun) — ON-DEMAND ONLY (PARAMS_ARJUN=1; never the autonomous
+  # daemon crawl — arjun sends LIVE traffic, mass use = anti-burn risk). Finds params that appear
+  # in NO crawled URL/JS (the inputs that drive SSRF/cache-poison/reflected bugs the crowd misses).
+  # Discovered params are synthesized as url?p=FUZZ into raw so they ride the SAME gf→catalog pipeline.
+  if [[ "${PARAMS_ARJUN:-0}" == "1" && -n "$ARJUN" && -x "$ARJUN" ]]; then
+    local aout="$hd/arjun.json" awl=()
+    [[ -s "$ARJUN_WORDLIST" ]] && awl=(-w "$ARJUN_WORDLIST")
+    local ahdr=(); [[ -n "${KATANA_AUTH_HEADER:-}" ]] && ahdr=(--headers "$KATANA_AUTH_HEADER")
+    log "  $host — arjun active param discovery (polite: -t1 -d$ARJUN_DELAY --rate-limit $ARJUN_RATELIMIT)"
+    timeout 300 "$ARJUN" -u "$url" -m GET -t 1 -d "$ARJUN_DELAY" --rate-limit "$ARJUN_RATELIMIT" \
+      --disable-redirects -T "$ARJUN_TIMEOUT" -q "${awl[@]}" "${ahdr[@]}" -oJ "$aout" >/dev/null 2>&1 || true
+    if [[ -s "$aout" ]]; then
+      python3 - "$aout" >> "$hd/raw" 2>/dev/null <<'PY' || true
+import sys, json
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+for u, info in (d.items() if isinstance(d, dict) else []):
+    ps = (info or {}).get("params") or []
+    if not ps:
+        continue
+    q = "&".join("%s=FUZZ" % p for p in ps)
+    print(u + ("&" if "?" in u else "?") + q)
+PY
+      sort -u "$hd/raw" -o "$hd/raw" 2>/dev/null || true
+    fi
   fi
   local raw_n; raw_n="$(wc -l < "$hd/raw" 2>/dev/null | tr -d ' ')"
   log "  $host — ${raw_n:-0} param URLs"
@@ -908,10 +943,12 @@ cmd_crawl_host() {
       --cookie=*) AUTH_COOKIE="${a#--cookie=}"; shift ;;
       --header) AUTH_HEADER="${2:-}"; shift 2 || true ;;
       --header=*) AUTH_HEADER="${a#--header=}"; shift ;;
+      --arjun) export PARAMS_ARJUN=1; shift ;;
       *) if [[ -z "$host" ]]; then host="$a"; elif [[ -z "$url" ]]; then url="$a"; fi; shift ;;
     esac
   done
-  [[ -n "$host" ]] || { warn "usage: recon_params.sh crawl-host <host> [url] [--cookie \"<c>\"] [--header \"<h>\"]"; exit 2; }
+  [[ -n "$host" ]] || { warn "usage: recon_params.sh crawl-host <host> [url] [--cookie \"<c>\"] [--header \"<h>\"] [--arjun]"; exit 2; }
+  [[ "${PARAMS_ARJUN:-0}" == "1" ]] && { [[ -n "$ARJUN" && -x "$ARJUN" ]] || { warn "--arjun requested but arjun not installed (pip install arjun)"; exit 1; }; }
   for t in "$KATANA" "$GF"; do [[ -x "$t" ]] || { warn "missing tool: $t"; exit 1; }; done
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down set — skipping crawl-host"; exit 0; }
   es_up || { warn "ES not reachable"; exit 1; }
@@ -959,6 +996,7 @@ case "${1:-}" in
   enqueue)        shift; cmd_enqueue "$@" ;;
   crawl)          shift; cmd_crawl "$@" ;;
   crawl-host)     shift; cmd_crawl_host "$@" ;;
+  arjun)          shift; cmd_crawl_host "$@" --arjun ;;   # crawl-host + ACTIVE hidden-param discovery
   collect)        shift; cmd_collect "$@" ;;
   verify-live)    shift; cmd_verify_live "$@" ;;
   list)           shift; cmd_list "$@" ;;

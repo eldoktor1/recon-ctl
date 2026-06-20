@@ -607,6 +607,16 @@ run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FIL
 BUCKETS_SCRIPT="${BUCKETS_SCRIPT:-$(script_path recon_bucket_scanner.sh)}"
 BUCKETS_INTERVAL="${BUCKETS_INTERVAL:-14400}"   # 4h (anti-burn; bounded batch + 7d re-scan cooldown)
 run_buckets() { v21_killed buckets && return 0; [[ -f "$BUCKETS_SCRIPT" ]] && run_scanner bash "$BUCKETS_SCRIPT" scan || true; }
+# recon_graphql — GraphQL schema → human-test worklist (the under-hunted money class). Read-only
+# introspection; ranks sensitive unauth ops + IDOR/injectable args → LEADs. Target-facing → run_scanner.
+GRAPHQL_SCRIPT="${GRAPHQL_SCRIPT:-$(script_path recon_graphql.sh)}"
+GRAPHQL_INTERVAL="${GRAPHQL_INTERVAL:-10800}"   # 3h
+run_graphql() { v21_killed graphql && return 0; [[ -f "$GRAPHQL_SCRIPT" ]] && run_scanner bash "$GRAPHQL_SCRIPT" scan || true; }
+# recon_wcd — web-cache deception/poisoning LEAD surfacer (detect-only, cache-busted = never poisons
+# the real cache). CDN-fronted in-scope hosts only. Target-facing → run_scanner. Killswitch: v2_wcd.
+WCD_SCRIPT="${WCD_SCRIPT:-$(script_path recon_wcd.sh)}"
+WCD_INTERVAL="${WCD_INTERVAL:-21600}"           # 6h (heavier per-host probe set)
+run_wcd() { v21_killed wcd && return 0; [[ -f "$WCD_SCRIPT" ]] && run_scanner bash "$WCD_SCRIPT" scan || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
 # CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
 # target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
@@ -791,6 +801,8 @@ run_discord_bot() {
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
   supervise_loop "buckets"        "BUCKETS_INTERVAL"       run_buckets        &
+  supervise_loop "graphql"        "GRAPHQL_INTERVAL"       run_graphql        &
+  supervise_loop "wcd"            "WCD_INTERVAL"           run_wcd            &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &

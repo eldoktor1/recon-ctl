@@ -2422,9 +2422,12 @@ usage() {
   printf "             classes: sqli xss ssrf lfi ssti cmdi debug rce redirect idor img-traversal\n"
   printf "  ${G}recon-params candidates${R} [--class xss|sqli|both]  Ranked dup-proof XSS/SQLi worklist (rs0n lane)\n"
   printf "  ${G}recon-params crawl-host${R} <host> [url] [--cookie/--header]  On-demand crawl ONE host NOW (queue-bypass; --cookie=AUTHED)\n"
+  printf "  ${G}recon-params arjun${R} <host> [url]   crawl-host + ACTIVE hidden-param discovery (arjun; polite, live traffic, on-demand)\n"
   printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N] [--cookie/--header]  Confirm — xss=dalfox(executes) sqli=SAFE %s vs %s; --cookie=AUTHED(own session)\n" "'" "''"
   printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n"
   printf "  ${G}recon-buckets${R} [scan|check <b> [prov]|writecheck <b> [region]|results]  Cloud-bucket exposure (S3Scanner; provenance-seeded, read-only)\n"
+  printf "  ${G}recon-graphql${R} [scan|check <url>|results]  GraphQL schema→worklist (read-only introspection; sensitive ops + IDOR/injectable args)\n"
+  printf "  ${G}recon-wcd${R} [scan|confirm <host>|results]   Web-cache deception/poisoning LEADs (detect-only, cache-busted — never poisons real cache)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
@@ -2525,6 +2528,8 @@ case "${1:-}" in
       crawl)    sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
       crawl-host) shift  # on-demand single-host crawl — queue bypass for the hunt
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl-host "$@" ;;
+      arjun)    shift  # crawl-host + ACTIVE hidden-param discovery (arjun; live traffic, on-demand)
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" arjun "$@" ;;
       collect)  # manual one-shot: refill the queue then crawl a single job
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" enqueue
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_params.sh" crawl ;;
@@ -2539,6 +2544,14 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_bucket_scanner.sh" "${@:-scan}" ;;
+  graphql|gql)  # GraphQL schema→worklist lane (read-only introspection). target-facing → reconrun.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  bash "$SCRIPT_DIR/recon_graphql.sh" "${@:-scan}" ;;
+  wcd)          # web-cache deception/poisoning surfacer (detect-only, cache-busted). reconrun.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  bash "$SCRIPT_DIR/recon_wcd.sh" "${@:-scan}" ;;
   account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;
   domxss)       shift; python3 "$SCRIPT_DIR/recon_domxss.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;

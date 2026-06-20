@@ -100,3 +100,14 @@ probe → flag `X-Cache: hit` on a dynamic body). Until then: card 🔬 DIG hand
   https://portswigger.net/web-security/web-cache-deception
 - Mirheidari et al., "Cached and Confused: Web Cache Deception in the Wild" (USENIX Security '20)
   https://www.usenix.org/system/files/sec20summer_mirheidari_prepub.pdf
+
+## Implemented in this pipeline (recon_wcd.sh + recon_wcd.py, 2026-06-20)
+SAFE detect-only surfacer. Input: in-scope+paying CDN-fronted hosts (ES cdn_name/cdn_type/webserver).
+Probes (GET-only, every request a UNIQUE cache-buster ?cb= so we NEVER poison the real shared cache):
+WCD = path-confusion variants (`/<n>.css`, `;<n>.css`, `%23<n>.css`) of a NON-cached base → LEAD if the
+variant becomes CACHED with ~same body (origin ignored the suffix); WCP = unkeyed header canary
+(X-Forwarded-Host/Scheme/Host/...) reflected into a CACHED response under our cb key. LEADs only →
+`briefings/wcd_candidates_<date>.md` + wcd/leads.jsonl + ES stamp + briefing; impact PoC (private data
+lands in cache / poison persists) is OPERATOR + owned account. Daemon 6h loop (killswitch v2_wcd);
+`recon-wcd [scan|confirm <host>|results]`. confirm = Hackmanit WCVS `-ot deception -rr 0.5` (throttled,
+cache-buster cbwcvs), operator-overseen.

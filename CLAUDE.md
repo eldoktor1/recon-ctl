@@ -59,6 +59,23 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   referenced by a live host → dangling-takeover lead. exists-but-403 → secure FP (note reps). Unattended
   loop is GET-ONLY; the invalid-MD5 `writecheck` (zero-write) + benign-marker PoC are operator-on-demand.
   4h cycle, ≤3 threads, 7d cooldown (anti-burn). KB: `docs/knowledge/class-bucket-exposure.md`. Added 2026-06-20.
+- **GraphQL schema→worklist** (`recon_graphql.sh`, native; `recon-graphql`) — the UNDER-HUNTED money
+  class made dup-proof: the crowd at most flags "introspection enabled" (Info/dup); we harvest the
+  introspection SCHEMA and REASON over the graph — sensitive unauth mutations, object-ref args (IDOR),
+  injectable args (SQLi/NoSQLi), PII-returning queries — into a ranked human-test worklist
+  (`briefings/graphql_candidates_<date>.md` + the briefing). Read-only (`{__typename}` + introspection
+  ONLY — never a mutation/auth/data-query); LEADs only — IDOR/injection/auth-bypass = human 2-account
+  test (never third-party IDs). KB: `class-graphql.md`. Added 2026-06-20.
+- **Web-cache deception/poisoning** (`recon_wcd.sh`, native; `recon-wcd`) — SAFE detect-only LEAD
+  surfacer for CDN-fronted in-scope hosts. Every probe carries a UNIQUE cache-buster so we test under
+  OUR OWN key and NEVER poison the shared cache real users hit (the critical safety primitive). WCD =
+  path-confusion variant of a non-cached base becomes cacheable; WCP = unkeyed header reflected into a
+  cached response. LEADs only → briefing; impact PoC (private data in cache / poison persists) is
+  OPERATOR + owned account (`recon-wcd confirm` → WCVS deception, throttled). KB: `class-cache-deception.md`. Added 2026-06-20.
+- **Active param discovery** (`recon-params arjun <host>`) — bolts arjun onto on-demand crawl-host:
+  finds HIDDEN params (in no URL/JS — the inputs that drive SSRF/cache-poison/reflected bugs the
+  crowd's archive-only tooling misses), rides the existing gf→catalog→confirm pipeline. ON-DEMAND ONLY
+  (sends live traffic; never the autonomous daemon crawl), polite (-t1 -d2 --rate-limit 3, GET-only). Added 2026-06-20.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
@@ -295,6 +312,14 @@ probes) on any digest lead so the operator can deep-check before spending an eve
   name match without target provenance may be a THIRD PARTY's data (hard line — never test it). Only
   public-WRITE/ACL-write, or public-read of provenance-confirmed SENSITIVE content, is reportable.
   (`recon-buckets`; KB `class-bucket-exposure.md`.)
+- **GraphQL introspection-enabled ALONE ≠ a finding.** It's on-by-default on Apollo/Hasura/Graphene
+  → the #1 GraphQL dup/Info-FP. It's a schema-disclosure multiplier, not a bug. What's payable: unauth
+  access to a sensitive mutation/query, IDOR via object-ref args, injection in args, auth bypass — all
+  HUMAN-confirmed with 2 owned accounts. (`recon-graphql`; KB `class-graphql.md`.)
+- **Web-cache: a cached static asset / 404 / by-design CDN response ≠ WCD.** `CF-Cache-Status: DYNAMIC`
+  or `Cache-Control: no-store/private` on the suffixed path = correctly NOT cached = secure FP. A real
+  LEAD is the *cacheability flip* (dynamic/private base, cacheable path-confusion variant) — and impact
+  needs the authed owned-account PoC. Reflection without caching ≠ WCP. (`recon-wcd`; KB `class-cache-deception.md`.)
 - **Product-class endpoint = duplicate, not a finding.** The same endpoint appearing on
   many hosts (e.g. the UniFi-OS `/proxy/users/...` routes on 27+ of 4600 consoles) is a
   shipped-product standard API, near-certain dup. `tools/brief_filter.py` measures

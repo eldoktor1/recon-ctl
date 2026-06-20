@@ -1,5 +1,30 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.9 - 2026-06-20 - Three new lanes: GraphQL schema→worklist, active param discovery (arjun), web-cache deception
+
+Tool-gap research (VulnAPI evaluated + rejected — it doesn't beat existing coverage and its safe parts
+are authed/narrow) surfaced three GENUINE gaps; built all three, each source-grounded and doctrine-fit
+(unauth-safe, dup-resistant, Mullvad-gated). KB: class-graphql.md, class-cache-deception.md.
+
+- **GraphQL schema→worklist** (`recon_graphql.sh` + `recon_graphql.py`, native — no graphw00f/graphql-cop
+  dep; the value is reasoning over the schema graph). Discover in-scope GraphQL endpoints (jsintel + ES
+  url/title/tech + bounded path-expansion) → scope+pays gate → read-only `{__typename}` + introspection →
+  rank sensitive unauth mutations + IDOR object-ref args + injectable args + PII-returning queries (reusing
+  the recon_idor_candidates.py ID scoring) → `briefings/graphql_candidates_<date>.md` + worklist + briefing.
+  LEADs only (IDOR/injection/auth-bypass = human 2-account test). Validated: found a live introspection-ON
+  Atlassian gateway schema among in-scope candidates. Daemon 3h, killswitch v2_graphql, `recon-graphql`.
+- **Active param discovery** (arjun bolted onto `recon-params arjun <host>` / `crawl-host --arjun`). Finds
+  HIDDEN params absent from any URL/JS (the inputs that drive SSRF/cache-poison/reflected bugs) and rides
+  the existing gf→catalog→confirm pipeline. ON-DEMAND ONLY (live traffic; never the daemon crawl), polite
+  (`-t1 -d2 --rate-limit 3`, GET-only, no-redirect), in-scope+pays gated.
+- **Web-cache deception/poisoning** (`recon_wcd.sh` + `recon_wcd.py`, native detect-only). CDN-fronted
+  in-scope hosts; every probe carries a UNIQUE cache-buster so it NEVER poisons the real shared cache (the
+  critical safety primitive). WCD = path-confusion variant of a non-cached base becomes cacheable; WCP =
+  unkeyed header reflected into a cached response. LEADs → briefing; impact PoC = operator + owned account
+  (`recon-wcd confirm` → Hackmanit WCVS `-ot deception -rr 0.5`). Daemon 6h, killswitch v2_wcd, `recon-wcd`.
+- Wiring: daemon loops + killswitches, `recon-ctl` dispatch (graphql/gql, wcd, params arjun), `recon-*`
+  aliases, three new briefing sections (🔮 GraphQL, ☁️ WCD, ☁️ buckets already added), CLAUDE.md pillars + FP entries.
+
 ## v3.8 - 2026-06-20 - Cloud-bucket exposure lane (S3Scanner) — dup-proof, provenance-seeded, FP-resistant
 
 New lane `recon_bucket_scanner.sh` (+ `recon_bucket_scanner.py`) hunting misconfigured cloud storage

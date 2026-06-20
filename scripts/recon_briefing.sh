@@ -184,6 +184,29 @@ fi
 [[ -n "$bkts" ]] || bkts="[]"
 nbkt="$(printf '%s' "$bkts" | jq 'length' 2>/dev/null || echo 0)"
 
+# --- 4d) GraphQL worklist: introspection-on endpoints with sensitive unauth ops / IDOR-injectable args
+# (human test with 2 owned accounts — never third-party IDs). Recent, deduped, sensitive-first. ---
+GQL_WORKLIST="${GQL_WORKLIST:-$BASE_DIR/graphql/graphql_worklist.jsonl}"
+gql="[]"
+if [[ -s "$GQL_WORKLIST" ]]; then
+  gql="$(tail -n 300 "$GQL_WORKLIST" 2>/dev/null | jq -c '.' 2>/dev/null \
+    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)) and .introspection_enabled and ((.n_sensitive//0)>0)))
+             | unique_by(.endpoint) | sort_by(.n_sensitive//0) | reverse | .[0:8]' 2>/dev/null || echo '[]')"
+fi
+[[ -n "$gql" ]] || gql="[]"
+ngql="$(printf '%s' "$gql" | jq 'length' 2>/dev/null || echo 0)"
+
+# --- 4e) Web-cache deception/poisoning LEADs (detect-only; impact PoC = owned account, operator) ---
+WCD_LEADS="${WCD_LEADS:-$BASE_DIR/wcd/leads.jsonl}"
+wcd="[]"
+if [[ -s "$WCD_LEADS" ]]; then
+  wcd="$(tail -n 200 "$WCD_LEADS" 2>/dev/null | jq -c '.' 2>/dev/null \
+    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate)))) | unique_by(.host+.kind)
+             | sort_by(if .severity=="high" then 2 else 1 end) | reverse | .[0:8]' 2>/dev/null || echo '[]')"
+fi
+[[ -n "$wcd" ]] || wcd="[]"
+nwcd="$(printf '%s' "$wcd" | jq 'length' 2>/dev/null || echo 0)"
+
 # split promoted leads: genuine BAC/IDOR (endpoint = path) vs n-day-cve (CVE, no path) —
 # they render differently; otherwise host+endpoint concatenates into garbage like
 # "technik.bild.deCVE: CVE-2024-34102".
@@ -199,7 +222,7 @@ show_nday="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") == "n
 nidor="$(printf '%s' "$show_idor" | jq 'length' 2>/dev/null || echo 0)"
 nnday="$(printf '%s' "$show_nday" | jq 'length' 2>/dev/null || echo 0)"
 
-if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 && "${nbkt:-0}" -eq 0 ]]; then
+if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 && "${nbkt:-0}" -eq 0 && "${ngql:-0}" -eq 0 && "${nwcd:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
                             || log "nothing actionable to brief today"
   touch "$sent"; exit 0
@@ -260,6 +283,18 @@ md="$BRIEF_DIR/tonight_$today.md"
   if [[ "${nbkt:-0}" -gt 0 ]]; then
     printf '\n\n## ☁️ Cloud-bucket exposure (verify content sensitivity / not by-design) — %s\n' "$nbkt"
     printf '%s' "$bkts" | jq -r '.[] | "- **[\(.severity)] \(.kind)** `\(.bucket)` (\(.provider)\(if (.region//"")!="" then "/"+.region else "" end)) ← \(.host // .source_host) [\(.program // "?")]\n  - \(.access)\n  - inspect: `recon-buckets check \(.bucket) \(.provider)`\(if .provider=="aws" then "  · write-test: `recon-buckets writecheck \(.bucket) \(.region // "us-east-1")`" else "" end)"' 2>/dev/null
+  fi
+
+  # --- 🔮 GraphQL worklist (introspection-on; sensitive ops + IDOR/injectable args — human 2-acct test) ---
+  if [[ "${ngql:-0}" -gt 0 ]]; then
+    printf '\n\n## 🔮 GraphQL (introspection ON — human 2-account / injection test) — %s\n' "$ngql"
+    printf '%s' "$gql" | jq -r '.[] | "- **`\(.host)`** `\(.endpoint)` — \(.n_sensitive) sensitive op(s) [\(.program // "?")]\n" + ([.candidates[]? | select(.sensitive or (.idor_args|length>0) or (.injectable_args|length>0)) | "  - [\(.score)] \(.op_type) **\(.name)** — \(.reason)"] | .[0:5] | join("\n"))' 2>/dev/null
+  fi
+
+  # --- ☁️ Web-cache deception/poisoning LEADs (detect-only; impact = owned account) ---
+  if [[ "${nwcd:-0}" -gt 0 ]]; then
+    printf '\n\n## ☁️ Web-cache deception/poisoning (verify w/ owned account) — %s\n' "$nwcd"
+    printf '%s' "$wcd" | jq -r '.[] | "- **[\(.severity)] \(.kind)** `\(.host)` — \(.evidence)\n  - confirm: `recon-wcd confirm \(.host)`"' 2>/dev/null
   fi
 
   # --- 💉 XSS / SQLi (unauth) — ranked candidates to CONFIRM (rs0n dup-proof lane).
@@ -324,6 +359,8 @@ if [[ -n "$rh" ]]; then
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
   [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
   [[ "${nbkt:-0}" -gt 0 ]] && { card+="$(printf '\n\n☁️ **Cloud-bucket leads (verify content / not by-design) (%s):**\n' "$nbkt")"; card+="$(printf '%s' "$bkts" | jq -r '.[] | "• [\(.severity)] \(.kind) `\(.bucket)` (\(.provider)) ← \(.host // .source_host)"' 2>/dev/null | head -c 500)"; }
+  [[ "${ngql:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔮 **GraphQL (introspection ON — 2-acct/injection test) (%s):**\n' "$ngql")"; card+="$(printf '%s' "$gql" | jq -r '.[] | "• `\(.host)` — \(.n_sensitive) sensitive op(s)"' 2>/dev/null | head -c 500)"; }
+  [[ "${nwcd:-0}" -gt 0 ]] && { card+="$(printf '\n\n☁️ **Web-cache deception/poison LEADs (%s):**\n' "$nwcd")"; card+="$(printf '%s' "$wcd" | jq -r '.[] | "• [\(.severity)] \(.kind) `\(.host)`"' 2>/dev/null | head -c 400)"; }
   if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
     card+="$(printf '\n\n💉 **XSS/SQLi (unauth — confirm to promote):**')"
     [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
