@@ -24,6 +24,13 @@ third-party ids.
 - tenant-isolation enforced (visibilityTree / RLS / company-scoped query) → read+write both 403 = not vuln.
 - UUIDv4 with no leak vector = "needs a known id" → known-issue / informative / DUP risk (e.g. Topper orderById).
 - transaction/object metadata disclosure "without proven impact" = often a documented Known Issue → DUP.
+- **switcher endpoints (switch-account / switch-contract / set-contact) that only operate over ids already
+  in YOUR OWN switcher list = server-side validated = NOT IDOR.** Verify the actual LOADED object data, not
+  a success message: a generic "you switched user" banner can fire even when the cross-account switch was
+  silently rejected (proven on ENGIE greybox — `set-contact` showed "Vous avez bien changé d'utilisateur"
+  but bounced back to the caller's OWN picker; the banner is misleading). Cross-account → reject/interstitial
+  /500 = authz enforced. Also: a big contract/object count on a test account is usually **seed-loaded own
+  data**, not a leak — confirm ownership before claiming.
 
 ## ENGIE espace-client (French B2C energy portal) — object refs to swap
 Researched 2026-06-18 (jechange/selectra/engie.fr). Pre-prod `espace-client-pprod.pro.engie.fr` (DCP greybox).
@@ -38,6 +45,16 @@ Researched 2026-06-18 (jechange/selectra/engie.fr). Pre-prod `espace-client-ppro
 French energy IDs (PDL/PCE 14-digit, contract 9-10 digit) are short+numeric = the enumerable kind → a
 confirmed cross-account read on one is high-severity. SKIP (OOS/not paid): email+password-change, the
 "Votre avis?" survey; prod `particuliers.engie.fr` is OOS (pre-prod only).
+
+**RESULT (2026-06-20, 2 owned EC-pool accts):** the read-path **switchers are object-authz VALIDATED, NOT
+IDOR** — `switch-contract?idContract=` loads only your own switcher's contracts; `set-contact?idContract=`
+bounces cross-account to your own picker; `GET /switch-contract/info` returns 200 for own / 500 for another
+account's id. The 278 contracts on account A = A's own seed-loaded multi-site account, not a leak.
+`recuperer-entite` is NOT on the greybox host (Drupal 404) — it's DGP-prod only (see host_notes for
+`particuliers.engie.fr`). Read-path IDOR lane closed; the live lead is the **contact-ADD write path**
+(does the POST carry a manipulable `id_entreprise`/account field → add self to a victim account = BAC) +
+name-field stored-XSS — reachable only from the MAIN/entreprise account. Access architecture + full details
+in `host_notes.jsonl` (`espace-client-pprod.pro.engie.fr`).
 
 ## Sources
 - https://particuliers.engie.fr/electricite/conseils-electricite/conseils-contrat-electricite/numero-PCE-PDL.html
