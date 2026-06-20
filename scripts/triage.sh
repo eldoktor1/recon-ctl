@@ -56,6 +56,16 @@ ES_AUTH=(--netrc-file "$HOME/.recon_es_netrc")
 P0_THRESHOLD="${P0_THRESHOLD:-15}"
 P1_THRESHOLD="${P1_THRESHOLD:-8}"
 P2_THRESHOLD="${P2_THRESHOLD:-4}"
+
+# Memory guard for the big slurp pass. apply_cluster_and_submission() runs one
+# `jq -sc` that slurps the ENTIRE candidate set into RAM for group_by/sort_by; on an
+# oversized slice this once ballooned jq to ~13GB and OOM-killed the WSL VM (which
+# collaterally killed the operator interactive shell -> terminal "kept restarting").
+# Run that jq under a per-process virtual-memory cap so a runaway is killed by itself;
+# the caller `|| true` fallback then skips that one cycle instead of crashing the VM.
+# Root cause to watch: an unbounded fetch window feeding the whole index into the slurp.
+TRIAGE_JQ_VMAX_KB="${TRIAGE_JQ_VMAX_KB:-8388608}"   # 8 GiB virtual cap
+capped_jq() { ( ulimit -v "$TRIAGE_JQ_VMAX_KB" 2>/dev/null; exec jq "$@" ); }
 MIN_SCORE="${MIN_SCORE:-3}"
 
 CLUSTER_MAX="${CLUSTER_MAX:-3}"
@@ -1064,7 +1074,7 @@ apply_cluster_and_submission() {
   # -c (compact) is critical: without it, output is multi-line pretty-printed
   # JSON. Downstream `wc -l` then inflates counts ~19x and `head -N | jq` cuts
   # mid-record. The agent_targets.jsonl must be true JSONL.
-  jq -sc --slurpfile subs    <(jq -R '.' "$subs_filter") \
+  capped_jq -sc --slurpfile subs    <(jq -R '.' "$subs_filter") \
           --slurpfile subs_rd <(jq -R '.' "$subs_rd_filter") \
         --argjson max "$CLUSTER_MAX" --argjson penalty "$CLUSTER_PENALTY" '
     ($subs[0]    // []) as $submitted |
