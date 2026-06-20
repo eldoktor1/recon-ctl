@@ -2424,6 +2424,7 @@ usage() {
   printf "  ${G}recon-params crawl-host${R} <host> [url] [--cookie/--header]  On-demand crawl ONE host NOW (queue-bypass; --cookie=AUTHED)\n"
   printf "  ${G}recon-params confirm${R} <xss|sqli> [host] [N] [--cookie/--header]  Confirm — xss=dalfox(executes) sqli=SAFE %s vs %s; --cookie=AUTHED(own session)\n" "'" "''"
   printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n"
+  printf "  ${G}recon-buckets${R} [scan|check <b> [prov]|writecheck <b> [region]|results]  Cloud-bucket exposure (S3Scanner; provenance-seeded, read-only)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
@@ -2533,6 +2534,11 @@ case "${1:-}" in
     esac
     ;;
   mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
+  buckets)      # cloud-bucket exposure (S3Scanner). target-facing → reconrun (Mullvad egress);
+                # default = one scan cycle. check/writecheck/results/seed pass through.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  bash "$SCRIPT_DIR/recon_bucket_scanner.sh" "${@:-scan}" ;;
   account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;
   domxss)       shift; python3 "$SCRIPT_DIR/recon_domxss.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;

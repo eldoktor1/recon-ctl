@@ -1,5 +1,37 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.8 - 2026-06-20 - Cloud-bucket exposure lane (S3Scanner) — dup-proof, provenance-seeded, FP-resistant
+
+New lane `recon_bucket_scanner.sh` (+ `recon_bucket_scanner.py`) hunting misconfigured cloud storage
+(S3 / GCS / DO Spaces) with the S3Scanner sa7mon v3 binary as backend. Built from source-grounded
+research (S3Scanner source + top-hunter writeups → `docs/knowledge/class-bucket-exposure.md`). The
+edge vs the saturated, dup-prone way everyone runs bucket tooling:
+
+- **Provenance-seeded, never blind permutation (the MOTTO).** We mine bucket references from the
+  target's OWN surface (jsintel `endpoints.jsonl` + the params catalog → Lane A), so every candidate
+  is provenance-confirmed (the in-scope host itself references it). No name-guessing = no dup-magnet
+  and no third-party-data risk (global namespace hard line). Validated on real data: surfaced Comcast/
+  SEEK/iFood/Monzo export+asset buckets with full provenance.
+- **Per-asset scope + pays gate** on the source host before any provider request (drops no-provenance
+  + OOS + non-paying).
+- **Read-only grading + authoritative list probe.** S3Scanner runs non-destructive (v3 has no
+  destructive flag — `PutObject`/`PutBucketAcl` never fire). Because its `HeadBucket` read check is
+  unreliable (it MISSED a real public-read Comcast bucket, reporting `read=unknown`), we add an
+  authoritative anonymous list probe (region-aware, path-style → also handles dotted bucket names)
+  that resolves READ definitively. `unknown ≠ denied` — undetermined buckets are dropped, not mis-noted
+  as secure.
+- **CONFIRMED-vs-LEAD routing.** public-WRITE / ACL-write → CONFIRMED → `db_confirm` → Claude VERIFY →
+  #review/SUBMIT (operator: report ALL public-writes — non-damaging). public-READ / read-acl → LEAD →
+  nightly briefing (verify content sensitivity / not by-design CDN). NoSuchBucket referenced by a live
+  host → dangling-takeover lead. exists-but-403 → secure FP (note 2-3 reps per doctrine).
+- **Safe-by-construction.** Unattended loop is GET-only (list + get-acl). The Detectify invalid-MD5
+  `writecheck` (confirms writability with ZERO objects written) and the benign-marker upload PoC are
+  operator-on-demand. Anti-burn: ≤3 threads, bounded batch, 7d re-scan cooldown, 4h cycle; egress is
+  the provider frontend (not the target) and stays Mullvad-gated via `run_scanner`.
+- **Wiring.** Daemon loop (killswitch `state/kill/v2_buckets`, `BUCKETS_INTERVAL`), `recon-buckets`
+  command (`scan|check <b> [prov]|writecheck <b> [region]|results`), briefing `☁️ Cloud-bucket`
+  section, KB doc, CLAUDE.md pillar + FP entry.
+
 ## v3.7.1 - 2026-06-14 - Params engine overhaul: unfrozen, jobs-and-queues, sliding window, archive-proxy, liveness
 
 The sus_params catalog had silently frozen at ~9k and was dragging the confirmers down with it.

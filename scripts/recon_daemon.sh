@@ -601,6 +601,12 @@ run_nday() { [[ -f "$NDAY_SCRIPT" ]] && bash "$NDAY_SCRIPT" >>"$LOG_FILE" 2>&1 |
 GHLEAKS_SCRIPT="${GHLEAKS_SCRIPT:-$(script_path recon_ghleaks.sh)}"
 GHLEAKS_INTERVAL="${GHLEAKS_INTERVAL:-10800}"
 run_ghleaks() { [[ -f "$GHLEAKS_SCRIPT" ]] && bash "$GHLEAKS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_bucket_scanner — cloud-bucket exposure (S3Scanner backend). Seeds bucket names ONLY from the
+# target's OWN mined surface (jsintel/params → provenance-confirmed), read-only ACL/list grading,
+# public-write → db_confirm/VERIFY. Target-facing (provider frontend) → run_scanner. Killswitch: v2_buckets.
+BUCKETS_SCRIPT="${BUCKETS_SCRIPT:-$(script_path recon_bucket_scanner.sh)}"
+BUCKETS_INTERVAL="${BUCKETS_INTERVAL:-14400}"   # 4h (anti-burn; bounded batch + 7d re-scan cooldown)
+run_buckets() { v21_killed buckets && return 0; [[ -f "$BUCKETS_SCRIPT" ]] && run_scanner bash "$BUCKETS_SCRIPT" scan || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
 # CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
 # target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
@@ -784,6 +790,7 @@ run_discord_bot() {
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
   supervise_loop "nday"           "NDAY_INTERVAL"          run_nday           &
   supervise_loop "ghleaks"        "GHLEAKS_INTERVAL"       run_ghleaks        &
+  supervise_loop "buckets"        "BUCKETS_INTERVAL"       run_buckets        &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &

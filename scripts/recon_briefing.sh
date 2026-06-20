@@ -169,6 +169,21 @@ fi
 vleads="$(render_gate "$vleads")"   # class rules downgrade unverified KEV (-> _noise_action=downgrade)
 nvln="$(printf '%s' "$vleads" | jq 'length' 2>/dev/null || echo 0)"
 
+# --- 4b) cloud-bucket exposure LEADS (public-read / read-acl / dangling-takeover). Confirmed
+# public-WRITE buckets already flow via db_confirm → findings.db → the SUBMIT section above; this
+# surfaces the read/acl LEADS that need a content-sensitivity + by-design check. Recent + deduped. ---
+BKT_LEADS="${BKT_LEADS:-$BASE_DIR/buckets/leads.jsonl}"
+bkts="[]"
+if [[ -s "$BKT_LEADS" ]]; then
+  bkts="$(tail -n 300 "$BKT_LEADS" 2>/dev/null | jq -c '.' 2>/dev/null \
+    | jq -s 'map(select(.ts and (.ts >= (now - 3*86400 | todate))))
+             | unique_by(.bucket)
+             | sort_by({"critical":4,"high":3,"medium":2,"low":1,"info":0}[.severity] // 0) | reverse
+             | .[0:12]' 2>/dev/null || echo '[]')"
+fi
+[[ -n "$bkts" ]] || bkts="[]"
+nbkt="$(printf '%s' "$bkts" | jq 'length' 2>/dev/null || echo 0)"
+
 # split promoted leads: genuine BAC/IDOR (endpoint = path) vs n-day-cve (CVE, no path) —
 # they render differently; otherwise host+endpoint concatenates into garbage like
 # "technik.bild.deCVE: CVE-2024-34102".
@@ -184,7 +199,7 @@ show_nday="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") == "n
 nidor="$(printf '%s' "$show_idor" | jq 'length' 2>/dev/null || echo 0)"
 nnday="$(printf '%s' "$show_nday" | jq 'length' 2>/dev/null || echo 0)"
 
-if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 ]]; then
+if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 && "${nbkt:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
                             || log "nothing actionable to brief today"
   touch "$sent"; exit 0
@@ -239,6 +254,12 @@ md="$BRIEF_DIR/tonight_$today.md"
     printf '%s' "$vleads" | jq -r '.[] |
       (if ._noise_action=="downgrade" then "LEAD · version-unconfirmed — " else "" end) as $tag |
       "- \($tag)**\(.cls)** `\(.host)` [\(.prog // "?")]\n  - \(.what)\n  - check: \(.check)"' 2>/dev/null
+  fi
+
+  # --- ☁️ Cloud-bucket leads (public-read / acl / dangling — verify content + not by-design) ---
+  if [[ "${nbkt:-0}" -gt 0 ]]; then
+    printf '\n\n## ☁️ Cloud-bucket exposure (verify content sensitivity / not by-design) — %s\n' "$nbkt"
+    printf '%s' "$bkts" | jq -r '.[] | "- **[\(.severity)] \(.kind)** `\(.bucket)` (\(.provider)\(if (.region//"")!="" then "/"+.region else "" end)) ← \(.host // .source_host) [\(.program // "?")]\n  - \(.access)\n  - inspect: `recon-buckets check \(.bucket) \(.provider)`\(if .provider=="aws" then "  · write-test: `recon-buckets writecheck \(.bucket) \(.region // "us-east-1")`" else "" end)"' 2>/dev/null
   fi
 
   # --- 💉 XSS / SQLi (unauth) — ranked candidates to CONFIRM (rs0n dup-proof lane).
@@ -302,6 +323,7 @@ if [[ -n "$rh" ]]; then
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
   [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
   [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
+  [[ "${nbkt:-0}" -gt 0 ]] && { card+="$(printf '\n\n☁️ **Cloud-bucket leads (verify content / not by-design) (%s):**\n' "$nbkt")"; card+="$(printf '%s' "$bkts" | jq -r '.[] | "• [\(.severity)] \(.kind) `\(.bucket)` (\(.provider)) ← \(.host // .source_host)"' 2>/dev/null | head -c 500)"; }
   if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
     card+="$(printf '\n\n💉 **XSS/SQLi (unauth — confirm to promote):**')"
     [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"

@@ -48,6 +48,17 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   tech-class FP and surface only genuine in-range candidates, in the race window.
 - **GitHub leaks** (`recon_ghleaks.sh`) — code-search → trufflehog-verify live leaked
   secrets (off-web surface most ignore).
+- **Cloud-bucket exposure** (`recon_bucket_scanner.sh`, S3Scanner backend; `recon-buckets`) —
+  bucket hunting made DUP-PROOF + SAFE: we DON'T blind-permute names (the saturated dup-magnet +
+  third-party-data risk everyone runs). We mine bucket refs from the target's OWN surface
+  (jsintel/params → every candidate is PROVENANCE-confirmed) → per-asset scope+pays gate → S3Scanner
+  READ-ONLY ACL/list grading + an authoritative anonymous list probe (catches public-read that
+  S3Scanner's HeadBucket misses; region-aware path-style handles dotted names). **public-WRITE / ACL-write
+  → CONFIRMED → `db_confirm` → Claude VERIFY → #review (operator: report ALL public-writes — non-damaging).**
+  public-READ/read-acl → LEAD → briefing (verify content sensitivity + not by-design CDN). NoSuchBucket
+  referenced by a live host → dangling-takeover lead. exists-but-403 → secure FP (note reps). Unattended
+  loop is GET-ONLY; the invalid-MD5 `writecheck` (zero-write) + benign-marker PoC are operator-on-demand.
+  4h cycle, ≤3 threads, 7d cooldown (anti-burn). KB: `docs/knowledge/class-bucket-exposure.md`. Added 2026-06-20.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
@@ -152,7 +163,7 @@ pending action / the operator steps away (so a comeback never loses the thread).
    only then move on.
 5. **NOTE EVERYTHING inline** FP/skip/disqualified/noise (clusters ⇒ 2-3 reps + class-reason). Mandatory.
 6. **LANE-MINE** fertile lane (actuator/swagger spec; source-maps→cloud-creds; unauth-GraphQL introspection;
-   open buckets; n-day; **XSS/SQLi reflected-param**; …) ⇒ keep mining fresh hosts; tapped ⇒ pivot/re-query.
+   open buckets (`recon-buckets`); n-day; **XSS/SQLi reflected-param**; …) ⇒ keep mining fresh hosts; tapped ⇒ pivot/re-query.
    Lanes are examples, not limits — chase whatever the signal suggests.
    **XSS/SQLi — SMART, not blind:** work the ranked `xss/sqli_candidates` worklist, **TOP UNIQUE LANES first**
    (rare per-app params/deep routes), SKIP PRODUCT-CLASS (`?q=`/`_next/image?url=` dup-magnets), prefer ⚡
@@ -277,6 +288,13 @@ probes) on any digest lead so the operator can deep-check before spending an eve
   `reflected-not-exploitable` (LEAD).
 - **Dangling CNAME to a LIVE ELB/CloudFront is not a takeover** — live apps 404 at
   root all the time. Verify unclaimed / NXDOMAIN first.
+- **Open bucket: public-READ ≠ a finding; 403 ≠ denied; name-match ≠ owned.** A public-read
+  static/CDN/asset bucket is by-design (the #1 bucket FP) → LEAD pending content-sensitivity, not
+  CONFIRMED. A 403 `AccessDenied` is the normal SECURE state (and whether a missing object 403s vs
+  404s depends on `s3:ListBucket` — so 403 alone proves nothing). The S3 namespace is global, so a
+  name match without target provenance may be a THIRD PARTY's data (hard line — never test it). Only
+  public-WRITE/ACL-write, or public-read of provenance-confirmed SENSITIVE content, is reportable.
+  (`recon-buckets`; KB `class-bucket-exposure.md`.)
 - **Product-class endpoint = duplicate, not a finding.** The same endpoint appearing on
   many hosts (e.g. the UniFi-OS `/proxy/users/...` routes on 27+ of 4600 consoles) is a
   shipped-product standard API, near-certain dup. `tools/brief_filter.py` measures
