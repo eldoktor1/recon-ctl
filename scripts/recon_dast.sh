@@ -211,9 +211,20 @@ while IFS=$'\t' read -r host url fresh; do
   : > "$host_findings"
 
   # --- dalfox on XSS candidates ---
+  # Mining stays ON (default) — dalfox discovers params the gf/catalog set missed.
+  # --waf-evasion: auto-drops to 1-worker/3s the moment a WAF is detected → protects the
+  #   shared Mullvad exit from bans (the exact risk noted above) at near-zero cost otherwise.
+  # --detailed-analysis: context-aware reflection analysis → fewer FPs, more real PoCs.
+  # Opt-in env (off by default — they add request volume / need infra):
+  #   DALFOX_BLIND=<oob-callback>          → wires blind/stored-XSS (-b); set to the persistent
+  #                                           interactsh blind-xss collector once it exists.
+  #   DALFOX_REMOTE_PAYLOADS='portswigger,payloadbox' → broader payload set (heavier; anti-burn).
   if [[ -n "${classfile[xss]:-}" ]]; then
+    dfx_xss=(--waf-evasion --detailed-analysis)
+    [[ -n "${DALFOX_BLIND:-}" ]]           && dfx_xss+=(-b "$DALFOX_BLIND")
+    [[ -n "${DALFOX_REMOTE_PAYLOADS:-}" ]] && dfx_xss+=(--remote-payloads "$DALFOX_REMOTE_PAYLOADS")
     timeout "$DALFOX_TIMEOUT" "$DALFOX" pipe --silence --no-color --skip-bav --format json \
-      -w "$DALFOX_WORKERS" --delay "$DALFOX_DELAY" \
+      -w "$DALFOX_WORKERS" --delay "$DALFOX_DELAY" "${dfx_xss[@]}" \
       < "${classfile[xss]}" 2>/dev/null \
       | jq -c --arg host "$host" 'select(type=="object") | {host:$host, tool:"dalfox", type:(.type // "XSS"), url:(.data // .url // ""), severity:(.severity // "medium"), evidence:(.message // .poc // "")}' 2>/dev/null \
       >> "$host_findings" || true
