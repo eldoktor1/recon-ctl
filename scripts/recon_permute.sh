@@ -49,9 +49,12 @@ for t in "$ALTERX" "$PUREDNS"; do [[ -x "$t" ]] || { warn "missing tool: $t"; ex
 command -v massdns >/dev/null 2>&1 || { warn "massdns missing (puredns needs it)"; exit 0; }
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 
-# Don't pile onto a backed-up validator queue.
-nq="$(find "$INBOX" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')"
-[[ "${nq:-0}" -ge "$PERMUTE_INBOX_CAP" ]] && { log "validator queue full ($nq) — skip this cycle"; exit 0; }
+# Don't pile onto a backed-up validator queue. Count only HIGH-PRIORITY files: exclude the
+# low-priority background-VOLUME producers (restale_* refresh churn, bulk_* mass-discovery) —
+# they sort AFTER our numeric-prefix batches in the validate queue, so they must not gate
+# fresh-surface discovery (a stale bulk_ dump once held a 33k backlog that starved this lane).
+nq="$(find "$INBOX" -maxdepth 1 -name '*.txt' ! -name 'restale_*' ! -name 'bulk_*' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "${nq:-0}" -ge "$PERMUTE_INBOX_CAP" ]] && { log "validator queue full ($nq high-prio) — skip this cycle"; exit 0; }
 
 # Trusted public resolvers (curated, reliable, no poisoning) — written once if absent.
 if [[ ! -s "$RESOLVERS" ]]; then

@@ -36,10 +36,17 @@ INDEX_NAME="${INDEX_NAME:-recon_alive}"
 RESTALE_BATCH="${RESTALE_BATCH:-200}"        # hosts injected per run
 RESTALE_DAYS="${RESTALE_DAYS:-14}"           # re-validate threshold (days)
 RESTALE_MIN_SCORE="${RESTALE_MIN_SCORE:-8}"  # P1+ only (score >= 8)
+RESTALE_INBOX_CAP="${RESTALE_INBOX_CAP:-1000}"  # backpressure: skip re-stale while validate queue is already deep
 
 LOCK_FILE="$BASE_DIR/state/restale.lock"
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "restale already running"; exit 0; }
+
+# Backpressure: never pile onto an already-deep validator queue. Without this guard restale
+# accumulated a 33k-file backlog that starved the new discovery lanes; validate drains the
+# queue before we add more refresh churn (restale hosts re-stale naturally and get re-picked).
+_iq="$(find "$INBOX_DIR" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "${_iq:-0}" -ge "$RESTALE_INBOX_CAP" ]] && { log "inbox already deep (${_iq} >= ${RESTALE_INBOX_CAP}) — skip re-stale (backpressure)"; exit 0; }
 
 cutoff="$(date -u -d "-${RESTALE_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
   python3 -c "

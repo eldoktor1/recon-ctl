@@ -100,8 +100,11 @@ cmd_cycle() {   # autonomous budgeted cycle
   exec 9>"$STATE_DIR/uncover.lock"; flock -n 9 || { warn "already running"; exit 0; }
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — skipping"; exit 0; }
   [[ "$(budget_left)" -gt 0 ]] || { log "Shodan monthly budget spent ($(budget_used)/$UNCOVER_MONTHLY_BUDGET) — idle until $MONTH rolls over"; exit 0; }
-  local nq; nq="$(find "$INBOX" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')"
-  [[ "${nq:-0}" -ge "$UNCOVER_INBOX_CAP" ]] && { log "validator queue full ($nq) — skip"; exit 0; }
+  # Count only HIGH-PRIORITY files: exclude the low-priority background-VOLUME producers
+  # (restale_* refresh churn, bulk_* mass-discovery) — they sort after our numeric batches in
+  # the validate queue, so they must not gate fresh-surface discovery (bulk_ once held a 33k pile).
+  local nq; nq="$(find "$INBOX" -maxdepth 1 -name '*.txt' ! -name 'restale_*' ! -name 'bulk_*' 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "${nq:-0}" -ge "$UNCOVER_INBOX_CAP" ]] && { log "validator queue full ($nq high-prio) — skip"; exit 0; }
 
   # in-scope+paying ROOT domains, sliding window (skip ones already dorked this window)
   local q; q="$(jq -nc '{size:1500,_source:["root_domain"],
