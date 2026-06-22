@@ -11,6 +11,14 @@ third-party ids.
 4. **200 + the *other* account's data** = horizontal IDOR. 200 + admin-only action as low-priv = vertical BAC.
 5. PoC = ONE redacted record proving cross-account read; never bulk-dump.
 
+## Burp = Burp PRO (the standard, 2026-06-21)
+All Burp-assisted testing uses **Burp Suite Professional on Windows** (proxy `127.0.0.1:8080`, egress
+Mullvad-verified; the Kali Community Burp-in-WSL is deprecated — fallback only for VPN-only-in-WSL scope).
+Driven Windows-side: operator's browser → Burp proxy; Claude → proxy (`-x http://127.0.0.1:8080 -k`) + the
+Pro **REST API** (`http://127.0.0.1:1337/<key>/v0.1/`, key local in `~/.recon_burp_key`, exposes `/scan` +
+`/configuration`). Pro unlocks Scanner + Intruder + Collaborator + Autorize. Active Scanner = ON-DEMAND only,
+in-scope+PAYING, Burp-scope-restricted, anti-burn, never autonomous. Full setup: memory [[feedback_burp_locked_flow]].
+
 ## Autorize (Burp extension) — the access-control AUTO-tester (owned accounts only)
 Autorize (Barak Tawily; BApp Store) turns the manual A/B swap into an automatic per-request verdict — the
 fastest way to test access control across the WHOLE authed surface. It belongs in the locked Burp flow
