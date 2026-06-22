@@ -11,8 +11,11 @@ of top earners / XBOW / AI hunters says the edge is: **go where the crowd doesn'
 Claude's *understanding* where commodity tools are blind, validate with a real PoC, be
 first to fresh surface.** Every new lane must answer "how is this not what everyone runs?"
 The UNIQUE pillars (all additive — nothing that works was removed):
-- **JS-intel** (`recon_jsintel.sh`) — mine each host's JS for the HIDDEN API surface +
-  trufflehog `--only-verified` LIVE secrets (kills the 53%-FP token-shaped noise).
+- **JS-intel** (`recon_jsintel.sh`) — mine each host's JS for the HIDDEN API surface via **jsluice**
+  (AST `urls` — pulls GraphQL/extranet/payouts routes regex misses) + **sourcemapper** auto-reconstruct
+  of leaked `.map`s (the ORIGINAL un-minified source = deeper endpoint/secret surface the crowd never
+  un-maps) + trufflehog `--only-verified` LIVE secrets (CONFIRMED → #review) AND jsluice-`secrets` AST
+  candidate LEADs (review-only `secret_leads.jsonl`; kills the 53%-FP token-shaped noise). KB: `tech-js-recon.md`.
 - **IDOR/BAC money pillar** (owned by the **2IC routine agent**, not a daemon loop) — Claude
   reasons over the jsintel endpoint surface (`~/recon/js_recon/endpoints.jsonl` + ES) →
   ranked broken-access-control/IDOR worklist with the 2-account test (the most-rewarded

@@ -5,9 +5,13 @@
 # The crowd greps JS for token-shaped strings -> ~53% false-positive noise (our own
 # doctrine). We do it the way that actually pays:
 #   1. GATHER every JS asset of a live in-scope host (subjs + katana -jc + gau).
-#   2. EXTRACT endpoints with jsluice (the hidden API surface in the bundle).
-#   3. VERIFY secrets are LIVE with trufflehog --only-verified — a verified live key is a
-#      clean, high-impact, NON-DUPLICATE finding, not a guess.
+#   1b. RECONSTRUCT leaked source maps (sourcemapper) — the ORIGINAL un-minified source, a far
+#       richer endpoint+secret surface the crowd never un-maps. Optional/best-effort, EXTERNAL .map only.
+#   2. EXTRACT endpoints with jsluice urls (AST — the hidden API surface) over the bundles AND any
+#      reconstructed source (proven: jsluice cleanly pulls GraphQL/extranet/payouts routes regex missed).
+#   3. SECRETS two ways: trufflehog --only-verified = LIVE-verified CONFIRMED finding (→ SQLite → #review);
+#      jsluice secrets (AST) = candidate LEADs for key shapes trufflehog has no detector for — review-only,
+#      capped, NEVER auto-confirmed (keeps the 53%-FP secret-noise trap shut).
 #   4. The extracted endpoints become the feedstock for the IDOR/logic worklist (Claude
 #      reads them in the next stage).
 # SAFE: read-only fetch of public JS + trufflehog live-verify (it authenticates the leaked
@@ -50,6 +54,8 @@ mkdir -p "$STATE_DIR" "$(dirname "$EP_STORE")"; touch "$SEEN"
 exec 9>"$STATE_DIR/jsintel.lock"; flock -n 9 || { warn "already running"; exit 0; }
 [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — refusing (fail-closed)"; exit 0; }
 for t in jsluice trufflehog subjs jq curl; do command -v "$t" >/dev/null 2>&1 || { warn "$t missing"; exit 0; }; done
+SOURCEMAPPER="$(command -v sourcemapper 2>/dev/null || true)"          # OPTIONAL: reconstruct leaked .map → deeper mine
+SECRET_LEADS="${JS_SECRET_LEADS:-$BASE_DIR/js_recon/secret_leads.jsonl}"  # jsluice AST secret CANDIDATES (review-only LEADs)
 
 # Host selection: VALUE-WEIGHTED freshness. IDOR/BOLA on high-value programs is the
 # #1 paid class (the money pillar this feeds), and fresh-first alone never reached the
@@ -90,16 +96,35 @@ for host in "${hosts[@]}"; do
   log "   🧬 $host — $njs JS asset(s) → jsluice + trufflehog"
   prog="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '.triage_program // ""' 2>/dev/null)"
 
+  # 1b) RECONSTRUCT source maps — a leaked .map is the ORIGINAL un-minified source (far richer
+  #     endpoint + secret surface the crowd never un-maps). Only when the bundle advertises an
+  #     EXTERNAL sourceMappingURL (skip inline data: maps). sourcemapper OPTIONAL (absent ⇒ mine
+  #     bundles only). Same-host (scope already gated above), bounded by JS_PER_HOST.
+  if [[ -n "$SOURCEMAPPER" ]]; then
+    smaps=0
+    for jf in "$wd"/js/*.js; do
+      [[ -e "$jf" ]] || continue
+      grep -aoiE 'sourcemappingurl=[^[:space:]*]+' "$jf" 2>/dev/null | grep -qiv 'data:' || continue
+      idx="$(basename "$jf" .js)"; ju="$(sed -n "$((idx+1))p" "$wd/jsurls.txt" 2>/dev/null)"
+      [[ -n "$ju" ]] || continue
+      timeout 30 "$SOURCEMAPPER" -jsurl "$ju" -output "$wd/srcmap/$idx" >/dev/null 2>&1 && smaps=$((smaps+1))
+    done
+    [[ "$smaps" -gt 0 ]] && log "      ↳ 🗺️  $smaps source map(s) reconstructed → deeper mine"
+  fi
+  # Source set for the AST miners = bundles + any reconstructed original source (capped —
+  # reconstructed trees can be large).
+  mapfile -t SRCFILES < <( { compgen -G "$wd/js/*.js"; find "$wd/srcmap" -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.vue' -o -name '*.mjs' \) 2>/dev/null; } | head -800 )
+
   # 2) EXTRACT endpoints (jsluice) — FILTER to the real API surface (drop static assets,
   #    vendor dirs, CDNs) so the IDOR/logic feedstock is clean for the Claude stage.
   hep=0
-  if compgen -G "$wd/js/*.js" >/dev/null; then
+  if [[ "${#SRCFILES[@]}" -gt 0 ]]; then
     while IFS= read -r u; do
       [[ -z "$u" ]] && continue
       jq -nc --arg h "$host" --arg p "$prog" --arg u "$u" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
          '{host:$h,program:$p,endpoint:$u,source:"jsluice",at:$t}' >> "$EP_STORE" 2>/dev/null
       hep=$((hep+1))
-    done < <(timeout 60 jsluice urls "$wd"/js/*.js 2>/dev/null \
+    done < <(timeout 90 jsluice urls "${SRCFILES[@]}" 2>/dev/null \
               | jq -r '.url // empty' 2>/dev/null \
               | grep -aiE '^https?://|^/[A-Za-z0-9_]' \
               | grep -aivE '\.(css|js|mjs|cjs|map|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|otf|scss|sass|less|md|txt|html?|xml|yml|yaml|pdf)(\?|$)' \
@@ -109,8 +134,26 @@ for host in "${hosts[@]}"; do
   eps=$((eps+hep))
   [[ "$hep" -gt 0 ]] && log "      ↳ 🔗 $hep endpoint(s) extracted → IDOR feedstock"
 
-  # 3) VERIFY LIVE secrets (trufflehog --only-verified) — the clean, non-dupe finding
-  th="$(timeout 120 trufflehog filesystem "$wd/js" --only-verified --json --no-update 2>/dev/null)"
+  # 2b) SECRET CANDIDATES (jsluice AST) — LEADs only. trufflehog --only-verified (below) stays the
+  #     CONFIRMED path; jsluice's AST catches custom/internal key shapes trufflehog has no detector for
+  #     (the Bokun-class miss). Written to a review store, deduped + capped, NEVER auto-confirmed — so it
+  #     surfaces real internal-key leaks without reopening the 53%-FP token-noise trap.
+  if [[ "${#SRCFILES[@]}" -gt 0 ]]; then
+    sl=0
+    while IFS= read -r sline; do
+      [[ -z "$sline" ]] && continue
+      printf '%s\n' "$sline" >> "$SECRET_LEADS" 2>/dev/null; sl=$((sl+1))
+    done < <(timeout 60 jsluice secrets "${SRCFILES[@]}" 2>/dev/null \
+              | jq -c --arg h "$host" --arg p "$prog" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+                  'select(.kind!=null) | {host:$h,program:$p,kind:.kind,severity:(.severity//"info"),
+                   file:(.filename//""),context:((.context//.data//{})|tostring|.[0:160]),source:"jsluice-secret",at:$t}' 2>/dev/null \
+              | awk '!s[$0]++' | head -40)
+    [[ "$sl" -gt 0 ]] && log "      ↳ 🔑 $sl jsluice secret-candidate LEAD(s) → secret_leads.jsonl (unverified; review)"
+  fi
+
+  # 3) VERIFY LIVE secrets (trufflehog --only-verified) — the clean, non-dupe finding. Scans the
+  #    whole workdir so reconstructed source-map output is covered too (not just the raw bundles).
+  th="$(timeout 120 trufflehog filesystem "$wd" --only-verified --json --no-update 2>/dev/null)"
   if [[ -n "$th" ]]; then
     while IFS= read -r sline; do
       [[ -z "$sline" ]] && continue
