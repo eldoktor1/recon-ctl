@@ -411,6 +411,17 @@ supervise_loop() {
   local sleep_var="$1"; shift
   local backoff=10 max_backoff=600
 
+  # De-thunder (2026-06-21): spread first-iteration launches so the ~35 loops don't all
+  # spawn sudo/cgroup scopes in the same second. That simultaneous burst (6 lanes + dozens
+  # of transient scopes at once) is what wedged systemd user@1000 ("Failed to spawn executor:
+  # Device or resource busy"), which took WSL interop + the 9P \\wsl.localhost share down with
+  # it. vpnguard is EXEMPT — it must start guarding egress immediately (fail-closed).
+  # See memory project_wsl_netstack_wedge_vpn_latch (the systemd-user-session root cause).
+  if [[ "$name" != "vpnguard" ]]; then
+    local _stagger=$(( RANDOM % ${STARTUP_STAGGER:-150} )) _ss=0
+    while [[ "$_ss" -lt "$_stagger" && "$SHUTDOWN" -eq 0 ]]; do sleep 3; _ss=$((_ss+3)); done
+  fi
+
   while [[ "$SHUTDOWN" -eq 0 ]]; do
     # VPN gate: if recon_vpnguard tripped the vpn_down flag (egress not on
     # Mullvad), EVERY loop except the guard itself pauses — no scanner or feed
@@ -442,9 +453,12 @@ supervise_loop() {
       continue
     fi
 
-    # Interruptible sleep
+    # Interruptible sleep WITH JITTER — drift loops apart so equal intervals don't
+    # periodically re-align into another simultaneous burst (de-thunder, part 2).
+    local _div=$(( sleep_secs / 8 )); [[ "$_div" -lt 1 ]] && _div=1
+    local _target=$(( sleep_secs + (RANDOM % _div) ))
     local slept=0
-    while [[ "$slept" -lt "$sleep_secs" && "$SHUTDOWN" -eq 0 ]]; do
+    while [[ "$slept" -lt "$_target" && "$SHUTDOWN" -eq 0 ]]; do
       sleep 5; slept=$((slept + 5))
     done
   done
