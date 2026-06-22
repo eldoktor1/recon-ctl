@@ -53,6 +53,8 @@ PARAMS_INDEX="${PARAMS_INDEX:-recon_params}"
 
 GOBIN="$HOME/go/bin"
 KATANA="${KATANA:-$GOBIN/katana}"; GAU="${GAU:-$GOBIN/gau}"
+WAYMORE="${WAYMORE:-$HOME/.local/bin/waymore}"   # richer multi-archive source beside gau (otx/urlscan/ghostarchive + vt/intelx if keyed)
+WAYMORE_TIMEOUT="${WAYMORE_TIMEOUT:-60}"
 GF="${GF:-$(command -v gf 2>/dev/null || echo "$GOBIN/gf")}"; QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
 # arjun — ACTIVE hidden-param discovery (sends LIVE traffic → ON-DEMAND ONLY, never the daemon
 # crawl; gated by PARAMS_ARJUN=1, set by `crawl-host --arjun` / `arjun`). Polite by default.
@@ -206,6 +208,17 @@ crawl_host() {
     # gau: otx+urlscan only — wayback (web.archive.org) + commoncrawl block our Mullvad
     # egress, so asking gau for them just burns the timeout. Wayback comes via the worker.
     [[ -x "$GAU" ]] && printf '%s\n' "$host" | timeout "$GAU_TIMEOUT" "$GAU" --providers otx,urlscan --threads 5 --subs 2>/dev/null
+    # waymore — richer multi-archive aggregator, ZERO-OVERLAP partition (anti-burn): gau already does
+    # otx+urlscan and the CF-worker CDX proxy (archive_fetch, below) does wayback — so waymore handles ONLY the
+    # sources gau LACKS: ghostarchive (keyless) + virustotal/intelx (skip gracefully until keyed). This avoids
+    # double-hitting the rate-limited otx/urlscan from the shared Mullvad IP (they 429 fast). PASSIVE — hits
+    # archive APIs, NEVER the target (no extra target traffic). -n = this host only. Output → file → dedup pipe.
+    # (Free win: add a urlscan/VT key to ~/.config/waymore/config.yml to unlock far more archive URLs.)
+    if [[ -x "$WAYMORE" ]]; then
+      timeout "$WAYMORE_TIMEOUT" "$WAYMORE" -i "$host" -n -mode U -oU "$hd/waymore.txt" \
+        --providers ghostarchive,virustotal,intelx >/dev/null 2>&1 || true
+      [[ -s "$hd/waymore.txt" ]] && cat "$hd/waymore.txt"
+    fi
     # Wayback CDX archive URLs, proxied through Cloudflare (escapes IA's Mullvad block).
     archive_fetch "$host"
   } | grep -E '^https?://' | grep -F '?' | sort -u | head -n "$MAX_URLS_PER_HOST" > "$hd/raw" || true

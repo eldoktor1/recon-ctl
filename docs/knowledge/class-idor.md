@@ -11,6 +11,29 @@ third-party ids.
 4. **200 + the *other* account's data** = horizontal IDOR. 200 + admin-only action as low-priv = vertical BAC.
 5. PoC = ONE redacted record proving cross-account read; never bulk-dump.
 
+## Autorize (Burp extension) — the access-control AUTO-tester (owned accounts only)
+Autorize (Barak Tawily; BApp Store) turns the manual A/B swap into an automatic per-request verdict — the
+fastest way to test access control across the WHOLE authed surface. It belongs in the locked Burp flow
+([[feedback_authed_idor_burp_flow]] / [[feedback_burp_locked_flow]]) as the auto-tester once both owned
+sessions are captured.
+- **How it works:** you browse/drive as the HIGH-priv account **A** (manually or via CinC); Autorize silently
+  re-sends each of A's requests with the LOW-priv account **B**'s session (cookies/headers you paste into its
+  config), and also with NO auth, then compares responses → per request it shows **Bypassed!** (red — B got A's
+  data = IDOR/BAC), **Enforced** (green — 403/empty), or **Is enforced??? (please configure)** (amber — manual
+  check). Instant access-control matrix instead of swapping each request by hand.
+- **Setup:** Burp → Extensions → BApp Store → Autorize. Paste B's session (Cookie / Authorization headers) into
+  Autorize's "modify headers". Set an enforcement-detector (content-length/string that proves a real 403 vs a
+  200 SPA shell). Scope-filter to the in-scope host. Toggle ON, then drive A's traffic. Burp-in-WSL shares tun0
+  (Mullvad) per the locked flow.
+- **HARD LINE (owned accounts only):** A and B are BOTH yours. Autorize replays A's traffic with YOUR B session —
+  never a guessed/third-party id. It only proves "my B can reach my A's object," the valid IDOR PoC.
+- **SAFETY — it replays EVERYTHING, including writes:** Autorize re-sends state-changing requests (POST/PUT/
+  DELETE) with B too. Before enabling on a surface with mutations, exclude unsafe methods (Autorize "Interception
+  filters" → skip POST/PUT/DELETE, or use the request filter) or run read-only browsing — otherwise it can fire
+  writes as B. Confirm-then-stop; verify the LOADED object data, not a success banner (see the switcher FP below).
+- Verdict still HUMAN-judged: a red "Bypassed!" on a 200 SPA-shell / me-scoped endpoint is a FP — confirm the
+  body is actually A's distinct data (same discipline as the FP patterns below).
+
 ## Where the id hides (don't only look at the query string)
 - Path segment (`/invoices/12345`), query (`?id=`/`?contractId=`), JSON body, custom header
   (`X-Account-Id`), GraphQL arg (`order(id:)`/`node(id:)`), referer, cookie-encoded id, base64/UUID blob.
