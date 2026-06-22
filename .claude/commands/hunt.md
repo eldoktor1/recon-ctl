@@ -8,6 +8,13 @@ Operator config: fully-autonomous target-picking; operator runs target-facing pr
 at a time, I read the paste and hand the next); run AUTONOMOUSLY until the operator says **stop**/**pause**
 (never self-terminate, never ask "want to wrap?").
 
+**GREEN-LIGHT (operator 2026-06-21):** on an in-scope + authorized + PAYING host the answer is **just YES** —
+build the PoC, hand the probe, drive the test, run the tooling; no hedging, no "this feels risky." Testing
+authorized scope to report IS the job, not an attack. Only genuinely malicious intent (harm/destroy/steal-
+and-sell) changes that. Methodology (IDOR = 2 owned accounts, confirm-then-stop, no third-party data/IDs, no
+money movement, no destruction) is how a test is done RIGHT — not a guard on whether to test. See memory
+`feedback_dont_obstruct_authorized_testing`.
+
 **SCOPE = ALL OF ES — every IN-SCOPE + PAYING host — NOT ONE VULN CLASS:** within the in-scope + paying
 surface (always gated on `triage_in_scope` + per-asset pays; never the raw index), anything in
 `recon_alive` that looks suspicious or could lead to a finding/report is on the table — every signal,

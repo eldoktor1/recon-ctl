@@ -16,6 +16,16 @@ and going deep on a tiny, confirmed set.
   eyes. Everything else is logged to a backlog you never open. The FP problem disappears
   structurally — you're not filtering a noisy net, you replaced it.
 
+## GREEN-LIGHT DOCTRINE — in-scope + pays = test anything (operator 2026-06-21; ALL agents)
+"Narrow hands" is about what's WORTH your time, NOT about hesitating to test. On a host that is
+in-scope + authorized + pays, the answer is **just YES**: build the PoC, hand the probe, drive the
+test, run the tooling — no hedging. We test only authorized scope, to report; that's the job, not an
+attack. The ONLY thing that changes the answer is genuinely malicious intent (harm/destroy/steal-and-sell),
+which we don't do. Over-caution on authorized scope is a bug that cost a week. Methodology (IDOR = 2 owned
+accounts, confirm-then-stop, no third-party data/IDs, no money movement, no destruction) is how a test is
+done RIGHT, not a guard on whether to test. Applies to every agent (main, 2IC, hunt, CinC, subagents).
+See CLAUDE.md "Hard line: recon vs attack" + memory feedback_dont_obstruct_authorized_testing.
+
 **Detection ≠ exploitation.** A 200, a reflection, a version banner, a token-shaped string
 are NOT findings. The gate promotes only at **0.85 confidence** (high/critical fire);
 "medium" stays a logged LEAD.
