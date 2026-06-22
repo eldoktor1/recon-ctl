@@ -67,9 +67,9 @@ GROWTH_STORES = [
 
 # scripts retired in prior audits — flag if a reference survives but the file is gone (audit F2/F3)
 RETIRED_SCRIPTS = [
-    "recon_killswitch.sh", "recon_dast.sh", "recon_ai_idor.sh", "recon_ai_monitor.sh",
+    "recon_killswitch.sh", "recon_ai_idor.sh", "recon_ai_monitor.sh",
     "wait_es.sh", "orchestrator.py", "tier.py", "recon_leads_digest.sh",
-]
+]   # NOTE: recon_dast.sh is NOT retired — it is the active blind-plant / autonomous-XSS engine.
 
 SEV_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3, "OK": 4}
 SEV_EMOJI = {"HIGH": "🔴", "MEDIUM": "🟠", "LOW": "🟡", "INFO": "🔵", "OK": "✅"}
