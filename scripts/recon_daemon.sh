@@ -684,6 +684,12 @@ run_ssrf_oob() { v21_killed ssrf_oob && return 0; [[ -f "$SSRF_OOB_SCRIPT" ]] &&
 DOMXSS_SCRIPT="${DOMXSS_SCRIPT:-$(script_path recon_domxss_confirm.sh)}"
 DOMXSS_INTERVAL="${DOMXSS_INTERVAL:-7200}"   # 2h
 run_domxss() { v21_killed domxss && return 0; [[ -f "$DOMXSS_SCRIPT" ]] && run_scanner bash "$DOMXSS_SCRIPT" || true; }
+# recon_kr — kiterunner API-route discovery on in-scope 200-hosts that expose no crawlable paths (bare API
+# gateways). Brute-discovers routes from the assetnote apiroutes wordlist → endpoints feedstock (IDOR ranker).
+# Target-facing → run_scanner (reconrun, Mullvad + egress slot). Heavy → small batch + 14d cooldown. Killswitch v2_kr.
+KR_SCRIPT="${KR_SCRIPT:-$(script_path recon_kr.sh)}"
+KR_INTERVAL="${KR_INTERVAL:-7200}"   # 2h
+run_kr() { v21_killed kr && return 0; [[ -f "$KR_SCRIPT" ]] && run_scanner bash "$KR_SCRIPT" || true; }
 # recon_exposed_files — audit fix #9: actively probe high-signal exposed paths (.git/.env/Spring
 # actuator/swagger) with CONTENT-SIGNATURE confirms -> record-confirmed -> 2IC -> SUBMIT. The
 # classic exposed surface U1 (JS-route mining) never actively checked. Target-facing -> run_scanner.
@@ -880,6 +886,7 @@ run_discord_bot() {
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
+  supervise_loop "kr"             "KR_INTERVAL"            run_kr             &
   supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
   supervise_loop "blindxss-plant"     "BLINDXSS_PLANT_INTERVAL"     run_blindxss_plant     &
   supervise_loop "blindxss-correlate" "BLINDXSS_CORRELATE_INTERVAL" run_blindxss_correlate &

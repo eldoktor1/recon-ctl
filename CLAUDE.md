@@ -101,6 +101,12 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   rate-limited prober picks them up. Bounded wordlist + sliding-window seeds so it never fries the box
   ([[project_permutation_pipeline_idea]], proven ad-hoc: found apusadmin/bastion/bkcsplatform on ANT banks
   subfinder missed). d0k, vpn-gated, killswitch v2_permute. Added 2026-06-21.
+- **API-route discovery** (`recon_kr.sh`, kiterunner; `recon-kr`) — in-scope 200-hosts that expose no crawlable
+  paths (bare API gateways/headless backends — katana/gau/jsintel find nothing) get brute-discovered against the
+  assetnote `apiroutes` wordlist (kitebuilder 2-phase: cheap on non-API hosts, deep only where an API responds).
+  Routes → the endpoints feedstock (IDOR/BAC ranker + 2IC); a 401/403 route = exists-but-authed (prime authed-IDOR
+  surface), 200 = unauth-reachable. In-scope+pays only, ANTI-BURN (max 2 conns/host, `--delay`, wildcard-quarantine,
+  per-host route + wall-clock caps, 14d cooldown), Mullvad (run_scanner). Killswitch v2_kr. Added 2026-06-21.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
