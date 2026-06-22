@@ -1,5 +1,38 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.11 - 2026-06-21 - Blind/stored-XSS lane (recon-blindxss) — the #1 unused dalfox feature
+
+dalfox has always had `-b`/`--custom-blind-xss-payload`; the gap was the persistent collector + the
+correlation that maps a fire DAYS later back to where it was planted. This lane is that infra — a
+dup-resistant, high-payout class (stored XSS firing inside an admin/staff console) the crowd's
+reflected scanners never reach.
+
+- **`recon_blindxss.sh`** (new) — `collector` (persistent `interactsh-client`; `-sf` session ⇒ stable
+  correlation-id across restarts so multi-day-late fires still resolve; d0k, NOT vpn-gated), `correlate`
+  (callback → strip CID → token → injection-map → mint), `emit-payload` (register a per-host token + write
+  the dual-beacon payload + print the dalfox `-b` URL), `status`, `test`.
+- **Dual-beacon correlation.** Every payload carries (1) an **interactsh** crafted per-host subdomain
+  `<CID><token>.<oast>` — interactsh routes ANY subdomain whose first 20 chars equal our correlation-id back
+  to our client (verified empirically; the trailing token is free), so a fire maps to the exact host; and
+  (2) the operator's **XSS Hunter** (`js.rip`) probe for screenshot/DOM/firing-page/secrets forensics (the
+  report PoC). Hosted XSS Hunter has no machine API → interactsh drives the autonomous mint.
+- **Minting is gated.** A fire → `state.py record-confirmed` (`signal_class=blind-xss`, score 15, conf 0.9)
+  → 2IC verify → `#review`, HARD-GATED on `ai_verdict='real'` like every lane. Uncorrelated fires (planted
+  pre-session / XSS-Hunter-only) surface as manual-correlate LEADs, never auto-minted against unknown hosts.
+- **Planting** = `recon_dast.sh` in `DAST_BLIND_ONLY` mode: per-host crafted `-b` + custom payload, fresh-first,
+  7d cooldown, `--waf-evasion`, egress-governed, Mullvad-gated — and it SKIPS nuclei + reflected-finding
+  recording (planting is fire-and-forget; the collector confirms later). No `#vulns` spam.
+- **Also folded in:** `--waf-evasion` added to `recon_params.sh confirm` (dalfox) + `recon_domxss_confirm.sh`
+  so on-WAF self-throttle protects the shared Mullvad exit during confirms.
+- **Config** `~/.recon_blindxss.conf` (LOCAL): public oast.* by default (works now), self-host upgrade path
+  documented (own domain = not a WAF-blocklisted IOC). Daemon: collector restart-loop + `blindxss-plant` (3h)
+  + `blindxss-correlate` (5m) loops; killswitch `state/kill/v2_blindxss`; `recon-blindxss`/`recon-bx` aliases;
+  `state/blindxss` ACL'd for d0k+reconrun. KB: `docs/knowledge/class-blind-xss.md`.
+- **Validated end-to-end:** collector registers → plant a per-host token → simulated fire (pinned resolver)
+  → collector captures (DNS+HTTP) → correlator extracts the firing page + mints exactly one gated finding
+  (state=confirmed, ai_verdict=NULL → pending 2IC). interactsh crafted-subdomain routing + dalfox dual-beacon
+  injection both confirmed on the wire.
+
 ## v3.10 - 2026-06-20 - Standing Claude research routines (recon-research) — keep the system updated
 
 The pipeline had DATA feeds (CVE/KEV, nuclei-update, self-audit) but no Claude-driven RESEARCH layer.

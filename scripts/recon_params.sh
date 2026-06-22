@@ -775,10 +775,12 @@ PY
     # noise (--skip-bav), GET, rate-limited. --silence prints only PoCs. A [POC] line =
     # dalfox VERIFIED the payload reflects executably (its own headless check), not bare
     # reflection — this is the real confirmation the old canary check lacked.
+    # --waf-evasion: on WAF detection dalfox self-throttles (worker=1, 3s delay) so a confirm
+    #   run never gets the shared Mullvad exit WAF-banned (anti-burn; harmless when no WAF).
     local dfx_auth=()
     [[ -n "$AUTH_COOKIE" ]] && dfx_auth+=(--cookie "$AUTH_COOKIE")
     [[ -n "$AUTH_HEADER" ]] && dfx_auth+=(--header "$AUTH_HEADER")
-    "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all \
+    "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all --waf-evasion \
       --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" "${dfx_auth[@]}" \
       --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.out" || true
     # grep -c prints 0 AND exits 1 on no-match; a trailing "|| echo 0" would append a 2nd 0

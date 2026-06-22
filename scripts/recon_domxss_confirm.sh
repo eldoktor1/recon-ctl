@@ -76,8 +76,10 @@ for url in "${urls[@]}"; do
   prog="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r '.triage_program // ""' 2>/dev/null)"
   if printf '%s' "$prog" | grep -qiE "$DOMXSS_SKIP_PROGRAMS"; then printf '%s\n' "$url" >> "$SEEN"; continue; fi
   # dalfox DOM + headless EXECUTION verify. --skip-bav = no basic-other-vuln noise; GET; polite.
+  # --waf-evasion: on WAF detection dalfox self-throttles (worker=1, 3s delay) → protects the
+  #   shared Mullvad exit from a ban while confirming (anti-burn; near-zero cost otherwise).
   out="$(timeout "$DOMXSS_TIMEOUT" "$DALFOX" url "$url" --deep-domxss --force-headless-verification \
-        --skip-bav -w 1 --delay "$DOMXSS_DELAY" --timeout 30 --format plain --silence 2>/dev/null)"
+        --waf-evasion --skip-bav -w 1 --delay "$DOMXSS_DELAY" --timeout 30 --format plain --silence 2>/dev/null)"
   printf '%s\n' "$url" >> "$SEEN"; tested=$((tested+1))
   printf '%s' "$out" | grep -qE '\[POC\]' || continue
   poc="$(printf '%s' "$out" | grep -E '\[POC\]' | head -1 | cut -c1-300)"

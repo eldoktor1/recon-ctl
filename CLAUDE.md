@@ -78,6 +78,20 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   finds HIDDEN params (in no URL/JS — the inputs that drive SSRF/cache-poison/reflected bugs the
   crowd's archive-only tooling misses), rides the existing gf→catalog→confirm pipeline. ON-DEMAND ONLY
   (sends live traffic; never the autonomous daemon crawl), polite (-t1 -d2 --rate-limit 3, GET-only). Added 2026-06-20.
+- **Blind/stored-XSS** (`recon_blindxss.sh` + `recon_dast.sh` blind-plant; `recon-blindxss`) — the #1 UNUSED
+  dalfox feature made into a real lane: the crowd runs reflected scanners; almost nobody stands up PERSISTENT
+  blind-XSS collection, so a fire days later inside an ADMIN/STAFF console is dup-resistant high-payout surface.
+  DUAL-BEACON payload: (1) **interactsh** = autonomous backbone — a persistent collector (`-sf` ⇒ stable
+  correlation-id across restarts; d0k, NOT vpn-gated so it catches late fires while paused) + a CRAFTED per-host
+  subdomain `<CID><token>.<oast>` (interactsh routes any subdomain with our 20-char CID preamble → our client,
+  VERIFIED empirically) → the correlator strips CID → token → injection-map → mints a CONFIRMED stored-XSS finding
+  (score 15, conf 0.9) → 2IC verify → #review, HARD-GATED on `ai_verdict='real'`; (2) **XSS Hunter** (`js.rip`,
+  operator's acct) = rich forensics — same payload loads it → screenshot/DOM/firing-page/secrets in the dashboard
+  (the report PoC; hosted XSS Hunter has no machine API so interactsh drives minting). Plant = DAST_BLIND_ONLY
+  (fresh-first, cooldown, `--waf-evasion`, no nuclei/#vulns spam). Host-level correlation solid, param best-effort
+  (re-test the host's params to localise). Config `~/.recon_blindxss.conf` (public oast default, self-host-ready).
+  HARD LINE: plant only in-scope+paying, beacon exfils only location/title/referrer (never cookies),
+  confirm-then-report, uncorrelated fire = manual-correlate LEAD never auto-mint. KB: `class-blind-xss.md`. Added 2026-06-21.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.

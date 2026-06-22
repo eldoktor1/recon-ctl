@@ -1,0 +1,26 @@
+# .recon_blindxss.conf.example — template for ~/.recon_blindxss.conf (the REAL file is LOCAL,
+# never committed: it can hold a self-host token + your XSS Hunter id). Copy to ~/.recon_blindxss.conf.
+#
+# The blind/stored-XSS lane (recon_blindxss.sh) works with NO config at all — it defaults to the
+# public oast.* interactsh servers. This file only customises the collector + the forensics probe.
+
+# --- interactsh OOB collector backbone ---
+# Empty BLINDXSS_SERVER => public oast.* (works now; the -sf session file keeps the correlation-id
+# stable across restarts, so a fire that lands days after the plant still resolves to our client).
+#
+# SELF-HOST UPGRADE (recommended once you have a domain+VPS — your own domain is NOT a
+# WAF-blocklisted IOC like oast.*, and you control retention for very-late callbacks):
+#   1. VPS:  go install github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest
+#            interactsh-server -domain oob.example.com -token <secret>
+#            (delegate NS for oob.example.com to the VPS; open udp/53 + tcp/80,443).
+#   2. set the three vars below.
+#   3. rm ~/recon/state/blindxss/session ; recon-restart  (re-registers a CID on the new server).
+BLINDXSS_SERVER=""        # e.g. "oob.example.com"  (empty = public oast.*)
+BLINDXSS_TOKEN=""         # self-hosted server auth token (interactsh-server -token)
+BLINDXSS_DOMAIN=""        # self-hosted base domain (informational; collector derives the live one)
+
+# --- XSS Hunter rich-forensics probe (optional but recommended) ---
+# Embedded in every blind payload: on a fire it loads XSS Hunter -> screenshot + DOM + firing-page
+# + secrets/CORS/.git detection + email alert (the PoC evidence). interactsh drives autonomous
+# minting; XSS Hunter is the human triage/PoC layer. Sign up at xsshunter.trufflesecurity.com.
+BLINDXSS_XSSHUNTER=""     # e.g. "js.rip/yourid"  (empty = interactsh-only, no rich forensics)

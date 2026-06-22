@@ -50,6 +50,7 @@ prepare_scanner_dirs() {
     "$BASE_DIR"
     "$STATE_DIR"
     "$STATE_DIR/kill"
+    "$STATE_DIR/blindxss"
     "$LOG_DIR"
     "$BASE_DIR/queue"
     "$BASE_DIR/queue/inbox"
@@ -265,6 +266,12 @@ cleanup_exit() {
       kill -TERM -- "-$gpid" 2>/dev/null || kill -TERM "$gpid" 2>/dev/null || true
     fi
     rm -f "$STATE_DIR/true_fresh/gungnir.pid"
+  fi
+  # Stop the persistent blind-XSS OOB collector (interactsh-client; long-lived child).
+  if [[ -s "$STATE_DIR/blindxss/collector.pid" ]]; then
+    local bxpid; bxpid="$(cat "$STATE_DIR/blindxss/collector.pid" 2>/dev/null)"
+    [[ -n "$bxpid" ]] && kill -TERM "$bxpid" 2>/dev/null || true
+    rm -f "$STATE_DIR/blindxss/collector.pid"
   fi
   rm -f "$PID_FILE"
 }
@@ -665,6 +672,34 @@ EXPOSED_FILES_SCRIPT="${EXPOSED_FILES_SCRIPT:-$(script_path recon_exposed_files.
 EXPOSED_FILES_INTERVAL="${EXPOSED_FILES_INTERVAL:-3600}"   # 1h
 run_exposed_files() { v21_killed exposed_files && return 0; [[ -f "$EXPOSED_FILES_SCRIPT" ]] && run_scanner bash "$EXPOSED_FILES_SCRIPT" || true; }
 
+# ---- BLIND / STORED-XSS lane (recon_blindxss.sh + DAST blind-plant) ----------
+# The #1 unused dalfox feature, made into a real lane. THREE pieces:
+#  (1) collector  — a PERSISTENT interactsh-client (long-lived child like gungnir; d0k,
+#      NOT target-facing, NOT vpn-gated so it keeps catching late fires even when paused).
+#      Launched in the long-running section below (restart loop). Killswitch: v2_blindxss.
+#  (2) blind-plant — recon_dast.sh in DAST_BLIND_ONLY mode: crawls fresh-first in-scope
+#      paying hosts and plants a per-host crafted canary + dual-beacon payload into params
+#      (no nuclei / no reflected #vulns spam). Target-facing -> run_scanner. Killswitch: v2_dast.
+#  (3) correlate  — maps a delayed callback -> the injected host -> a CONFIRMED stored-XSS
+#      finding (gated: state.py -> 2IC verify -> #review). Writes findings.db -> run via
+#      run_scanner (reconrun) for db ownership, like ssrf-oob/domxss/reporter. Killswitch: v2_blindxss.
+BLINDXSS_SCRIPT="${BLINDXSS_SCRIPT:-$(script_path recon_blindxss.sh)}"
+DAST_SCRIPT="${DAST_SCRIPT:-$(script_path recon_dast.sh)}"
+BLINDXSS_PLANT_INTERVAL="${BLINDXSS_PLANT_INTERVAL:-10800}"   # 3h — plant on fresh hosts (polite)
+BLINDXSS_CORRELATE_INTERVAL="${BLINDXSS_CORRELATE_INTERVAL:-300}"  # 5m — map fires fast
+run_blindxss_plant() {
+  v21_killed blindxss && return 0
+  v21_killed dast && return 0
+  [[ -f "$DAST_SCRIPT" ]] || return 0
+  DAST_BLIND_ONLY=1 run_scanner bash "$DAST_SCRIPT" || true
+}
+run_blindxss_correlate() {
+  v21_killed blindxss && return 0
+  [[ -f "$BLINDXSS_SCRIPT" ]] && run_scanner bash "$BLINDXSS_SCRIPT" correlate || true
+}
+# collector restart-loop (long-running; relaunched if it dies). d0k, not run_scanner.
+run_blindxss_collector() { [[ -f "$BLINDXSS_SCRIPT" ]] && bash "$BLINDXSS_SCRIPT" collector || true; }
+
 # ---- Browser XSS execution-confirm (recon_xss_confirm.sh) -------------------
 # Confirms reflected-XSS LEADs actually EXECUTE in headless Chromium (Playwright) —
 # "detection != exploitation" for the XSS class. TARGET-FACING -> d0k (Playwright
@@ -825,6 +860,8 @@ run_discord_bot() {
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
   supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
+  supervise_loop "blindxss-plant"     "BLINDXSS_PLANT_INTERVAL"     run_blindxss_plant     &
+  supervise_loop "blindxss-correlate" "BLINDXSS_CORRELATE_INTERVAL" run_blindxss_correlate &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
@@ -849,6 +886,17 @@ run_discord_bot() {
       if [[ -f "$STATE_DIR/vpn_down" ]]; then sleep 30; continue; fi
       run_discord_bot || log "[bot] died, restarting in 60s"
       sleep 60
+    done
+  ) &
+  (
+    # Persistent blind-XSS OOB collector (interactsh-client). Long-lived like the gungnir
+    # CT listener: it MUST keep polling to catch fires that land hours/days after a plant,
+    # so it is NOT vpn-gated and runs even while scanning is paused. Relaunch if it dies.
+    # Killswitch v2_blindxss stops it (and frees the registered correlation id on restart).
+    while [[ "$SHUTDOWN" -eq 0 ]]; do
+      if [[ -f "$STATE_DIR/kill/v2_blindxss" ]]; then sleep 60; continue; fi
+      run_blindxss_collector || log "[blindxss-collector] exited, restarting in 30s"
+      sleep 30
     done
   ) &
 

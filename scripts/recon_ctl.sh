@@ -219,7 +219,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_analyze|ai_vision|jsintel|nday|ghleaks|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_analyze|ai_vision|jsintel|nday|ghleaks|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot|blindxss)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -636,6 +636,7 @@ cmd_health() {
     "cloudrecon:recon_cloudrecon.sh" \
     "dast:recon_dast.sh" \
     "params:recon_params.sh" \
+    "blindxss-collector:recon_blindxss.sh collector" \
     "discord-bot:recon_discord_bot.sh"; do
     name="${item%%:*}"
     pattern="${item#*:}"
@@ -2288,7 +2289,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params; do
+      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params v2_blindxss; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
@@ -2428,6 +2429,7 @@ usage() {
   printf "  ${G}recon-buckets${R} [scan|check <b> [prov]|writecheck <b> [region]|results]  Cloud-bucket exposure (S3Scanner; provenance-seeded, read-only)\n"
   printf "  ${G}recon-graphql${R} [scan|check <url>|results]  GraphQL schema→worklist (read-only introspection; sensitive ops + IDOR/injectable args)\n"
   printf "  ${G}recon-wcd${R} [scan|confirm <host>|results]   Web-cache deception/poisoning LEADs (detect-only, cache-busted — never poisons real cache)\n"
+  printf "  ${G}recon-blindxss${R} [status|test <host>|collector|correlate|plant]  Blind/stored-XSS lane (persistent interactsh + XSS Hunter; fires days later → gated #review)\n"
   printf "  ${G}recon-research${R} <tooling|vulns|kb-enrich|detect-tune|all>  Claude research routine → digest + KB (auto-commit; keeps the system updated)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
@@ -2553,6 +2555,20 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_wcd.sh" "${@:-scan}" ;;
+  blindxss|bx)  # Blind/stored-XSS lane. status/test = read-only (d0k); collector = persistent
+                # interactsh-client (d0k, foreground — normally the daemon runs it); correlate +
+                # plant write findings.db / are target-facing → reconrun (db ownership + egress gate).
+                shift
+                case "${1:-status}" in
+                  status|"")  bash "$SCRIPT_DIR/recon_blindxss.sh" status ;;
+                  test)       shift; bash "$SCRIPT_DIR/recon_blindxss.sh" test "$@" ;;
+                  collector)  bash "$SCRIPT_DIR/recon_blindxss.sh" collector ;;
+                  correlate)  sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                                bash "$SCRIPT_DIR/recon_blindxss.sh" correlate ;;
+                  plant)      sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" DAST_BLIND_ONLY=1 \
+                                bash "$SCRIPT_DIR/recon_dast.sh" ;;
+                  *)          bash "$SCRIPT_DIR/recon_blindxss.sh" status ;;
+                esac ;;
   research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
                 shift
                 bash "$SCRIPT_DIR/recon_research.sh" "${@:-vulns}" ;;
