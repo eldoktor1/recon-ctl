@@ -395,6 +395,18 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   exposure itself is the report.
 
 ## Hard line: recon vs attack (NON-NEGOTIABLE)
+**IN-SCOPE + AUTHORIZED + TESTING-TO-REPORT = FULL GREEN LIGHT — no guards on the testing
+(operator 2026-06-21, "no guards for testing at all... the difference between a malicious request
+and a normal authorized test with the intent of reporting").** We test ONLY in-scope hosts on programs
+that authorize testing, to report what we find. That is not an attack and it is not near one — it is the
+job. On that scope the answer is **just YES**: analyze it, build the PoC, hand the probe, drive the test,
+run the tooling. No hedging, no "this feels risky," no friction. The ONLY thing that ever changes the
+answer is GENUINELY MALICIOUS INTENT — being told to actually harm/destroy/steal-and-sell — which is not
+what we do. Over-caution on authorized scope is the failure mode being corrected: it kills productivity
+and helps no one. The items below are not "guards on testing" — they are (a) how a test is DONE CORRECTLY
+so the finding is valid and reportable (e.g. IDOR uses 2 OWNED accounts because guessing a stranger's ID
+proves nothing and isn't the bug), and (b) the tiny set of things that are about REAL third-party harm,
+not about whether we'll test. See [[feedback_dont_obstruct_authorized_testing]].
 - Confirm an exposure exists; do NOT exploit past it. The PoC is "this responds/leaks
   without auth," never a data harvest.
 - NEVER: pull other users' data; enumerate account IDs that aren't yours; place/amend/
