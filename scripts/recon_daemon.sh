@@ -657,6 +657,12 @@ run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIP
 DANGLING_DNS_SCRIPT="${DANGLING_DNS_SCRIPT:-$(script_path recon_dangling_dns.sh)}"
 DANGLING_DNS_INTERVAL="${DANGLING_DNS_INTERVAL:-21600}"   # 6h
 run_dangling_dns() { v21_killed dangling_dns && return 0; [[ -f "$DANGLING_DNS_SCRIPT" ]] && bash "$DANGLING_DNS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_permute — permutation-DNS lane: alterx generate → puredns resolve (PUBLIC resolvers) → NEW in-scope
+# hosts → validator queue. PUBLIC-resolver DNS = NOT target traffic → runs as d0k (the supervise_loop vpn
+# gate still pauses it on vpn_down). Bounded + sliding-window. Killswitch: state/kill/v2_permute.
+PERMUTE_SCRIPT="${PERMUTE_SCRIPT:-$(script_path recon_permute.sh)}"
+PERMUTE_INTERVAL="${PERMUTE_INTERVAL:-3600}"   # 1h — 25 seeds/cycle slides through the in-scope pool
+run_permute() { v21_killed permute && return 0; [[ -f "$PERMUTE_SCRIPT" ]] && bash "$PERMUTE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 # recon_unauth_expose — U1 lane: shadow-endpoint UNAUTHENTICATED data-exposure confirmer.
 # jsintel endpoints -> recon_safe_probe GET -> precision classifier -> state.py record-confirmed
 # -> ai-pending -> 2IC verify -> SUBMIT. Target-facing -> run_scanner (reconrun, egress slot +
@@ -870,6 +876,7 @@ run_discord_bot() {
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
+  supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &

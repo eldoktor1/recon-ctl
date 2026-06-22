@@ -95,6 +95,12 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   (re-test the host's params to localise). Config `~/.recon_blindxss.conf` (public oast default, self-host-ready).
   HARD LINE: plant only in-scope+paying, beacon exfils only location/title/referrer (never cookies),
   confirm-then-report, uncorrelated fire = manual-correlate LEAD never auto-mint. KB: `class-blind-xss.md`. Added 2026-06-21.
+- **Permutation-DNS** (`recon_permute.sh`; `recon-permute`) — alterx generates subdomain permutations from
+  high-value in-scope seeds → puredns resolves via PUBLIC resolvers (cheap, NOT target traffic — never hits the
+  bug-bounty host) → only NEW resolved hosts (not in the ever-seen ledger) drop into the validator queue → the
+  rate-limited prober picks them up. Bounded wordlist + sliding-window seeds so it never fries the box
+  ([[project_permutation_pipeline_idea]], proven ad-hoc: found apusadmin/bastion/bkcsplatform on ANT banks
+  subfinder missed). d0k, vpn-gated, killswitch v2_permute. Added 2026-06-21.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.

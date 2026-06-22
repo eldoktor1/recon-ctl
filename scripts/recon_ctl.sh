@@ -219,7 +219,7 @@ cmd_stop() {
   # 2) ALWAYS kill the daemon tree (master + orphaned supervise loops) + every
   #    module loop + the discord bot. d0k-owned, so plain pkill works here.
   local DAEMON_PAT='recon_daemon\.sh'
-  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_analyze|ai_vision|jsintel|nday|ghleaks|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot|blindxss)\.sh'
+  local LOOP_PAT='recon_(validate|discovery|hot_seed|scope_watch|takeover_hunter|discord_bot|scope_db|cve_intel|vuln_feed|nuclei|true_fresh|fresh_modules|cloudrecon|dast|params|vpnguard|brain|ai_analyze|ai_vision|jsintel|nday|ghleaks|briefing|evidence_gate|xss_confirm|param_confirm|portscan|bypass|restale|digest|screenshot|blindxss|permute)\.sh'
   pkill -TERM -f "$DAEMON_PAT" 2>/dev/null || true
   pkill -TERM -f "$LOOP_PAT"   2>/dev/null || true
   pkill -TERM -f 'triage\.sh'  2>/dev/null || true
@@ -2289,7 +2289,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params v2_blindxss; do
+      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params v2_blindxss v2_permute; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
@@ -2569,6 +2569,8 @@ case "${1:-}" in
                                 bash "$SCRIPT_DIR/recon_dast.sh" ;;
                   *)          bash "$SCRIPT_DIR/recon_blindxss.sh" status ;;
                 esac ;;
+  permute)      # permutation-DNS lane (alterx→puredns via PUBLIC resolvers = NOT target traffic) → d0k.
+                bash "$SCRIPT_DIR/recon_permute.sh" ;;
   research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
                 shift
                 bash "$SCRIPT_DIR/recon_research.sh" "${@:-vulns}" ;;
