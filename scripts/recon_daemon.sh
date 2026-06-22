@@ -663,6 +663,13 @@ run_dangling_dns() { v21_killed dangling_dns && return 0; [[ -f "$DANGLING_DNS_S
 PERMUTE_SCRIPT="${PERMUTE_SCRIPT:-$(script_path recon_permute.sh)}"
 PERMUTE_INTERVAL="${PERMUTE_INTERVAL:-3600}"   # 1h — 25 seeds/cycle slides through the in-scope pool
 run_permute() { v21_killed permute && return 0; [[ -f "$PERMUTE_SCRIPT" ]] && bash "$PERMUTE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+# recon_uncover — surface expansion via uncover (Shodan/Censys dorks scoped to in-scope certs/roots) →
+# puredns resolve → NEW in-scope hosts → validator queue. CREDIT-CONSERVATIVE: hard monthly Shodan budget
+# (the operator's quota is scarce). 3rd-party API + public DNS = NOT target traffic → d0k (vpn-gated by the
+# loop). The monthly budget is the real cap; 6h cadence. Killswitch: state/kill/v2_uncover.
+UNCOVER_SCRIPT="${UNCOVER_SCRIPT:-$(script_path recon_uncover.sh)}"
+UNCOVER_INTERVAL="${UNCOVER_INTERVAL:-21600}"   # 6h (budget guard is the real limiter)
+run_uncover() { v21_killed uncover && return 0; [[ -f "$UNCOVER_SCRIPT" ]] && bash "$UNCOVER_SCRIPT" cycle >>"$LOG_FILE" 2>&1 || true; }
 # recon_unauth_expose — U1 lane: shadow-endpoint UNAUTHENTICATED data-exposure confirmer.
 # jsintel endpoints -> recon_safe_probe GET -> precision classifier -> state.py record-confirmed
 # -> ai-pending -> 2IC verify -> SUBMIT. Target-facing -> run_scanner (reconrun, egress slot +
@@ -883,6 +890,7 @@ run_discord_bot() {
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
+  supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &

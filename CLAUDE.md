@@ -107,6 +107,14 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   Routes → the endpoints feedstock (IDOR/BAC ranker + 2IC); a 401/403 route = exists-but-authed (prime authed-IDOR
   surface), 200 = unauth-reachable. In-scope+pays only, ANTI-BURN (max 2 conns/host, `--delay`, wildcard-quarantine,
   per-host route + wall-clock caps, 14d cooldown), Mullvad (run_scanner). Killswitch v2_kr. Added 2026-06-21.
+- **Surface expansion** (`recon_uncover.sh`, uncover; `recon-uncover`) — internet-research-for-enumeration
+  beside subfinder/gungnir: Shodan/Censys dorks SCOPED to in-scope certs/roots (`ssl.cert.subject.CN:"<root>"`)
+  → candidate hosts → puredns resolve → only NEW in-scope hosts → validator queue. CREDIT-CONSERVATIVE (the
+  operator's quotas are SCARCE — [[reference_api_credit_budget]]): a HARD monthly Shodan budget (60 of 100,
+  checked before every query, resets monthly, state/uncover_budget.txt), tiny `-l`, sliding-window roots;
+  FOFA SKIPPED (free-tier API balance 0/0), Censys best-effort (Platform-PAT compat uncertain). 3rd-party API
+  + public-resolver DNS = NOT target traffic → d0k. On-demand `recon-uncover query "<dork>" [engine]`.
+  Killswitch v2_uncover. Added 2026-06-21.
 - **6:30pm briefing** (`recon_briefing.sh`) — one ranked "TONIGHT" card: BAC/IDOR leads to
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
