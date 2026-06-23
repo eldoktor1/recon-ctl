@@ -16,19 +16,21 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   of leaked `.map`s (the ORIGINAL un-minified source = deeper endpoint/secret surface the crowd never
   un-maps) + trufflehog `--only-verified` LIVE secrets (CONFIRMED → #review) AND jsluice-`secrets` AST
   candidate LEADs (review-only `secret_leads.jsonl`; kills the 53%-FP token-shaped noise). KB: `tech-js-recon.md`.
-- **IDOR/BAC money pillar** (owned by the **2IC routine agent**, not a daemon loop) — Claude
-  reasons over the jsintel endpoint surface (`~/recon/js_recon/endpoints.jsonl` + ES) →
-  ranked broken-access-control/IDOR worklist with the 2-account test (the most-rewarded
-  class; reasoning only, human exploits with their own accounts). (The old `recon_ai_idor.sh`
-  daemon loop was retired 2026-06-08 — the routine subsumes it.) The routine/operator now
-  start from a **pre-ranked** list: `recon_idor_candidates.py` scores all endpoints.jsonl
-  entries for IDOR-likelihood (object-reference resource + ID type: numeric=enumerable,
-  uuid=harvestable, id-param; +sensitive/financial, +api/graphql, +upload-download), excludes
-  benched/OOS/non-paying + 3rd-party-host endpoints, and **fanout-suppresses product-class-dup
-  APIs** (same templated endpoint on >5 hosts = shipped product, e.g. UniFi `/proxy/users/...`).
-  Output → `~/recon/briefings/idor_candidates_<date>.md`. Added 2026-06-13; research-grounded
-  (IDOR in REST/GraphQL APIs = #1 paid class, the one automation can't confirm — so surface,
-  rank, human-test). Still reasoning-only; NEVER enumerate third-party IDs (hard line).
+- **IDOR/BAC money pillar — the Claude HUNTER owns it** (`recon_ai_hunter.sh`, autonomous daemon lane
+  `ai-hunter`; KB `class-ai-hunter-design.md`). Per in-scope+paying target the hunter reasons over the
+  jsintel endpoint surface (`~/recon/js_recon/endpoints.jsonl` + ES) → app-model → ranked, dup-aware
+  BAC/IDOR (+ shadow-endpoint/SSRF/multi-class) hypotheses → the harness runs the unauth-safe ones
+  (`recon_safe_probe.sh`, GET/HEAD/OPTIONS) → execution-grounded adjudication → CONFIRMED mint (→ verify
+  gate → #review) or a precise 2-OWNED-account operator plan in `briefings/hunter_<date>.md`. The **2IC
+  routine CONSUMES** the hunter's output for its nightly card — it no longer hand-derives a parallel
+  worklist (ONE engine, not two; consolidated 2026-06-23; `recon_ai_idor.sh` retired 2026-06-08). Shared
+  seed/pre-rank: `recon_idor_candidates.py` scores endpoints.jsonl for IDOR-likelihood (object-ref + ID
+  type: numeric=enumerable, uuid=harvestable, id-param; +sensitive/financial, +api/graphql,
+  +upload-download), excludes benched/OOS/non-paying + 3rd-party-host, and **fanout-suppresses
+  product-class-dup APIs** (same templated endpoint on >5 hosts = shipped product, e.g. UniFi
+  `/proxy/users/...`) → `~/recon/briefings/idor_candidates_<date>.md`. Research-grounded (IDOR in
+  REST/GraphQL APIs = #1 paid class, the one automation can't confirm — surface, rank, human-test).
+  Safe-probe + reasoning only; authed/2-account confirm is the human's; NEVER enumerate third-party IDs (hard line).
 - **XSS/SQLi reflected-param lane** (`recon_xss_sqli_candidates.py` + `recon_params.sh confirm`) —
   rs0n's "all XSS targets from HackerOne" idea made DUP-PROOF and multi-platform. The params catalog
   (~18k XSS / ~3k SQLi in-scope+paying URLs across 5 platforms) is RANKED by param-name injectability

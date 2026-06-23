@@ -294,10 +294,15 @@ and the cheap haiku `ai_analyze` triage; you consume that and provide ALL the Cl
    cooldowns climbing → BACK OFF (fewer probes); Mullvad/vpn_down → LEAD-only. If burn risk / vpn_down /
    a real halt is detected, post a ONE-LINE alert to #ops (`~/recon/state/discord/ops`) — ONLY when
    something is actually wrong (no hourly health spam; that's why ai_monitor was retired).
-4. **OWN THE IDOR WORKLIST (replaces ai_idor).** The daemon no longer refreshes ~/recon/idor_worklist.jsonl —
-   generate BAC/IDOR leads yourself from the JS-endpoint store (~/recon/js_recon/endpoints.jsonl) + ES
-   admin-surface, applying the shared-tenant/product-class filters. Treat the existing worklist file as a
-   stale input at best.
+4. **CONSUME THE HUNTER'S BAC/IDOR worklist — do NOT re-derive it (consolidated 2026-06-23).** The autonomous
+   **Claude HUNTER** (`recon-hunter` / `recon_ai_hunter.sh`; KB `class-ai-hunter-design.md`) now OWNS BAC/IDOR
+   + shadow-endpoint lead generation: per in-scope+paying target it app-models the jsintel surface
+   (~/recon/js_recon/endpoints.jsonl) → ranked dup-aware hypotheses → safe-probes the unauth ones →
+   execution-grounded adjudication → CONFIRMED mints (which arrive in YOUR ai-pending queue, step 1) + a
+   2-owned-account operator plan in `briefings/hunter_<date>.md`. YOUR job is to READ that briefing + verify
+   the hunter's mints and FOLD the top leads into tonight's card — don't hand-derive a parallel worklist
+   (that was the old ai_idor role; the hunter subsumes it). `recon_idor_candidates.py`
+   (briefings/idor_candidates_<date>.md) remains the shared pre-rank/seed. On demand: `recon-hunter host <host>`.
 
 ## VERIFY THE SCORING & FIX TRASH (close the feedback loop)
 The pipeline's `triage_score` ranking is only as good as its rules — don't just consume it, AUDIT it.
