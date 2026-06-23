@@ -155,6 +155,7 @@ authentication, and whether it is SAFE to probe UNAUTHENTICATED with GET/HEAD/OP
 surface; mark product-class/common endpoints dup_risk=high. Be precise — 'looks interesting' is useless.
 Rank by (real exploitability x payout x uniqueness). Return the app_model + up to 10 hypotheses."
   hyp_out="$(claude_json "$HUNTER_MODEL" "$HYP_SCHEMA" "$hyp_in")"
+  [[ -n "$hyp_out" ]] || { warn "  hypothesize empty — retry once in 20s (rate-limit?)"; sleep 20; hyp_out="$(claude_json "$HUNTER_MODEL" "$HYP_SCHEMA" "$hyp_in")"; }
   [[ -n "$hyp_out" ]] || { warn "  hypothesize returned nothing for $host"; printf '%s\n' "$host" >> "$SEEN"; return 0; }
   napps="$(printf '%s' "$hyp_out" | jq '.hypotheses | length' 2>/dev/null || echo 0)"
   log "  app-modelled; $napps hypotheses"
@@ -172,7 +173,8 @@ Rank by (real exploitability x payout x uniqueness). Return the app_model + up t
     auth="$(jq -r '.auth_required' <<<"$hyp")"; safe="$(jq -r '.safe_to_probe' <<<"$hyp")"
     local probe='{"skipped":"authed-or-unsafe — operator/human required, not autonomously probed"}'
     if [[ "$auth" == "false" && "$safe" == "true" && "$method" =~ ^(GET|HEAD|OPTIONS)$ ]]; then
-      probe="$(SAFE_PROBE_LEDGER="$ledger" SAFE_PROBE_BUDGET="$HUNTER_PROBE_BUDGET" bash "$SAFE_PROBE" "$url" "$method" 2>/dev/null)"
+      local purl; purl="$(printf '%s' "$url" | grep -oE 'https?://[^ ,"]+' | head -1)"   # Opus sometimes lists several paths; probe the first valid single URL
+      probe="$(SAFE_PROBE_LEDGER="$ledger" SAFE_PROBE_BUDGET="$HUNTER_PROBE_BUDGET" bash "$SAFE_PROBE" "${purl:-$url}" "$method" 2>/dev/null)"
       [[ -n "$probe" ]] || probe='{"ok":false,"error":"probe-empty"}'
       # trim body to keep adjudication context bounded
       probe="$(jq -c --argjson cap "$HUNTER_BODY_CAP" 'if .body then .body |= .[0:$cap] else . end' <<<"$probe" 2>/dev/null || printf '%s' "$probe")"
