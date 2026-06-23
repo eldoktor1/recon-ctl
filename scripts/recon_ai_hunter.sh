@@ -88,7 +88,7 @@ claude_json() {  # claude_json <model> <schema> <prompt>  -> .structured_output 
 # ---- SEED: scope+pays gate for a host (authoritative per-asset) ------------------------------
 in_scope_pays() {  # in_scope_pays <host> -> 0 if in-scope AND paying AND not benched/OOS
   local host="$1" q r
-  if [[ -x "$SCOPE_CHECK" ]]; then
+  if [[ -f "$SCOPE_CHECK" ]]; then   # offline + authoritative (local scope files); run via bash (no +x needed)
     bash "$SCOPE_CHECK" "$host" --pays >/dev/null 2>&1 && return 0 || return 1
   fi
   q="$(jq -nc --arg h "$host" '{size:1,_source:["triage_in_scope","triage_pays"],query:{bool:{
@@ -97,7 +97,12 @@ in_scope_pays() {  # in_scope_pays <host> -> 0 if in-scope AND paying AND not be
   r="$(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null | jq -r '.hits.total.value // 0' 2>/dev/null)"
   [[ "${r:-0}" -ge 1 ]]
 }
-program_of() { es "$ES_URL/$INDEX_NAME/_search" -d "$(jq -nc --arg h "$1" '{size:1,_source:["program","triage_program"],query:{term:{host:$h}}}')" 2>/dev/null | jq -r '.hits.hits[0]._source | (.program // .triage_program // "unknown")' 2>/dev/null; }
+program_of() {  # scope_check first (offline, authoritative), ES fallback
+  local p=""
+  [[ -f "$SCOPE_CHECK" ]] && p="$(bash "$SCOPE_CHECK" "$1" 2>/dev/null | jq -r '.program // empty' 2>/dev/null | sed 's/[[:space:]]*$//')"
+  [[ -n "$p" ]] || p="$(es "$ES_URL/$INDEX_NAME/_search" -d "$(jq -nc --arg h "$1" '{size:1,_source:["program"],query:{term:{host:$h}}}')" 2>/dev/null | jq -r '.hits.hits[0]._source.program // empty' 2>/dev/null)"
+  printf '%s\n' "${p:-unknown}"
+}
 host_ctx()   { # tech + notes for the app model
   es "$ES_URL/$INDEX_NAME/_search" -d "$(jq -nc --arg h "$1" '{size:1,_source:["tech","host_notes_text","triage_payout_tier","title","webserver"],query:{term:{host:$h}}}')" 2>/dev/null \
     | jq -r '.hits.hits[0]._source // {} | "tech=\(.tech // "?") tier=\(.triage_payout_tier // "?") server=\(.webserver // "?") title=\(.title // "?")\nnotes: \(.host_notes_text // "none")"' 2>/dev/null
@@ -153,6 +158,7 @@ Rank by (real exploitability x payout x uniqueness). Return the app_model + up t
   [[ -n "$hyp_out" ]] || { warn "  hypothesize returned nothing for $host"; printf '%s\n' "$host" >> "$SEEN"; return 0; }
   napps="$(printf '%s' "$hyp_out" | jq '.hypotheses | length' 2>/dev/null || echo 0)"
   log "  app-modelled; $napps hypotheses"
+  [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$hyp_out" > "$STATE_DIR/hunter_dbg_hyp.json"
 
   # ---- TEST: harness runs unauth-safe hypotheses through safe_probe (Claude never executes) ----
   local ledger; ledger="$(mktemp)"; local tested="[]"
@@ -176,6 +182,7 @@ Rank by (real exploitability x payout x uniqueness). Return the app_model + up t
   done < <(printf '%s' "$hyp_out" | jq -c '.hypotheses[]' 2>/dev/null)
   rm -f "$ledger"
   log "  probed $n unauth hypothesis(es)"
+  [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$tested" > "$STATE_DIR/hunter_dbg_tested.json"
 
   # ---- ADJUDICATE: Opus judges the REAL responses (execution-grounded) ----
   local adj_in adj_out
@@ -192,6 +199,7 @@ Below are bug hypotheses and the ACTUAL unauthenticated probe responses the harn
 Give severity + the evidence string. Hypotheses+probes:
 $(printf '%s' "$tested")"
   adj_out="$(claude_json "$HUNTER_MODEL" "$ADJ_SCHEMA" "$adj_in")"
+  [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$adj_out" > "$STATE_DIR/hunter_dbg_adj.json"
 
   # ---- MINT / PLAN / LEARN ----
   local minted=0 leads=0
