@@ -173,7 +173,11 @@ run_scanner() {
   # exit IPs = anti-ban throughput. Localhost/ES excluded so ingest stays direct.
   # Fail-closed (gluetun FIREWALL=on) and the containers sit behind the host Mullvad,
   # so the worst case is a Mullvad IP, never the real ISP. Flag off => behaviour unchanged.
-  if [[ "${MULTITUNNEL:-0}" == "1" ]]; then
+  # SMART-SCOPED: only the CONFIRM + UNIQUE lanes get the proxy pool (MT_LANES) — the commodity
+  # validate/portscan bulk drain stays on the single host exit, so the scarce IPs buy findings
+  # (confirm throughput on dup-proof leads), not raw fps over commodity hosts.
+  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql|recon_unauth_expose}"
+  if [[ "${MULTITUNNEL:-0}" == "1" && "${2##*/}" =~ ^(${_mtlanes}) ]]; then
     local _mtlist="${MT_PROXY_LIST:-$STATE_DIR/egress_proxies.txt}"
     local _mtrr="${MT_RR_FILE:-$STATE_DIR/egress_rr.idx}"
     if [[ -s "$_mtlist" ]]; then
