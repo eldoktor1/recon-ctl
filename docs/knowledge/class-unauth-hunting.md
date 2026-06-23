@@ -243,3 +243,30 @@ self-XSS = N/A). Never mass-blast saturated programs with defaults.
 - Unauth RCE anatomy: Orca CVE-2026-20253 (Splunk); Arctic Wolf CVE-2026-27825 (mcp-atlassian).
 - Secrets: snyk.io State of Secrets (28.65M/2025); intigriti hunting-for-secrets (Keyhacks).
 - FP discriminators: CLAUDE.md "Documented false-positive patterns" + tools/brief_filter.py.
+
+
+---
+
+## Appendix (r201, 2026-06-22) — Salesforce Experience-Cloud guest-site recon (U1/U4 reusable)
+
+A recurring high-EV unauth class on `help.*` / `community.*` / `support.*` hosts. Salesforce
+**Experience Cloud (Lightning) guest sites** frequently ship with mis-set object/FLS permissions
+that let the **unauthenticated guest user** read standard objects (Account/Contact/Case/User/etc.)
+via the Aura controller — the classic "Salesforce ghost / guest user" data exposure.
+
+**Fingerprint (any one ⇒ it's an SFDC Experience guest site):**
+- CSP references `service.force.com/embeddedservice`, `*.salesforce-scrt.com`, `*.my.salesforce.com`.
+- `/s/` exists (301/200) and sets an **`LSKey-c$<...>`** cookie — the definitive Lightning marker.
+- `/s/sfsites/aura` is reachable; `/s/?language=en_GB` returns a `renderCtx` published-page payload.
+
+**Confirm (operator-browser, read-only — NOT autonomous):** logged-out POST to `/s/sfsites/aura`
+with `getRecord` / `getItems` / `getRecords` actions enumerating guest-accessible standard objects.
+Records returned without auth = the bug. Tooling: public aura-dump scripts. HARD LINE: owned/non-PII
+objects first, stop at proof, **dedup vs the program's disclosed reports + crowdstream/hacktivity
+BEFORE submit** (Salesforce-guest is a known class → check it isn't already filed).
+
+**FP trap:** the fingerprint alone (CSP/LSKey/`/s/`) is the PRECONDITION, not the finding —
+introspection of the page ≠ data exposure. Only guest-accessible *records* returning is reportable.
+A guest site with object perms correctly locked returns aura errors / empty / auth-required.
+
+Seen on: `help.etoro.com` (standing #1), `staging.help.th.jobsdb.com` (SEEK/Bugcrowd, r201).
