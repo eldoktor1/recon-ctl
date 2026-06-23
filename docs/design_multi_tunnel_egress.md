@@ -26,23 +26,27 @@ the Kali netns, or the live Mullvad egress — the running pipeline still egress
 Mullvad app, unchanged. Container traffic currently double-tunnels (gluetun WG over the host's
 Windows-Mullvad) — fine for correctness (target sees the gluetun exit); can be optimized at cutover.
 
-## CUTOVER (NOT done — operator-reviewed, the only remaining step)
-Pointing the pipeline's scanners at these proxies changes egress, so it stays operator-present:
-1. **Fail-closed re-proof per tunnel:** with a container up, kill its WG (`docker exec <c> wg-quick down wg0`
-   or stop the tunnel), then `curl -x http://127.0.0.1:PORT am.i.mullvad.net` — it MUST fail (no response),
-   never return the real IP. Confirm for each before trusting.
-2. **Worker→proxy assignment:** `run_scanner` reads `state/egress_proxies.txt` and assigns a proxy
-   round-robin per spawned worker (export `HTTP_PROXY`/`HTTPS_PROXY` for the child, or pass the tool's
-   `-proxy`/`-http-proxy` flag — httpx/nuclei/katana all support it). Gate behind `MULTITUNNEL=1`
-   (default off) so it's a deliberate switch, not silent.
-3. **Per-IP anti-burn:** the existing per-host + global rolling-window caps become per-egress-IP
-   (each proxy is its own IP); keep the polite per-IP rate.
-4. **vpn_down logic:** `vpnguard` already guards the host Mullvad. Add per-proxy health (the gluetun
-   `/v1/openvpn/status` or a periodic `test`); degrade to fewer workers if a tunnel drops; only a FULL
-   loss pauses scanning. DNS (puredns) stays direct on public resolvers — not ban-risk traffic, not proxied.
-5. Keep the hard line: 2 owned accounts for authed tests, etc. — unchanged.
+## CUTOVER — IMPLEMENTED 2026-06-22 (flag-gated, off by default), operator-present
+Validated before enabling: **fail-closed proven** (stopped tunnel ⇒ proxy refuses, no leak; and the
+containers sit behind the host Mullvad, so worst case is a Mullvad IP, never the real ISP), and the
+**exact runtime path verified** — `reconrun` via the proxy exits `us-sjc-wg-504`; httpx honors `HTTPS_PROXY` env.
+- `run_scanner` (recon_daemon.sh) round-robins `state/egress_proxies.txt` per invocation **when
+  `MULTITUNNEL=1`**, setting `HTTP(S)_PROXY` for the child and `NO_PROXY=localhost,127.0.0.1,::1` so ES
+  ingest stays direct. Flag off ⇒ behaviour completely unchanged.
+- **Enable:** `recon-multitunnel on` (writes `state/multitunnel_on`); `recon-ctl start` exports
+  `MULTITUNNEL=1` when that toggle exists (persists across restarts). `recon-multitunnel off` reverts.
+  Restart the pipeline to apply. `recon-multitunnel status` shows the toggle + proxy count.
+- Tools that honor `HTTP(S)_PROXY` env (httpx/nuclei/katana/gau/curl) load-balance across the IPs;
+  any that don't fall back to the host Mullvad exit (still safe). DNS (puredns) stays direct on public
+  resolvers — not ban-risk traffic, not proxied.
 
-The proposed `run_scanner` change touches the egress gate — do it with the operator, not autonomously.
+### Remaining tuning (optional, when more throughput is wanted)
+1. **Per-IP rate bump:** with load spread over N IPs, `HTTPX_RATE` can rise (each IP still polite).
+2. **Concurrent validate workers:** for true Nx *simultaneous* drain, run N validate workers each pinned
+   to a distinct proxy (today's round-robin spreads across invocations/loops, not one loop in parallel).
+3. **Per-proxy health → vpn_down:** add a periodic `recon-multitunnel test`; degrade to fewer workers if
+   a tunnel drops; only a FULL loss pauses scanning.
+Keep the hard line unchanged (2 owned accounts for authed tests, etc.).
 
 ## Operate
 ```

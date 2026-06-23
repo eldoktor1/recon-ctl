@@ -168,6 +168,27 @@ run_scanner() {
     AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"
     PATH="$PATH"
   )
+  # Multi-tunnel egress (opt-in: MULTITUNNEL=1). Round-robin a Mullvad gluetun proxy
+  # (scripts/recon_multitunnel.sh) per invocation so target traffic spreads across N
+  # exit IPs = anti-ban throughput. Localhost/ES excluded so ingest stays direct.
+  # Fail-closed (gluetun FIREWALL=on) and the containers sit behind the host Mullvad,
+  # so the worst case is a Mullvad IP, never the real ISP. Flag off => behaviour unchanged.
+  if [[ "${MULTITUNNEL:-0}" == "1" ]]; then
+    local _mtlist="${MT_PROXY_LIST:-$STATE_DIR/egress_proxies.txt}"
+    local _mtrr="${MT_RR_FILE:-$STATE_DIR/egress_rr.idx}"
+    if [[ -s "$_mtlist" ]]; then
+      local -a _mtp; mapfile -t _mtp < "$_mtlist"
+      local _mtn="${#_mtp[@]}"
+      if (( _mtn > 0 )); then
+        local _mti=$(( $(cat "$_mtrr" 2>/dev/null || echo 0) % _mtn ))
+        local _mtpx="${_mtp[$_mti]}"
+        echo $(( _mti + 1 )) > "$_mtrr" 2>/dev/null || true
+        env_args+=( HTTP_PROXY="$_mtpx" HTTPS_PROXY="$_mtpx" http_proxy="$_mtpx" https_proxy="$_mtpx" \
+                    NO_PROXY="localhost,127.0.0.1,::1" no_proxy="localhost,127.0.0.1,::1" )
+        log "[run_scanner] multitunnel: ${2##*/} via $_mtpx ($((_mti+1))/$_mtn)"
+      fi
+    fi
+  fi
   local rc
   if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
     env "${env_args[@]}" "$@"; rc=$?

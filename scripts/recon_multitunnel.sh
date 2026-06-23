@@ -71,9 +71,12 @@ EOF
   log "built $n tunnel(s): $COMPOSE | proxies -> $PROXY_LIST"
 }
 
+TOGGLE="$STATE/multitunnel_on"
+cmd_on(){  mkdir -p "$STATE"; touch "$TOGGLE"; log "multitunnel ENABLED (toggle set) — restart the pipeline (recon-start) to apply"; }
+cmd_off(){ rm -f "$TOGGLE"; log "multitunnel DISABLED — restart the pipeline (recon-start) to apply"; }
 cmd_up(){   [ -f "$COMPOSE" ] || cmd_build; ( cd "$WORK" && docker compose up -d ); }
 cmd_down(){ [ -f "$COMPOSE" ] && ( cd "$WORK" && docker compose down ); }
-cmd_status(){ [ -f "$COMPOSE" ] && ( cd "$WORK" && docker compose ps ); }
+cmd_status(){ echo "toggle: $( [ -f "$TOGGLE" ] && echo ON || echo off ) | proxies: $(wc -l < "$PROXY_LIST" 2>/dev/null || echo 0)"; [ -f "$COMPOSE" ] && ( cd "$WORK" && docker compose ps ); }
 cmd_proxies(){ cat "$PROXY_LIST" 2>/dev/null; }
 cmd_test(){
   [ -s "$PROXY_LIST" ] || { log "no proxy list — run build/up first"; exit 1; }
@@ -93,5 +96,6 @@ cmd_test(){
 case "${1:-}" in
   build) cmd_build ;; up) cmd_up ;; down) cmd_down ;;
   test) cmd_test ;; status) cmd_status ;; proxies) cmd_proxies ;;
-  *) echo "usage: recon_multitunnel.sh {build|up|down|test|status|proxies}" >&2; exit 1 ;;
+  on) cmd_on ;; off) cmd_off ;;
+  *) echo "usage: recon_multitunnel.sh {build|up|down|test|status|proxies|on|off}" >&2; exit 1 ;;
 esac

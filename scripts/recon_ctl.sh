@@ -189,6 +189,10 @@ cmd_start() {
          echo "  Verify your exit IP, then override: RECON_SKIP_VPN_CHECK=1 recon-start"; return 1 ;;
     esac
   fi
+  # Multi-tunnel egress opt-in (scripts/recon_multitunnel.sh on|off). When the toggle file
+  # exists, the daemon's run_scanner round-robins target traffic across the gluetun Mullvad
+  # proxy pool (state/egress_proxies.txt). Persists across restarts; absent => single-exit.
+  [[ -f "$STATE_DIR/multitunnel_on" ]] && { export MULTITUNNEL=1; echo "multitunnel: ON (egress via gluetun proxy pool)"; }
   nohup bash "$DAEMON" >/dev/null 2>&1 &
   sleep 1
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
