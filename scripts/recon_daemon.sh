@@ -617,6 +617,17 @@ AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# ---- Claude HUNTER agent (recon_ai_hunter.sh) — the seeded per-target hunter ----------------
+# The finding engine (docs/knowledge/class-ai-hunter-design.md): Opus reasons over ONE in-scope+pays
+# target's already-collected surface -> app-model + focused testable hypotheses -> the harness runs the
+# unauth-safe ones via recon_safe_probe.sh -> execution-grounded adjudication -> confirmed mint (-> the
+# verify gate -> #review) / 2-OWNED-ACCOUNT operator plan. Runs as d0k (Claude OAuth); the ONLY target
+# traffic is safe_probe (Mullvad + scope + anti-burn gated). Authed/IDOR stays human-in-the-loop.
+# Killswitch v2_ai_hunter.
+AI_HUNTER_SCRIPT="${AI_HUNTER_SCRIPT:-$(script_path recon_ai_hunter.sh)}"
+AI_HUNTER_INTERVAL="${AI_HUNTER_INTERVAL:-1800}"   # 30 min — deep + Opus-tier, so paced
+run_ai_hunter() { v21_killed ai_hunter && return 0; [[ -f "$AI_HUNTER_SCRIPT" ]] && bash "$AI_HUNTER_SCRIPT" cycle >>"$LOG_FILE" 2>&1 || true; }
+
 # ---- Claude-Max VISION agent (recon_ai_vision.sh) --------------------------
 # Headless Claude (Haiku, vision) looks at each captured SCREENSHOT and classifies
 # what is actually on screen (unauth-panel / install-setup / error-disclosure /
@@ -899,6 +910,7 @@ run_discord_bot() {
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
   supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
+  supervise_loop "ai-hunter"      "AI_HUNTER_INTERVAL"     run_ai_hunter      &
   supervise_loop "ai-vision"      "AI_VISION_INTERVAL"     run_ai_vision      &
   supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
