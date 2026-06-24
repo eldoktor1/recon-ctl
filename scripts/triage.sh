@@ -72,11 +72,27 @@ capped_jq() { ( ulimit -v "$TRIAGE_JQ_VMAX_KB" 2>/dev/null; exec jq "$@" ); }
 # fetch feeds millions of records into the in-RAM scope_map/cluster slurp passes
 # until jq OOM-kills the WSL VM (drops the operator interactive shell -> the
 # recurring "terminal kept restarting"). Bound the full fetch: covered docs are
-# scored correctly; uncovered docs simply keep their existing ES triage state and
-# are re-covered on later runs. The every-cycle INCREMENTAL mode (changed/
-# untriaged docs) is NOT capped, so fresh findings are never starved. Tune up
-# only with VM headroom to spare.
+# scored correctly; uncovered docs simply keep their existing ES triage state.
+# The full fetch sorts by triage_at asc (most-stale first) so consecutive full
+# runs ROTATE through the whole index over ~days — mark_triage_seen re-stamps each
+# fetched batch to now, pushing it to the tail of the next run's sort, so no doc is
+# permanently starved (the old _doc sort re-scored the same first 200k forever).
+# The every-cycle INCREMENTAL mode (changed/untriaged docs) is NOT capped, so fresh
+# findings are never starved either. Tune up only with VM headroom to spare.
 TRIAGE_MAX_CANDIDATES="${TRIAGE_MAX_CANDIDATES:-200000}"
+
+# FULL-mode hygiene: drop measured product-class / per-tenant sprawl from the full
+# candidate window so the bounded rotation budget lands on meaningful docs instead
+# of burning ~half on noise. tumblr.com alone is ~1.39M per-user blogs (~50% of the
+# index) — all tagged in_scope+pays but never individually huntable; the unifi-
+# hosting tenants + meraki *-spare-* hosts are shared-tenant/product-class per
+# doctrine. Reversible: excluded docs keep their existing triage state and the
+# uncapped INCREMENTAL mode still re-scores them whenever they change (a 404->200
+# flip is never lost). Blank either var for a one-off unfiltered full pass (e.g.
+# after a scope change). ROOTS = exact root_domain terms; HOSTS = host wildcards;
+# both comma-separated.
+TRIAGE_FULL_EXCLUDE_ROOTS="${TRIAGE_FULL_EXCLUDE_ROOTS:-tumblr.com}"
+TRIAGE_FULL_EXCLUDE_HOSTS="${TRIAGE_FULL_EXCLUDE_HOSTS:-*.unifi-hosting.ui.com,*-spare-*}"
 # Process-tree virtual-memory backstop, inherited by every jq/awk/curl child. With
 # the fetch bounded above no legitimate pass approaches it, so it only ever trips a
 # genuine runaway -- killing that one process instead of OOM-ing the whole VM.
@@ -175,7 +191,10 @@ fi
 exec 8>"$LOCK_FILE"; flock -n 8 || { warn "triage already running"; exit 0; }
 
 # =============================================================================
-# Fetch from ES — only docs scored stale (last_seen newer than triage_at)
+# Fetch candidates from ES. FULL mode rotates the whole index most-stale-first
+# (triage_at asc) under a memory cap + sprawl exclusion; INCREMENTAL mode pulls
+# only docs changed since last run OR never triaged. See TRIAGE_MAX_CANDIDATES /
+# TRIAGE_FULL_EXCLUDE_*.
 # =============================================================================
 fetch_es_data() {
   local out="$1"
@@ -210,21 +229,35 @@ fetch_es_data() {
     }')"
     log "Fetching from ES (INCREMENTAL: changed≥$changed OR untriaged, page=$ES_PAGE_SIZE)"
   else
-    query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" --argjson src "$_src" '{
+    # FULL re-score: exclude measured product-class/per-tenant sprawl (see
+    # TRIAGE_FULL_EXCLUDE_*) and ROTATE coverage by sorting most-stale-first
+    # (triage_at asc, missing last). host (the keyword _id) tiebreaks so the sort
+    # tuple is UNIQUE -> search_after cannot skip/dup even without a PIT (triage_at
+    # is written only by triage itself, under flock — never mutated mid-fetch).
+    # Never-triaged docs sort last (unreached under the cap) and are covered by
+    # INCREMENTAL mode's "OR untriaged" clause.
+    local excl_roots excl_hosts
+    excl_roots="$(printf '%s' "$TRIAGE_FULL_EXCLUDE_ROOTS" | jq -Rc 'split(",")|map(select(length>0))')"
+    excl_hosts="$(printf '%s' "$TRIAGE_FULL_EXCLUDE_HOSTS" | jq -Rc 'split(",")|map(select(length>0))')"
+    query="$(jq -n --argjson size "$ES_PAGE_SIZE" --arg since "$since" --argjson src "$_src" \
+                  --argjson exroots "$excl_roots" --argjson exhosts "$excl_hosts" '{
       size:$size, _source:$src,
-      query:{bool:{filter:[{range:{last_seen:{gte:$since}}},{range:{status_code:{gte:200,lte:599}}}]}},
-      sort:[{"_doc":{order:"asc"}}]
+      query:{bool:{
+        filter:[{range:{last_seen:{gte:$since}}},{range:{status_code:{gte:200,lte:599}}}],
+        must_not: ( ($exroots | map({term:{root_domain:.}})) + ($exhosts | map({wildcard:{host:.}})) )
+      }},
+      sort:[{"triage_at":{order:"asc","missing":"_last"}},{"host":{order:"asc"}}]
     }')"
     echo "$now_epoch" > "$LAST_FULL_FILE"
-    log "Fetching from ES (FULL: lookback=${LOOKBACK_DAYS}d, page=$ES_PAGE_SIZE)"
+    log "Fetching from ES (FULL: lookback=${LOOKBACK_DAYS}d, sort=triage_at-asc rotate, excl_roots=$excl_roots excl_hosts=$excl_hosts, page=$ES_PAGE_SIZE)"
   fi
   echo "$now_epoch" > "$LAST_RUN_FILE"
 
-  local after_id="" prev_after=""
+  local after_sort="" prev_after=""
   while :; do
     local q
-    if [[ -z "$after_id" ]]; then q="$query"
-    else q="$(echo "$query" | jq --arg aid "$after_id" '. + {search_after:[$aid]}')"
+    if [[ -z "$after_sort" ]]; then q="$query"
+    else q="$(echo "$query" | jq --argjson after "$after_sort" '. + {search_after:$after}')"
     fi
     local resp
     resp="$(curl -fsS -m 60 "${ES_AUTH[@]}" -H 'Content-Type: application/json' \
@@ -232,23 +265,29 @@ fetch_es_data() {
     local count; count="$(echo "$resp" | jq '.hits.hits | length')"
     [[ "$count" == "0" ]] && break
     echo "$resp" | jq -c '.hits.hits[]._source' >> "$out"
-    after_id="$(echo "$resp" | jq -r '.hits.hits[-1].sort[0]')"
-    # DO NOT break on a short page. With _doc sort + search_after across shards
-    # on a live index, a page legitimately returns < ES_PAGE_SIZE mid-stream
-    # while more docs remain — the old `count < ES_PAGE_SIZE && break` truncated
-    # the fetch at the first short page (~30k of ~100k), so ~70% of alive hosts
-    # were NEVER scored (no triage_at / scope / true_fresh). Only stop on an
-    # empty page (count==0 above). Guard against a non-advancing cursor.
+    # Capture the WHOLE sort tuple (full = [triage_at, host]; incremental = [_doc])
+    # and feed it back verbatim as search_after, preserving JSON types (date sort =
+    # numeric epoch-millis, host = string). A composite tuple is mandatory in full
+    # mode: triage_at is non-unique (mark_triage_seen stamps a whole batch with one
+    # second-resolution timestamp), so a single-key search_after would skip/dup the
+    # tie group; the unique host tiebreaker makes pagination exact.
+    after_sort="$(echo "$resp" | jq -c '.hits.hits[-1].sort')"
+    # DO NOT break on a short page. With search_after across segments on a live
+    # index, a page legitimately returns < ES_PAGE_SIZE mid-stream while more docs
+    # remain — the old `count < ES_PAGE_SIZE && break` truncated the fetch at the
+    # first short page (~30k of ~100k), so ~70% of alive hosts were NEVER scored
+    # (no triage_at / scope / true_fresh). Only stop on an empty page (count==0
+    # above). Guard against a non-advancing cursor.
     # Memory guard: bound the FULL candidate set (see TRIAGE_MAX_CANDIDATES).
     if [[ "$mode" == "full" ]]; then
       _fetched="$(wc -l < "$out" 2>/dev/null | tr -d ' ')"
       if [[ "${_fetched:-0}" -ge "${TRIAGE_MAX_CANDIDATES:-200000}" ]]; then
-        warn "FULL fetch hit TRIAGE_MAX_CANDIDATES=${TRIAGE_MAX_CANDIDATES} ($_fetched docs); truncating full re-score to protect VM memory (uncovered docs keep prior triage state)"
+        warn "FULL fetch hit TRIAGE_MAX_CANDIDATES=${TRIAGE_MAX_CANDIDATES} ($_fetched docs); truncating full re-score to protect VM memory (uncovered docs keep prior triage state; triage_at-asc sort rotates them in on later runs)"
         break
       fi
     fi
-    [[ -z "$after_id" || "$after_id" == "$prev_after" ]] && break
-    prev_after="$after_id"
+    [[ -z "$after_sort" || "$after_sort" == "null" || "$after_sort" == "$prev_after" ]] && break
+    prev_after="$after_sort"
   done
   log "Fetched $(wc -l < "$out") records"
 }
