@@ -374,6 +374,25 @@ auto_cleanup() {
     done < <(find "$failed_dir" -maxdepth 1 -type f -mtime +14 -print0 2>/dev/null)
     [[ "$pruned_failed" -gt 0 ]] && log "auto_cleanup: pruned $pruned_failed stale failed spool entries (>14d)"
   fi
+  # Sweep orphaned mktemp buffers leaked into /tmp. triage.sh (+ siblings) buffer
+  # multi-GB raw JSON in mktemp files freed by an EXIT trap; in this env triage is
+  # SIGKILLed routinely (jq OOM + the WSL interop relay reaping the process tree on
+  # the scoring CPU spike), and EXIT traps never run on SIGKILL -- so the buffers leak
+  # in /tmp permanently and pile up (~36G observed 2026-06-23). Self-heal here since no
+  # trap can catch SIGKILL. Safe by construction: only /tmp/tmp.* (mktemp's default
+  # prefix), only owned by the pipeline's own users, only >6h old (far beyond any live
+  # run), and only when no process still holds the file open (fuser). reconrun-owned
+  # files need reconrun to unlink them (sticky /tmp), hence the passwordless sudo -n -u.
+  local _tsweep _tsu _tswept=0 _trunas
+  for _tsu in "$(id -un)" reconrun; do
+    _trunas=(); [[ "$_tsu" != "$(id -un)" ]] && _trunas=(sudo -n -u "$_tsu")
+    while IFS= read -r -d '' _tsweep; do
+      fuser -s "$_tsweep" 2>/dev/null && continue
+      "${_trunas[@]}" rm -rf -- "$_tsweep" 2>/dev/null && _tswept=$(( _tswept + 1 )) || true
+    done < <("${_trunas[@]}" find /tmp -maxdepth 1 -name 'tmp.*' -user "$_tsu" -mmin +"${TMP_SWEEP_AGE_MIN:-360}" -print0 2>/dev/null)
+  done
+  [[ "$_tswept" -gt 0 ]] && log "auto_cleanup: swept $_tswept orphaned /tmp/tmp.* mktemp leaks (>6h, not in use)"
+
   # Rebuild alive_hosts.txt daily — removes offline hosts never seen in ES for 30+ days.
   # Runs async inside cleanup so it never blocks validate. Uses ES scroll to handle >10k results.
   local _prune_marker="$STATE_DIR/.alive_hosts_pruned"
