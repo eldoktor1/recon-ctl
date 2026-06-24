@@ -66,6 +66,22 @@ P2_THRESHOLD="${P2_THRESHOLD:-4}"
 # Root cause to watch: an unbounded fetch window feeding the whole index into the slurp.
 TRIAGE_JQ_VMAX_KB="${TRIAGE_JQ_VMAX_KB:-8388608}"   # 8 GiB virtual cap
 capped_jq() { ( ulimit -v "$TRIAGE_JQ_VMAX_KB" 2>/dev/null; exec jq "$@" ); }
+
+# Candidate-set ceiling for the FULL re-score. recon_alive has grown past 2.7M
+# docs and `last_seen>=now-30d` matches nearly all of them, so an unbounded full
+# fetch feeds millions of records into the in-RAM scope_map/cluster slurp passes
+# until jq OOM-kills the WSL VM (drops the operator interactive shell -> the
+# recurring "terminal kept restarting"). Bound the full fetch: covered docs are
+# scored correctly; uncovered docs simply keep their existing ES triage state and
+# are re-covered on later runs. The every-cycle INCREMENTAL mode (changed/
+# untriaged docs) is NOT capped, so fresh findings are never starved. Tune up
+# only with VM headroom to spare.
+TRIAGE_MAX_CANDIDATES="${TRIAGE_MAX_CANDIDATES:-200000}"
+# Process-tree virtual-memory backstop, inherited by every jq/awk/curl child. With
+# the fetch bounded above no legitimate pass approaches it, so it only ever trips a
+# genuine runaway -- killing that one process instead of OOM-ing the whole VM.
+TRIAGE_PROC_VMAX_KB="${TRIAGE_PROC_VMAX_KB:-14680064}"   # 14 GiB
+ulimit -v "$TRIAGE_PROC_VMAX_KB" 2>/dev/null || true
 MIN_SCORE="${MIN_SCORE:-3}"
 
 CLUSTER_MAX="${CLUSTER_MAX:-3}"
@@ -223,6 +239,14 @@ fetch_es_data() {
     # the fetch at the first short page (~30k of ~100k), so ~70% of alive hosts
     # were NEVER scored (no triage_at / scope / true_fresh). Only stop on an
     # empty page (count==0 above). Guard against a non-advancing cursor.
+    # Memory guard: bound the FULL candidate set (see TRIAGE_MAX_CANDIDATES).
+    if [[ "$mode" == "full" ]]; then
+      _fetched="$(wc -l < "$out" 2>/dev/null | tr -d ' ')"
+      if [[ "${_fetched:-0}" -ge "${TRIAGE_MAX_CANDIDATES:-200000}" ]]; then
+        warn "FULL fetch hit TRIAGE_MAX_CANDIDATES=${TRIAGE_MAX_CANDIDATES} ($_fetched docs); truncating full re-score to protect VM memory (uncovered docs keep prior triage state)"
+        break
+      fi
+    fi
     [[ -z "$after_id" || "$after_id" == "$prev_after" ]] && break
     prev_after="$after_id"
   done
