@@ -151,6 +151,7 @@ cmd_maintenance() {
 }
 
 cmd_start() {
+  unlink "$STATE_DIR/daemon_disabled" 2>/dev/null || true   # re-enable keepalive auto-restart
   # Maintenance lock (fail-closed): refuse to start while the pipeline is being
   # rebuilt/upgraded. Clear with `recon-ctl maintenance off` (or rm the file).
   if [[ -f "$STATE_DIR/maintenance" ]]; then
@@ -203,6 +204,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+  mkdir -p "$STATE_DIR" 2>/dev/null || true; touch "$STATE_DIR/daemon_disabled" 2>/dev/null || true   # tell keepalive: deliberate stop, do not auto-restart
   # Bulletproof full stop. NEVER gate the kill logic on the pidfile: if the
   # master died/was-killed without a clean trap, its supervise_loop subshells
   # orphan to PID 1 (showing as `bash recon_daemon.sh`) and keep firing
