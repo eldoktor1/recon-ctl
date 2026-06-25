@@ -16,6 +16,18 @@ LOG_DIR="${LOG_DIR:-$HOME/recon/logs}"
 INTERVAL="${KEEPALIVE_INTERVAL:-60}"
 mkdir -p "$STATE_DIR" "$LOG_DIR" 2>/dev/null || true
 log(){ printf '[%s KEEPALIVE] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_DIR/keepalive.log" 2>&1; }
+
+# HARD KILLSWITCH (2026-06-25 WSL-crash recovery): if this file exists, go fully
+# inert — no daemon revival, no cmd_start (so it never clears daemon_disabled), and
+# BLOCK here so systemd does not churn-restart us. NOTHING else creates/removes this
+# file, so it survives the revival race + reboots. Re-enable: rm the file + restart.
+# CRISIS HOLD (2026-06-25): keepalive HARD-disabled while recovering from the WSL
+# catastrophic failure (Wsl/Service/E_UNEXPECTED crash loop). It does NOTHING — no
+# daemon revival — and blocks here so systemd will not churn-restart it. A state-file
+# gate was unreliable (the failing VM kept dropping state files), so this hold is
+# unconditional. RE-ENABLE: delete these two active lines (revert) + restart the service.
+log "CRISIS HOLD — keepalive inert (no daemon revival). Re-enable: revert this block + restart service."
+exec sleep infinity
 # Crash-loop circuit breaker (2026-06-24): a daemon that keeps dying (e.g. a
 # recurring OOM) was otherwise revived every ${INTERVAL}s FOREVER, turning a single
 # failure into a permanent thrash that degraded the whole VM (the 2026-06-24
