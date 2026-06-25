@@ -1,0 +1,54 @@
+[Unit]
+Description=recon pipeline daemon (systemd-supervised, bounded restarts)
+Documentation=https://github.com/eldoktor1/recon-pipeline
+After=network-online.target
+Wants=network-online.target
+# HARD crash-loop guard: if the daemon dies more than StartLimitBurst times within
+# StartLimitIntervalSec, systemd gives up and leaves it FAILED (alertable) instead of
+# re-spawning forever. This is the fix for the 2026-06-24 catastrophe: the old shell
+# keepalive re-spawned the daemon every ~60s with no limit, and that churn (preflight
+# sudo storms + 57 loops + orphan trees) overloaded the WSL2 VM into Wsl/Service/
+# E_UNEXPECTED. Bounded restarts physically cannot thrash the VM.
+StartLimitIntervalSec=1800
+StartLimitBurst=4
+
+[Service]
+Type=simple
+User=d0k
+Group=d0k
+Environment=HOME=/home/d0k
+Environment=PATH=/home/d0k/.local/bin:/home/d0k/go/bin:/home/d0k/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ES_URL=http://127.0.0.1:9200
+Environment=INDEX_NAME=recon_alive
+Environment=SCANNER_USER=reconrun
+WorkingDirectory=/home/d0k/recon-pipeline
+# Preflight sets the reconrun sudoers rule + clears stale nft (passwordless rule
+# already installed). Non-fatal (leading '-') so a preflight hiccup doesn't wedge
+# startup; the daemon's own vpnguard loop + the per-loop vpn_down gate keep egress
+# fail-closed regardless.
+ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/recon-safe-preflight
+# The daemon's master housekeeping loop stays in the foreground, so systemd tracks
+# it as the main process and supervises it directly (no nohup, no shell keepalive).
+ExecStart=/usr/bin/env bash /home/d0k/recon-pipeline/scripts/recon_daemon.sh
+# Restart ONLY on failure (crash/SIGKILL). A clean stop (systemctl stop -> SIGTERM ->
+# the daemon's trap -> exit 0) and a maintenance-lock exit 0 do NOT restart.
+Restart=on-failure
+RestartSec=120
+TimeoutStopSec=30
+# Clean up the WHOLE cgroup on stop/restart (daemon master + all supervise-loop
+# children) so no orphaned loop trees accumulate across restarts (the other half of
+# the catastrophe). Mixed = SIGTERM to the main proc, then SIGKILL the rest.
+KillMode=mixed
+# Cgroup RESIDENT-memory backstop for the entire daemon tree. A runaway/accumulation
+# triggers a cgroup-local OOM (kills the biggest in-cgroup process) instead of a
+# global VM OOM that takes down the box. Resident-based, so it never breaks Go
+# scanners (unlike a virtual ulimit). 18G leaves headroom under the 24GiB VM.
+MemoryAccounting=yes
+MemoryMax=18G
+OOMPolicy=continue
+# Deprioritise so the WSL /init relay + Windows interop always preempt the scan burst
+# (the renice the daemon already does internally, made declarative here too).
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

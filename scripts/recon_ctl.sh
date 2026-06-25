@@ -161,6 +161,36 @@ cmd_start() {
     echo "  Clear with: recon-ctl maintenance off"
     return 1
   fi
+  # --- systemd-supervised path (the cure, 2026-06-25) ----------------------------
+  # If recon-daemon.service is installed, delegate to systemd: bounded restarts
+  # (StartLimitBurst) + cgroup MemoryMax + clean cgroup kills. This replaces the
+  # fragile nohup+shell-keepalive launcher whose unbounded re-spawn churn overloaded
+  # the WSL VM into Wsl/Service/E_UNEXPECTED. Falls through to the legacy launcher
+  # only if the unit is not installed (tools/install_recon_daemon_service.sh).
+  if [[ -f /etc/systemd/system/recon-daemon.service ]]; then
+    if systemctl is-active --quiet recon-daemon.service 2>/dev/null; then
+      echo "Daemon already running (systemd: recon-daemon.service)"; return 0
+    fi
+    if [[ "${RECON_SKIP_VPN_CHECK:-0}" != "1" ]]; then
+      STATE_DIR="$STATE_DIR" bash "$SCRIPT_DIR/recon_vpn_check.sh" >/dev/null 2>&1
+      case "$?" in
+        0) echo "VPN OK — Mullvad egress confirmed." ;;
+        1) echo "REFUSING to start: egress is a LEAK (not a Mullvad exit). Reconnect Mullvad."; return 1 ;;
+        *) echo "REFUSING to start: could not CONFIRM Mullvad egress. Override: RECON_SKIP_VPN_CHECK=1 recon-start"; return 1 ;;
+      esac
+    fi
+    [[ -f "$STATE_DIR/multitunnel_on" ]] && echo "multitunnel: ON (daemon reads the flag)"
+    sudo -n systemctl reset-failed recon-daemon.service 2>/dev/null || true
+    if sudo -n systemctl start recon-daemon.service 2>/dev/null; then
+      sleep 1
+      echo "Started (systemd: recon-daemon.service). Watch: journalctl -u recon-daemon -f"
+      return 0
+    fi
+    echo "Could not start via systemd without a password. Run: sudo systemctl start recon-daemon"
+    echo "(or install passwordless control: sudo bash tools/install_recon_daemon_service.sh)"
+    return 1
+  fi
+  # --- legacy nohup launcher (only if the systemd unit is not installed) ----------
   if [[ -s "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "Daemon already running (pid $(cat "$PID_FILE"))"; return
   fi
@@ -206,6 +236,11 @@ cmd_start() {
 
 cmd_stop() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true; touch "$STATE_DIR/daemon_disabled" 2>/dev/null || true   # tell keepalive: deliberate stop, do not auto-restart
+  # Stop the systemd-supervised daemon cleanly first (a clean stop does NOT trigger
+  # Restart=on-failure). The pkill sweep below still runs as belt-and-suspenders.
+  if [[ -f /etc/systemd/system/recon-daemon.service ]]; then
+    sudo -n systemctl stop recon-daemon.service 2>/dev/null || systemctl stop recon-daemon.service 2>/dev/null || true
+  fi
   # Bulletproof full stop. NEVER gate the kill logic on the pidfile: if the
   # master died/was-killed without a clean trap, its supervise_loop subshells
   # orphan to PID 1 (showing as `bash recon_daemon.sh`) and keep firing

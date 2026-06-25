@@ -264,6 +264,18 @@ if ! flock -n 8; then
 fi
 echo $$ >&8
 
+# Multi-tunnel egress: honor the toggle flag regardless of launcher (systemd unit or
+# legacy nohup) — run_scanner reads MULTITUNNEL. (cmd_start used to export this.)
+[[ -f "$STATE_DIR/multitunnel_on" ]] && export MULTITUNNEL=1
+
+# Orphan reaper (2026-06-25): we now hold the single-instance flock, so ANY other
+# recon_daemon.sh process is a stale supervise-loop orphan from a prior instance that
+# was SIGKILLed (WSL reap) WITHOUT running its shutdown trap. Unreaped, these pile up
+# across restarts (each old instance's ~57 loops keep spawning scanners) and explode
+# RAM/CPU until the VM wedges. Reap them before launching our own loops. (recon-daemon.service
+# KillMode=mixed also cleans the cgroup on a clean restart; this covers a SIGKILLed predecessor.)
+{ for _op in $(pgrep -f 'recon_daemon\.sh' 2>/dev/null); do [[ "$_op" == "$$" ]] || kill -KILL "$_op" 2>/dev/null; done; } || true
+
 # ---- Maintenance lock (fail-closed) ----
 # Refuse to run while the pipeline is being rebuilt/upgraded. recon_ctl's cmd_start
 # checks this too; this is the belt-and-suspenders guard for any direct daemon launch.
