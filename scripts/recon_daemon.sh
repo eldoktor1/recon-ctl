@@ -194,10 +194,21 @@ run_scanner() {
     fi
   fi
   local rc
+  # Per-loop memory BACKSTOP (2026-06-24). The recurring WSL crash was ONE uid-996
+  # jq ballooning to ~24GB (the whole 24GiB VM) -> global OOM -> daemon killed ->
+  # keepalive revived it -> re-OOM: a 2-min crash loop. triage self-caps at 14GiB
+  # but run_scanner — the shared launcher for every OTHER reconrun lane — had NO cap,
+  # so a single unbounded jq/ES slurp could eat the whole box. ulimit -v (address
+  # space, inherited by every child) makes a runaway die cleanly at the cap (ENOMEM,
+  # logged under its loop name) instead of OOM-killing the VM. Tuned to keep the
+  # fleet at FULL power: every Go scanner starts fine far below this (verified to
+  # 4GiB) and triage's jq needs <=8GiB, so 12GiB never clips legitimate work — it
+  # only catches the runaway, while leaving ~12GiB VM headroom so it is non-fatal.
+  local _vmax="${SCANNER_VMAX_KB:-12582912}"   # 12 GiB; override per-lane via env if ever needed
   if [[ "$(id -un 2>/dev/null || true)" == "$SCANNER_USER" ]]; then
-    env "${env_args[@]}" "$@"; rc=$?
+    ( ulimit -v "$_vmax" 2>/dev/null || true; env "${env_args[@]}" "$@" ); rc=$?
   else
-    sudo -n -u "$SCANNER_USER" env "${env_args[@]}" "$@"; rc=$?
+    sudo -n -u "$SCANNER_USER" env "${env_args[@]}" bash -c 'ulimit -v "$1" 2>/dev/null || true; shift; exec "$@"' _ "$_vmax" "$@"; rc=$?
   fi
   _egress_release "$_eslot"
   return $rc
@@ -462,7 +473,7 @@ supervise_loop() {
   # it. vpnguard is EXEMPT — it must start guarding egress immediately (fail-closed).
   # See memory project_wsl_netstack_wedge_vpn_latch (the systemd-user-session root cause).
   if [[ "$name" != "vpnguard" ]]; then
-    local _stagger=$(( RANDOM % ${STARTUP_STAGGER:-150} )) _ss=0
+    local _stagger=$(( RANDOM % ${STARTUP_STAGGER:-240} )) _ss=0
     while [[ "$_ss" -lt "$_stagger" && "$SHUTDOWN" -eq 0 ]]; do sleep 3; _ss=$((_ss+3)); done
   fi
 

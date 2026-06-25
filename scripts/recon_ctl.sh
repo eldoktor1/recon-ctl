@@ -152,6 +152,7 @@ cmd_maintenance() {
 
 cmd_start() {
   unlink "$STATE_DIR/daemon_disabled" 2>/dev/null || true   # re-enable keepalive auto-restart
+  rm -f "$STATE_DIR/keepalive_tripped" "$STATE_DIR/keepalive_restarts.log" 2>/dev/null || true   # reset crash-loop breaker
   # Maintenance lock (fail-closed): refuse to start while the pipeline is being
   # rebuilt/upgraded. Clear with `recon-ctl maintenance off` (or rm the file).
   if [[ -f "$STATE_DIR/maintenance" ]]; then
