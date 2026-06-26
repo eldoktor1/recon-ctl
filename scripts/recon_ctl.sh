@@ -2584,6 +2584,9 @@ case "${1:-}" in
     esac
     ;;
   mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
+  targets)      # Under-Hunted Target Board: ranked program-selection menu + auto-onboard.
+                # Pure data (no target traffic) → runs as d0k. default = show the board.
+                shift; bash "$SCRIPT_DIR/recon_targets.sh" "${@:-show}" ;;
   buckets)      # cloud-bucket exposure (S3Scanner). target-facing → reconrun (Mullvad egress);
                 # default = one scan cycle. check/writecheck/results/seed pass through.
                 shift

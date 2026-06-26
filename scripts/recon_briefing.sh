@@ -263,6 +263,16 @@ md="$BRIEF_DIR/tonight_$today.md"
 {
   printf '# 🌙 TONIGHT — %s%s\n\n' "$today" "$mode_banner"
 
+  # --- 🎯 HUNT THESE: the Under-Hunted Target Board — the selection layer at the mouth of the
+  #     funnel. Point your DEPTH at fresh, low-saturation, authed-app programs (be unique, not
+  #     duplicated) instead of grinding saturated giants. Top N are auto-onboarded to enumeration. ---
+  tgt_json="$BRIEF_DIR/targets_latest.json"
+  if [[ -s "$tgt_json" ]]; then
+    printf '## 🎯 HUNT THESE — under-hunted target board (point your depth here)\n'
+    jq -r '.programs[0:5][] | "- **\(.name)** [\(.platform)] — \(if .payout and .payout>0 then "$"+(.payout|tostring) else "pays" end) · authed×\(.n_authed) · fresh \(.fresh_days)d · `\(.key)`"' "$tgt_json" 2>/dev/null
+    printf '  _menu: `recon-targets` · onboard any: `recon-targets onboard <key>`_\n\n'
+  fi
+
   # --- ✅ SUBMIT first: machine-CONFIRMED (a confirm primitive fired) — ready to report ---
   printf '## ✅ Ready to submit (validated, confirm-fired) — %s\n' "$nsub"
   printf '%s' "$subs" | jq -r '.[] | "- **\(.vuln_class)** on `\(.host)` (conf \(.cf)) — \(.reason[0:140])"' 2>/dev/null

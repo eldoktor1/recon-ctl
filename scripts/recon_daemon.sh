@@ -729,6 +729,13 @@ run_research_vulns()   { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIP
 run_research_tooling() { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" tooling     >>"$LOG_FILE" 2>&1 || true; }
 run_research_kb()      { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" kb-enrich   >>"$LOG_FILE" 2>&1 || true; }
 run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIPT" ]] && bash "$RESEARCH_SCRIPT" detect-tune >>"$LOG_FILE" 2>&1 || true; }
+# recon_targets — Under-Hunted Target Board: the selection layer at the mouth of the funnel.
+# Scores every bug-bounty PROGRAM by Under-Hunted EV (freshness + low-saturation dominate, payout
+# capped = anti-dup) → ranked menu (briefings/targets_<date>.md) + auto-onboards the top N into the
+# validator queue. Pure data (no target traffic) → runs as d0k. Killswitch: state/kill/v2_targets.
+TARGETS_SCRIPT="${TARGETS_SCRIPT:-$(script_path recon_targets.sh)}"
+TARGETS_INTERVAL="${TARGETS_INTERVAL:-86400}"        # daily
+run_targets() { v21_killed targets && return 0; [[ -f "$TARGETS_SCRIPT" ]] && bash "$TARGETS_SCRIPT" score >>"$LOG_FILE" 2>&1 || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
 # CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
 # target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
@@ -967,6 +974,7 @@ run_discord_bot() {
   supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
+  supervise_loop "targets"          "TARGETS_INTERVAL"          run_targets          &
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
