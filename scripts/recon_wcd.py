@@ -105,6 +105,20 @@ def probe(host, url):
     base_len = len(base.content or b"")
     base_cached = base_state == "hit"
 
+    # ---- Varnish unauth-PURGE CANDIDATE (detect-only; the PURGE itself is operator-on-demand) ----
+    # X-Varnish header (two ints = HIT) or Via/Server=varnish ⇒ Varnish fronting. An unauth HTTP PURGE
+    # returning 200/204 is a reportable bug on its own, but PURGE is state-changing (not GET/HEAD/OPTIONS)
+    # so the autonomous loop only FLAGS it — `recon-wcd purge <host>` fires the single confirm (operator).
+    bh = {k.lower(): v for k, v in base.headers.items()}
+    if "x-varnish" in bh or "varnish" in (bh.get("via", "") + " " + bh.get("server", "")).lower():
+        ev_hdr = ("X-Varnish: " + bh["x-varnish"]) if "x-varnish" in bh else ("Via: " + bh.get("via", "")).strip()
+        leads.append({
+            "host": host, "url": url, "class": "cache-purge",
+            "kind": "varnish-purge-candidate", "severity": "medium",
+            "evidence": "Varnish cache detected (%s) — test unauth HTTP PURGE (200/204=reportable, 403/405=secure)" % ev_hdr,
+            "probe": "PURGE " + (urlsplit(url).path or "/"), "base_state": base_state,
+        })
+
     # ---- WCD: path-confusion variant of a NON-cached base becomes cacheable + same body ----
     if not base_cached:
         s = urlsplit(url)

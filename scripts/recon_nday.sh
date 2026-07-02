@@ -189,5 +189,58 @@ CEOF
     log "   🏁 LIKELY VULN (lead) · $host · ${cves:-?} · $impact/$conf → worklist"
   fi
 done
+# ---- WordPress-plugin n-day pass (research vulns 2026-07-01): deterministic readme.txt `Stable tag`
+# version checks for the high-install UNAUTH criticals. A confirmed in-range version = strong LEAD (these
+# are RCE/admin-takeover class ⇒ the operator exploits/verifies + dup-checks; we NEVER auto-exploit RCE).
+# Unauth GET only, via the trusted safe_probe (Mullvad + scope+pays + rate-limit enforced there). ----
+WP_ENABLE="${NDAY_WP:-1}"
+WP_HOSTS="${NDAY_WP_HOSTS:-12}"
+if [[ "$WP_ENABLE" == "1" && -f "$SAFE_PROBE" ]]; then
+  # slug|cve|vuln_ceiling(empty=unknown → report presence+version for operator version-reasoning)|note
+  wp_plugins="updraftplus|CVE-2026-10795|1.26.4|unauth admin RCE (3M+ installs, actively exploited); patch 1.26.5
+wpvivid-backuprestore|CVE-2026-1357||unauth arbitrary PHP upload → RCE (900K installs)
+kirki|CVE-2026-8206||unauth password-reset admin takeover (~150K installs)
+user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass"
+  wpq="$(jq -nc --argjson n "$WP_HOSTS" '{size:($n*3),_source:["host","triage_program"],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{match:{tech:"wordpress"}}],
+                 must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}}}')"
+  wpresp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$wpq" 2>/dev/null)"
+  wp_checked=0
+  while IFS=$'\t' read -r wh wprog; do
+    [[ -z "$wh" ]] && continue
+    [[ "$wp_checked" -ge "$WP_HOSTS" ]] && break
+    grep -qxF "wp:$wh" "$SEEN" 2>/dev/null && continue
+    printf 'wp:%s\n' "$wh" >> "$SEEN"; wp_checked=$((wp_checked+1))
+    while IFS='|' read -r slug cve ceiling note; do
+      [[ -z "$slug" ]] && continue
+      purl="https://${wh}/wp-content/plugins/${slug}/readme.txt"
+      pr="$(bash "$SAFE_PROBE" "$purl" GET 2>/dev/null)"
+      [[ -n "$pr" ]] || continue
+      [[ "$(printf '%s' "$pr" | jq -r '.ok // false')" == "true" ]] || continue
+      [[ "$(printf '%s' "$pr" | jq -r '.status // 0')" == "200" ]] || continue
+      ver="$(printf '%s' "$pr" | jq -r '.body_snippet // ""' \
+             | grep -ioE 'stable tag:[[:space:]]*[0-9][0-9a-zA-Z.-]*' | head -1 \
+             | grep -oE '[0-9][0-9a-zA-Z.-]*' | head -1)"
+      [[ -n "$ver" ]] || continue
+      inrange="unknown"
+      if [[ -n "$ceiling" ]]; then
+        if [[ "$(printf '%s\n%s\n' "$ver" "$ceiling" | sort -V | tail -1)" == "$ceiling" ]]; then inrange="yes"; else inrange="no"; fi
+      fi
+      [[ "$inrange" == "no" ]] && { log "   · $wh $slug $ver > $ceiling — patched, skip $cve"; continue; }
+      if [[ "$inrange" == "yes" ]]; then wpconf="0.85"; wprng="CONFIRMED in-range (<= $ceiling)"; else wpconf="0.5"; wprng="present — version-reason vs $cve"; fi
+      ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      jq -nc --arg h "$wh" --arg p "$wprog" --arg cve "$cve" --arg t "$ts" --arg slug "$slug" \
+        --arg ver "$ver" --arg why "WordPress plugin $slug $ver $wprng: $note" --argjson conf "$wpconf" \
+        '{host:$h,program:$p,endpoint:("/wp-content/plugins/"+$slug+"/readme.txt"),cve:$cve,
+          vuln_type:"n-day-wp-plugin",why:$why,
+          test:("Confirm "+$slug+" "+$ver+" is exploitable per "+$cve+" (operator; dup-check first; never auto-exploit RCE)"),
+          impact:"high",confidence:$conf,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+      leads=$((leads+1))
+      log "   🔌 WP-PLUGIN $([[ "$inrange" == "yes" ]] && echo "IN-RANGE" || echo "present") · $wh · $slug $ver · $cve → worklist"
+    done <<< "$wp_plugins"
+  done < <(printf '%s' "$wpresp" | jq -r '.hits.hits[]?._source | [.host,(.triage_program//"")] | @tsv' 2>/dev/null)
+  log "🔌 WP-plugin pass · $wp_checked host(s) checked"
+fi
+
 tail -n 8000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
 log "🏁 n-day done · 🏁 $leads likely-vulnerable candidate(s) → worklist"

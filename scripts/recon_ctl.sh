@@ -2470,7 +2470,7 @@ usage() {
   printf "  ${G}recon-mood${R} <mood> [--top N]    Hunt-by-mood worklist: xss/sqli/api/wordpress/php/jira/… (recon-mood --list)\n"
   printf "  ${G}recon-buckets${R} [scan|check <b> [prov]|writecheck <b> [region]|results]  Cloud-bucket exposure (S3Scanner; provenance-seeded, read-only)\n"
   printf "  ${G}recon-graphql${R} [scan|check <url>|results]  GraphQL schema→worklist (read-only introspection; sensitive ops + IDOR/injectable args)\n"
-  printf "  ${G}recon-wcd${R} [scan|confirm <host>|results]   Web-cache deception/poisoning LEADs (detect-only, cache-busted — never poisons real cache)\n"
+  printf "  ${G}recon-wcd${R} [scan|confirm <host>|purge <host>|results]   Web-cache deception/poisoning LEADs (detect-only) + Varnish unauth-PURGE confirm\n"
   printf "  ${G}recon-blindxss${R} [status|test <host>|collector|correlate|plant]  Blind/stored-XSS lane (persistent interactsh + XSS Hunter; fires days later → gated #review)\n"
   printf "  ${G}recon-research${R} <tooling|vulns|kb-enrich|detect-tune|all>  Claude research routine → digest + KB (auto-commit; keeps the system updated)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"

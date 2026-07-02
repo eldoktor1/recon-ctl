@@ -66,6 +66,11 @@ SENSITIVE_TYPE = re.compile(
     r"(user|account|customer|member|payment|card|credit|ssn|token|secret|apikey|api_key|"
     r"credential|password|admin|order|invoice|billing|address|email|phone|profile|setting|"
     r"session|auth|kyc|identity|bank|wallet|tax|salary|ssn|passport)", re.I)
+# sign-in mutations where ORM type coercion (`password: null` / `password: [..]`) can return a valid
+# session token — disclosed pattern Apr–Jun 2026 (leniency in the ORM, not GraphQL). Only a LEAD:
+# the human tests it with an owned account. See docs/knowledge/class-graphql.md.
+AUTH_MUTATION = re.compile(r"(log[_-]?in|sign[_-]?in|authenticate|create[_-]?session|"
+                           r"issue[_-]?token|get[_-]?token|session)", re.I)
 
 
 def _gql(url, query, headers=None):
@@ -135,6 +140,11 @@ def rank_schema(schema):
             score += 2; reasons.append("object-ref arg (IDOR): " + ",".join(idor))
         if inj:
             score += 2; reasons.append("injectable arg: " + ",".join(inj))
+        if op_type == "mutation" and AUTH_MUTATION.search(name) \
+                and any((a or "").lower() in ("password", "passwd", "pass") for a in args):
+            score += 3
+            reasons.append("auth mutation w/ password arg — TEST password:null + array-coercion "
+                           "(ORM type-coercion auth bypass; owned account only)")
         if ret and SENSITIVE_TYPE.search(ret):
             score += 2; reasons.append("returns sensitive type " + ret)
         return {

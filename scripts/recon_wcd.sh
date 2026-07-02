@@ -11,7 +11,7 @@
 # Input: in-scope + paying hosts that sit behind a CDN/cache (no cache ⇒ no WCD ⇒ skip).
 # Confirm on-demand: `recon-wcd confirm <host>` → WCVS deception test (throttled, operator).
 #
-# USAGE: recon_wcd.sh [scan] | confirm <host> [url] | results [N]
+# USAGE: recon_wcd.sh [scan] | confirm <host> [url] | purge <host> [path] | results [N]
 # KB: docs/knowledge/class-cache-deception.md
 # =============================================================================
 set -uo pipefail
@@ -111,7 +111,9 @@ cmd_scan() {
     jq -c --arg ts "$now" '. + {ts:$ts}' <<<"$lead" >> "$LEADS"
     local h cls ev; h="$(jq -r .host <<<"$lead")"; cls="$(jq -r .class <<<"$lead")"; ev="$(jq -r .evidence <<<"$lead")"
     es_stamp "$h" "$cls"
-    note_host "$h" "wcd: $cls LEAD — $ev (operator: owned-account impact PoC; recon-wcd confirm $h)"
+    local action="owned-account impact PoC" ccmd="recon-wcd confirm $h"
+    [[ "$cls" == "cache-purge" ]] && { action="unauth PURGE confirm"; ccmd="recon-wcd purge $h"; }
+    note_host "$h" "wcd: $cls LEAD — $ev (operator: $action; $ccmd)"
     log "LEAD $cls: $h"
   done < "$out"
   write_briefing
@@ -125,7 +127,7 @@ write_briefing() {
              | sort_by(if .severity=="high" then 2 else 1 end) | reverse' 2>/dev/null || echo '[]')"
   { printf '# ☁️ Web-cache deception/poisoning LEADs — %s\n\n' "$today"
     printf '_Detect-only (cache-busted, never poisons real cache). Impact PoC = owned account, operator._\n\n'
-    printf '%s' "$recent" | jq -r '.[] | "- **[\(.severity)] \(.kind)** `\(.host)` \(.url)\n  - \(.evidence)\n  - probe: `\(.probe)` · confirm: `recon-wcd confirm \(.host)`"' 2>/dev/null
+    printf '%s' "$recent" | jq -r '.[] | "- **[\(.severity)] \(.kind)** `\(.host)` \(.url)\n  - \(.evidence)\n  - probe: `\(.probe)` · confirm: `\(if .class=="cache-purge" then "recon-wcd purge" else "recon-wcd confirm" end) \(.host)`"' 2>/dev/null
   } > "$md" 2>/dev/null
 }
 
@@ -138,6 +140,37 @@ cmd_confirm() {
   "$WCVS_BIN" -u "$url" -ot deception -rr 0.5 -gr -gp "$WCD_DIR/wcvs_$(printf '%s' "$host" | tr '/:.' '___').json" 2>&1 | tail -30
 }
 
+# on-demand Varnish unauth PURGE confirm (operator; ONE state-changing PURGE, scope+pays-gated, Mullvad).
+# PURGE only EVICTS a cache entry (re-fetched from origin next request) = non-destructive + minimal per
+# the active-PoC doctrine. 200/204 = CONFIRMED reportable primitive → mint → verify gate → #review.
+cmd_purge() {
+  vpn_gate
+  local host="${1:?usage: purge <host> [path]}" path="${2:-/}"
+  [[ "$path" == /* ]] || path="/$path"
+  # authoritative per-asset scope+pays gate — never fire an active method at a non-paying/OOS host
+  if ! printf '%s\n' "$host" | bash "$SCOPE_CHECK" --filter in-scope-paying 2>/dev/null | grep -qxF "$host"; then
+    warn "$host is not in-scope+paying (authoritative gate) — refusing PURGE"; exit 1
+  fi
+  local url="https://${host}${path}" code
+  log "unauth PURGE $url (single shot, no redirect-follow) — operator-overseen"
+  code="$(curl -sS -m20 -o /dev/null -w '%{http_code}' -X PURGE "$url" \
+     -H 'User-Agent: Mozilla/5.0 (compatible; recon-wcd/1.0)' 2>/dev/null)" || code="000"
+  log "PURGE $url -> HTTP $code"
+  case "$code" in
+    200|204)
+      local prog evj; prog="$(bash "$SCOPE_CHECK" "$host" 2>/dev/null | jq -r '.program // "unknown"' 2>/dev/null)"; [[ -n "$prog" ]] || prog="unknown"
+      evj="$(jq -nc --arg u "$url" --arg c "$code" '{probe:"unauth-http-purge",source:"recon-wcd",vuln_class:"cache-purge-unauth",severity:"high",evidence:("unauth PURGE "+$u+" returned HTTP "+$c+" — cache eviction without authentication")}')"
+      db_confirm "$host" "$url" "$prog" "wcd-purge" "cache-purge-unauth" "10" "0.9" "$evj"
+      note_host "$host" "wcd: CONFIRMED unauth Varnish PURGE ($code) on $path — minted → verify gate → #review"
+      log "🔥 CONFIRMED unauth cache PURGE ($code) — minted → verify gate → #review" ;;
+    401|403|405)
+      note_host "$host" "wcd: Varnish PURGE secured (HTTP $code) on $path — FP/by-design"
+      log "secure — PURGE returned $code (auth/method restricted). Noted, not minted." ;;
+    *)
+      log "inconclusive (HTTP $code) — verify Varnish/path; not minted." ;;
+  esac
+}
+
 cmd_results() {
   local n="${1:-15}"
   tail -n 200 "$LEADS" 2>/dev/null | jq -c '.' 2>/dev/null | jq -s "unique_by(.host+.kind) | sort_by(.ts) | reverse | .[0:$n][]" 2>/dev/null \
@@ -147,6 +180,7 @@ cmd_results() {
 case "${1:-scan}" in
   scan|"")     cmd_scan ;;
   confirm)     shift; cmd_confirm "$@" ;;
+  purge)       shift; cmd_purge "$@" ;;
   results|list) shift; cmd_results "$@" ;;
-  *) echo "usage: $0 [scan|confirm <host> [url]|results [N]]" >&2; exit 2 ;;
+  *) echo "usage: $0 [scan|confirm <host> [url]|purge <host> [path]|results [N]]" >&2; exit 2 ;;
 esac
