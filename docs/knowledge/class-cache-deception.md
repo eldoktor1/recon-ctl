@@ -111,3 +111,108 @@ variant becomes CACHED with ~same body (origin ignored the suffix); WCP = unkeye
 lands in cache / poison persists) is OPERATOR + owned account. Daemon 6h loop (killswitch v2_wcd);
 `recon-wcd [scan|confirm <host>|results]`. confirm = Hackmanit WCVS `-ot deception -rr 0.5` (throttled,
 cache-buster cbwcvs), operator-overseen.
+
+
+---
+<!-- applied-proposal: 2026-06-20_vulns_class-cache-deception -->
+### Applied research — vulns (2026-06-20)
+
+## URL Delimiter Cache Attacks (PortSwigger, June 2026)
+
+Source: https://portswigger.net/research/gotta-cache-em-all
+
+**Technique:** URL parser discrepancies between CDN layer and origin server allow non-standard path delimiters to flip cache behavior. These are DISTINCT from the standard WCD path-confusion variant (dynamic base → cacheable suffix) — here the delimiter itself is the wedge.
+
+### Delimiter gadgets by framework
+| Delimiter | Framework | Effect |
+|-----------|-----------|--------|
+| `;` | Spring (Java) | Treated as path parameter separator by origin; CDN caches as static path |
+| `.` | Rails | Treated as format extension by origin |
+| `%00` | OpenLiteSpeed | Null byte strips suffix before routing |
+| `%0a` | Nginx | Newline splits request |
+
+### Attack variants
+- **Cache deception via delimiter:** `GET /account;.css` — CDN caches as static CSS, origin serves dynamic account page.
+- **Cache poisoning via delimiter:** Inject unkeyed input (header/param) into a response cached under the delimiter path.
+
+### Detection approach (add to `recon_wcd.sh`)
+After standard WCD probe pass, run a second "delimiter pass":
+
+
+---
+<!-- applied-proposal: 2026-06-25_vulns_class-cache-deception -->
+### Applied research — vulns (2026-06-25)
+
+## URL Delimiter Confusion Variants (2026 active research)
+
+URL parsing discrepancies between origin and CDN can flip a `Cache-Control: private` / `no-store` response cacheable under a path-confused variant. New delimiter vectors beyond the classic `.php/.js` path-append:
+
+**Delimiters to try (add to `recon_wcd.sh` probe set if missing):**
+- `;<extension>` — semicolon before static ext: `/account/profile;.js`
+- `%3B<extension>` — percent-encoded semicolon: `/account/profile%3B.css`
+- `/<junk>/../<static>` — dotdot normalize: `/account/profile/.js`
+- `//` double-slash prefix variations
+
+**CDN specificity:** Cloudflare and Varnish most surface-rich for normalization discrepancies. Cloudflare Pingora normalizes differently than classic CF cache layer.
+
+**Detection gate (pipeline doctrine — unique cache-buster is the safety primitive):**
+1. Probe `GET /path<variant>?cb=<unique>` — check if response is cacheable (`CF-Cache-Status`, `Age`, `X-Cache`)
+2. Second GET same URL (different session, no cookies) — if `CF-Cache-Status: HIT` while base path returns `DYNAMIC/private` = cacheability flip = LEAD
+3. Impact PoC (authenticated data in cache) = operator owned-account step
+
+**Source:** https://blogs.jsmon.sh/from-cache-poisoning-to-account-takeover-a-modern-web-security-case-study/
+
+
+---
+<!-- applied-proposal: 2026-06-27_vulns_class-cache-deception -->
+### Applied research — vulns (2026-06-27)
+
+## Framework-Specific Path Delimiter Attacks (PortSwigger "Gotta Cache 'Em All", 2026)
+
+Prior WCD relied on appending `.js`/`.css` to dynamic paths. This maps framework-specific path terminators that CDNs don't recognize but origin frameworks strip:
+
+| Framework | Delimiter | Probe |
+|---|---|---|
+| Spring (Java) | `;` (path param) | `/account;.js` |
+| Ruby on Rails | `.` (format extension) | `/account.css` |
+| OpenLiteSpeed | `%00` (null byte) | `/account%00.js` |
+| Nginx | `%0a` (newline) | `/account%0a.js` |
+
+CDN sees a static extension → caches. Origin strips the delimiter → serves the dynamic authenticated response. Cache stores it under an attacker-accessible key.
+
+**Affected CDNs:** Cloudflare, CloudFront, Google Cloud CDN, Akamai, Fastly (all confirmed by PortSwigger research).
+
+**Cloudflare Cache Deception Armor bypass:** `.avif` and other non-standard extensions bypassed Armor at time of research.
+
+**Normalization WCP angle:** `%3F`/`%2F` combined with dot-segment traversal (`../`) allows poisoning path A while CDN caches it under path B.
+
+**Add to `recon_wcd.sh` probe list:** `;.js`, `%00.js`, `.css`, `%0a.js` (in addition to existing `.js` suffix probes).
+
+Source: https://portswigger.net/research/gotta-cache-em-all
+
+
+---
+<!-- applied-proposal: 2026-06-30_detect-tune_class-cache-deception -->
+### Applied research — detect-tune (2026-06-30)
+
+## CDN Identification Oracle (add before §Probing)
+
+Identify CDN before running WCD probes. Skip if CDN never caches dynamic routes for that response pattern.
+
+| CDN | Identifying Header | Cache-Hit Value | Skip Signal |
+|-----|-------------------|-----------------|-------------|
+| Cloudflare | `CF-Cache-Status` | `HIT` | `DYNAMIC` on suffix path = skip |
+| Akamai | `Server-Timing: cdn-cache; desc=HIT` | `desc=HIT` | `desc=MISS` consistently = likely not caching |
+| Fastly | `X-Fastly-Cache` | `HIT` | absent = not Fastly |
+| CloudFront | `X-Amz-Cf-Id` | `X-Cache: Hit from cloudfront` | `X-Cache: Miss` = not cached |
+| Varnish | `X-Varnish` (two integers) | two integers | single integer = miss |
+
+**FP suppression:** `CF-Cache-Status: DYNAMIC` or `Cache-Control: no-store` on the suffix-appended path = correctly NOT cached = secure FP, skip. Only the cacheability flip (dynamic base → cacheable suffix variant) is a real candidate.
+
+**Cache-buster rule (safety primitive):** append `?cb=<uuid>` to every WCD probe so tests run under YOUR cache key, never poisoning the shared cache. Two requests with the same buster: if second returns cache HIT = confirmed cached under your key = WCD candidate.
+
+## Varnish-specific (see also tech-varnish.md)
+
+Varnish-fronted hosts expose a secondary bug class: unauthenticated PURGE. Add as `recon-wcd confirm` step for Varnish-identified hosts:
+```bash
+curl -X PURGE https://<host>/<path> -sv | grep "< HTTP"

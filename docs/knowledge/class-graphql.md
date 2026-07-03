@@ -223,3 +223,212 @@ early-bails if the first 12 probes yield no suggestions (engine has suggestions 
 auth-bypass confirmation is human (2 owned accounts). Sends NO mutations/auth/data-queries. Daemon 3h
 loop (killswitch v2_graphql); `recon-graphql [scan|check <url>|results]`. graphw00f can enrich
 fingerprinting on-demand if cloned, not required.
+
+
+---
+<!-- applied-proposal: 2026-06-20_tooling_class-graphql -->
+### Applied research — tooling (2026-06-20)
+
+## Hadrian — systematic BOLA/BFLA role-matrix testing (human-in-the-loop)
+
+When our native schema recovery + `idor_candidates` ranking surfaces a GraphQL IDOR lead and 2 owned accounts are available, **Hadrian** (https://github.com/praetorian-inc/hadrian) can run the full role-pair BOLA matrix instead of hand-crafting curl chains.
+
+**Setup:**
+1. Define a YAML role config: role A (account 1 JWT), role B (account 2 JWT), object IDs owned by each.
+2. Run against **staging** (never live prod — it sends mutations).
+3. Hadrian's 13 GraphQL templates probe cross-role read/write/delete on every object-ref operation in the schema.
+
+**Doctrine constraints:**
+- NEVER autonomous: requires auth config + sends mutations = human-in-the-loop only
+- Staging preferred; if live: confirm in-scope+pays, only own-account object IDs, confirm-then-stop
+- Output is a cross-role violation matrix → operator confirms → report
+
+**When to use:** schema recovered via `recon_graphql.sh` (introspection or clairvoyance-style field recovery) → sensitive object-ref mutation identified in `graphql_candidates_<date>.md` → 2 accounts available → operator runs Hadrian on staging.
+
+**Not for autonomous pipeline.** Add to the 2IC's GraphQL IDOR SOP as the structured proof step.
+
+
+---
+<!-- applied-proposal: 2026-06-21_kb-enrich_class-graphql -->
+### Applied research — kb-enrich (2026-06-21)
+
+## GraphQL over WebSocket — hidden attack surface (added 2026-06-21)
+
+### Why this matters
+The graphql-ws transport (`wss://host/graphql-ws`, `wss://host/subscriptions`) is a SEPARATE
+code-path from the HTTP `/graphql` endpoint. Authz middleware that protects the HTTP path may
+not cover the WS upgrade handler. Keep-alive messages (`{"type":"ka"}`) signal a live WS connection
+that may expose internal operations NOT visible in the standard HTTP introspection schema.
+
+### Vulnerability 1 — Token-only-on-connect (subscription hijacking)
+The graphql-ws protocol validates credentials once at `connection_init`. After that, the session
+is live until the socket closes. Disclosed on Shopify: a user whose role was removed mid-session
+retained the WS subscription and continued executing GraphQL operations until the connection dropped.
+
+**Test (operator — authed):** log in as low-priv A, capture the WS `connection_init` payload,
+downgrade the role server-side (via A's own admin if you have it, or wait for a session boundary),
+then attempt a subscription/query that should now be unauthorized. If data flows = session not
+revalidated.
+
+**Fingerprint:** look for `{"type":"connection_init"}` / `{"type":"ka"}` in browser DevTools →
+Network → WS frames. Protocol header: `Sec-WebSocket-Protocol: graphql-ws` or `graphql-transport-ws`.
+
+### Vulnerability 2 — IDOR via hidden WS operations
+Client-side JS often contains graphql-ws operation calls that never appear in introspection (they
+skip the HTTP schema). Reverse-engineer `main.js` / `chunk.*.js` for `createClient`, `subscribe`,
+or `execute` calls — these reveal operation names + variable shapes.
+
+**Discovery (autonomous, safe):** JS-intel (`recon_jsintel.sh`) already collects `main.js`; grep
+for `graphql-ws`, `createClient`, `subscribe(`, `SubscriptionClient`, WebSocket URLs containing
+`/graphql`. Operation names found this way → add to the graphql_candidates worklist.
+
+### Vulnerability 3 — IDOR→SQLi escalation chain (high-entropy ID bypass)
+High-entropy IDs (UUIDs, 25-digit numeric strings) are NOT safe from IDOR if the endpoint also
+has injection. April 2026 real chain (fintech):
+1. GraphQL WS endpoint handles `readDocument(id:)` — IDOR exists but ID has 25-digit entropy.
+2. Fuzz the `id` param with `'`, `||'|'||` (PostgreSQL concat), `"`, `1 AND 1=1` etc.
+3. Verbose PostgreSQL error fires → error-based SQLi → column names / table names extracted.
+4. Craft `id: "1||'|'||(SELECT id FROM documents LIMIT 1)||'|'||1"` → leaks real high-entropy IDs.
+5. Feed leaked IDs back into the original IDOR endpoint → confirmed cross-user document read.
+
+**Lesson:** "UUIDv4 / high-entropy ID = needs-harvest" is still valid for RANKING, but do NOT
+write off an IDOR candidate purely because the ID has high entropy — check every adjacent op on
+the same resource for injection. If SQLi fires on any path touching that object, the IDOR is
+escalatable.
+
+**Payload starters (error-based PostgreSQL via WS):**
+
+
+---
+<!-- applied-proposal: 2026-06-21_vulns_class-graphql -->
+### Applied research — vulns (2026-06-21)
+
+## GraphQL WebSocket (graphql-ws) — SQLi + IDOR Chain Technique
+
+**Source:** [Medium — DarkyOS, April 2026](https://medium.com/@DarkyOS/sql-injection-in-graphql-websocket-escalated-to-pii-document-leak-09ba7ad2800a)
+
+### Why graphql-ws is under-hunted
+Most scanners and hunters probe `/graphql` only. WebSocket-upgrade endpoints (`/graphql-ws`, `/graphql/subscriptions`, `/subscriptions`) carrying GraphQL-over-WebSocket (the `graphql-ws` protocol) are routinely missed. Operations on these endpoints often lack the same authorization checks as their HTTP counterparts, and error handling is frequently more verbose.
+
+### Attack chain pattern
+1. `/graphql-ws` appears to send only keepalive frames (`{"type":"ka"}`) — looks dormant.
+2. Client JS contains hidden operations (e.g. `readDocument`, `lockDocument`) that accept an `id` param.
+3. Fuzzing the `id` field with alphanumeric/special chars triggers **verbose database errors** exposing schema details (column names, table names, DB engine).
+4. Error-based SQLi (PostgreSQL `||` string concat / type-coercion) extracts actual user records including high-entropy IDs that protect IDOR.
+5. Extracted IDs fed to the auth-blind WS operation → full IDOR / document access.
+
+**Key insight:** Neither bug alone is exploitable (IDOR gated by high-entropy IDs; SQLi without IDOR is limited) — but chained, they yield a critical. The SQLi "unlocks" the IDOR.
+
+### Detection / hunting steps
+- Crawl/jsintel for: `/graphql-ws`, `/graphql/subscriptions`, `/subscriptions`, `/ws/graphql`
+- Attempt WebSocket upgrade (`Connection: Upgrade`, `Upgrade: websocket`, `Sec-WebSocket-Protocol: graphql-ws`)
+- Extract operations from client JS bundles (look for `graphql-ws` npm package usage, subscription queries)
+- Fuzz `id`/`documentId`/`nodeId` params with: `'`, `"`, `1'`, `1 OR 1=1`, alphanumeric strings, special chars
+- Watch response bodies for: PostgreSQL/MySQL/MSSQL error strings, column names, schema identifiers
+- If SQLi fires → LEAD for human 2-account chain (never enumerate third-party IDs)
+
+### FP notes
+- A WS endpoint that only accepts valid UUID/numeric IDs and returns generic 400s = no SQLi surface
+- Authorization checks at the WS layer (JWT validated per-message) = IDOR unlikely — still check SQLi
+- Verbose errors in dev/staging but sanitized in prod = LEAD, not confirmed
+
+
+---
+<!-- applied-proposal: 2026-06-23_tooling_class-graphql -->
+### Applied research — tooling (2026-06-23)
+
+## Operator-side tooling addition (2026-06-23)
+
+### InQL v6 (Burp Suite extension, Doyensec)
+https://github.com/doyensec/inql
+
+When `recon-graphql` produces a `graphql_candidates_<date>.md` briefing, load the harvested
+introspection JSON into InQL in Burp. It auto-generates all possible queries/mutations from
+the schema and organizes them for rapid iteration — cuts manual curl iteration substantially.
+
+**Not a pipeline tool** — operator-side only for human-test evenings. Install in operator Burp;
+load the introspection JSON from `recon_graphql.sh` output (the `.json` file it writes to
+`~/recon/graphql/`).
+
+
+---
+<!-- applied-proposal: 2026-06-24_kb-enrich_class-graphql -->
+### Applied research — kb-enrich (2026-06-24)
+
+## New techniques (2024–2025)
+
+### Introspection bypass via fragment obfuscation (CVE-2024-37155, 2024)
+Beyond the existing whitespace / `\n` bypass (already in this doc), query fragments evade regex-based
+block filters that look for `__schema` at the top-level query:
+
+```graphql
+query { ...schemaFrag }
+fragment schemaFrag on Query { __schema { types { name fields { name } } } }
+
+
+---
+<!-- applied-proposal: 2026-06-25_vulns_class-graphql -->
+### Applied research — vulns (2026-06-25)
+
+## IDOR via Object-Type Argument Confusion ($12,500 payout, 2026)
+
+Pattern validated in fresh disclosed report. The crowd stops at "introspection enabled" (Info dup). The edge:
+
+1. Fetch introspection schema (unauth GET to `/graphql` or `/api/graphql`)
+2. Identify mutations/queries with **ID-typed scalar args** on sensitive object types: `userId: ID!`, `accountId: ID!`, `orderId: ID!`, `documentId: ID!`
+3. Reason: does the auth check gate on the session's identity or on the inner object's ownership? If the latter is absent → cross-account object access via ID swap
+4. Surface as 2-account IDOR LEAD in briefing; confirm = human 2-owned-account swap (never guessed/enumerated third-party IDs)
+
+**ES/jsintel signals:** `/graphql` or `/api/graphql` in endpoints.jsonl with POST method; `Content-Type: application/json` + `{"data":` in response fingerprint.
+
+**Source:** https://infosecwriteups.com/graphql-security-how-i-found-and-exploited-critical-idor-and-authorization-bypass-in-a-42ab78e13642
+
+
+---
+<!-- applied-proposal: 2026-06-27_vulns_class-graphql -->
+### Applied research — vulns (2026-06-27)
+
+## GraphQL WebSocket Endpoint Blind Spot (added 2026-06-27)
+
+Standard HTTP introspection probes and scanners target `/graphql` HTTP endpoints only. WebSocket-based GraphQL endpoints (`/graphql-ws`, `/subscriptions`, `/ws`) are hidden from them, carry the same resolver logic, and often lack WAF coverage. Find them via:
+- JS-intel: search endpoints.jsonl for `graphql-ws`, `/subscriptions`, `/ws`
+- `recon-kr` kiterunner: kitebuilder wordlist includes WS-adjacent paths
+
+**Independent probing required:** Test object-ref arg ownership and type-mismatch inputs separately from the HTTP schema.
+
+**Two-stage IDOR→SQLi chain (April 2026, $2k Critical):** An IDOR with high-entropy IDs (not bruteforceable alone) became critical when the same endpoint had a type-mismatch SQLi. Sending alphanumeric where numeric expected triggered verbose PostgreSQL errors leaking table/column names → error-based extraction of valid IDs → fed back into IDOR to access other orgs' documents. The injection point was the *ID type constraint*, not a string argument. Source: https://medium.com/@DarkyOS/sql-injection-in-graphql-websocket-escalated-to-pii-document-leak-09ba7ad2800a
+
+## GraphQL Batch Query Abuse for IDOR Rate-Limit Bypass (added 2026-06-27)
+
+GraphQL batching (POST body as a JSON array: `[{"query":"..."},{"query":"..."}]`) is supported by Apollo, Hasura, and most frameworks by default. Per-request rate limits don't apply per operation in a batch — use this when object-ownership IDOR exists but per-request throttling would prevent enumeration. 
+
+Test: POST `[{operationName:null, query:"{ sensitiveQuery(id: 1) { ... } }"}, ...]` — if the server returns an array of results, batching is enabled.
+
+Paid $12,500 CVSS 9.1 on a fintech GraphQL API (April 2026). Source: https://infosecwriteups.com/graphql-security-how-i-found-and-exploited-critical-idor-and-authorization-bypass-in-a-42ab78e13642
+
+
+---
+<!-- applied-proposal: 2026-07-01_tooling_class-graphql -->
+### Applied research — tooling (2026-07-01)
+
+## Tool additions (2026-07-01)
+
+### graphql-cop — automated multi-check CLI
+- GitHub: https://github.com/dolevf/graphql-cop | v1.16 Nov 2025
+- Runs 12 checks in one call: introspection, **field suggestions** (clairvoyance-style near-miss probes), alias overloading, batch queries, GET-based queries, directive overloading, CSRF vectors
+- Add to `recon_graphql.sh` after the introspection gate:
+  ```
+  graphql-cop -t https://<host>/graphql -o json
+  ```
+- Field suggestions check automates the manual "guaranteed-invalid 1-char near-miss probe" step; keep Clairvoyance for deep schema reconstruction when introspection is off.
+
+### Clairvoyance — deep schema reconstruction (introspection-off targets)
+- GitHub: https://github.com/nikitastupin/clairvoyance | v2.5.5 Dec 2025
+- Use when introspection is disabled — iterates near-miss probes to reconstruct the full schema from field suggestions
+- JSON schema output suitable for GraphQL Voyager or direct worklist generation
+- If `recon_graphql.sh` hand-rolls the field-suggestion loop, replace that section with clairvoyance
+
+### GraphQLer — operator-triggered deep mode only
+- GitHub: https://github.com/omar2535/GraphQLer | v2.3.8 Mar 2026
+- Dependency-graph fuzzer: chains queries based on schema, surfaces IDOR via object-ref args
+- GATE: `--disable-mutations` required; operator-triggered only (not autonomous daemon). Sends real queries.

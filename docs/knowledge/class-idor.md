@@ -92,3 +92,149 @@ in `host_notes.jsonl` (`espace-client-pprod.pro.engie.fr`).
 - https://www.jechange.fr/energie/electricite/pdl
 - https://portswigger.net/web-security/access-control/idor
 - https://medium.com/@jpablo13/bola-idor-critical-api-authorization-flaw-bug-bounty-detection-3203133a5040
+
+
+---
+<!-- applied-proposal: 2026-06-21_kb-enrich_class-idor -->
+### Applied research — kb-enrich (2026-06-21)
+
+## Authorization bypass techniques — new section (added 2026-06-21)
+
+These patterns are NOT the "where the id hides" surface enumeration already in this doc — they
+are AUTHZ BYPASS TRICKS: ways to get the server to skip the ownership check even after the id
+is found.
+
+### 1. Outdated API version
+`/v2/invoices/123` → 403; `/v1/invoices/123` → 200 with data. Authz enforcement is often added
+on the NEW version and backported inconsistently (or the v1 endpoint was simply forgotten).
+**Test:** when a target has `/v2/` or `/api/v2/` in paths, always replay IDOR candidates against
+`/v1/` and `/v3/` variants. `recon_jsintel.sh` endpoint mining often surfaces old version paths
+that no longer appear in the current UI.
+
+### 2. Array / JSON-type coercion
+Some authz middleware checks `if (param.userId === session.userId)` — a strict equality that fails
+when the param is an array. Sending `{"userId": [victimId]}` instead of `{"userId": victimId}` can
+bypass the comparison: the array passes deserialization, the business logic extracts `[0]`, the
+authz check sees an array (truthy, not equal to a string → guard skips or throws a handled exception
+that defaults to "allowed").
+
+Variants:
+- `{"id": [123]}` instead of `{"id": 123}`
+- `{"id": {"eq": 123}}` (object injection — some ORMs accept filter-shape inputs)
+- `{"id": "123"}` vs `{"id": 123}` — type coercion across string/int can also skip a guard
+
+### 3. Filter-object IDOR (REST + GraphQL)
+APIs that appear self-scoped (`GET /me/orders`) sometimes expose a POST body or URL param that
+overrides the session-derived scope:
+- REST: `POST /orders/search` body `{"filter": {"userId": "victimId"}}` — the resolver uses
+  the filter value directly instead of the session identity.
+- GraphQL: `query { orders(filter: { userId: "victimId" }) { ... } }` — same pattern, common
+  on search/list resolvers.
+- Nested inputs: `{"input": {"account": {"id": victimId}}}` — buried two levels deep.
+
+These are ESPECIALLY common on list/search endpoints because the dev added filtering for
+admin use-cases and forgot that the filter runs pre-auth.
+
+### 4. Content-type switching
+Changing `Content-Type: application/json` → `application/x-www-form-urlencoded` or
+`application/xml` can route through a different middleware stack. Authz validation added
+only for the JSON path is skipped for the alternate content-type.
+**Quick test:** replay the IDOR probe with `Content-Type: application/x-www-form-urlencoded`
+and body `id=victimId`. Some frameworks auto-parse both forms; the authz guard may only wrap
+the JSON parser.
+
+### 5. High-entropy UUID ≠ safe from IDOR (the escalation trap)
+"UUIDv4 / 25-digit high-entropy ID = needs a leak vector" is correct for RANKING, but do NOT
+write off a UUID-IDOR candidate purely on entropy grounds. The April 2026 chain:
+- A 25-digit document ID was "unguessable" → IDOR deprioritized.
+- Fuzzing the SAME endpoint with SQLi payloads revealed error-based PostgreSQL injection.
+- The injection leaked real document IDs from the DB.
+- Those IDs fed back into the IDOR endpoint confirmed cross-user document access.
+
+**Rule:** when ranking IDOR candidates, pair UUID-type entries with a note "check for injection on
+same resource path." If `recon_xss_sqli_candidates.py` or jsintel surfaces an injectable param on
+the same host + same path prefix, escalate the UUID-IDOR candidate's priority.
+
+### Sources
+- IDOR checklist (2025): https://ahmed-tarek.gitbook.io/security-notes/owsap-top-10-2025/a01-broken-access-control/checklists/idor-checklist
+- UUID IDOR → SQLi chain: https://medium.com/@DarkyOS/sql-injection-in-graphql-websocket-escalated-to-pii-document-leak-09ba7ad2800a (Apr 2026)
+- Nextcloud BOLA/IDOR disclosed: https://hackerone.com/reports/3382343 (Apr 2026)
+
+
+---
+<!-- applied-proposal: 2026-06-24_kb-enrich_class-idor -->
+### Applied research — kb-enrich (2026-06-24)
+
+## New techniques (2024–2025)
+
+### HTTP parameter pollution IDOR bypass
+Duplicate the object-ref parameter with two different values in the same request. Application logic
+processes the FIRST (victim's id) while the authorization check looks at the SECOND (attacker's id),
+resulting in a bypass. Test both query-string (`?userId=VICTIM&userId=ATTACKER`) and JSON body
+(`{"userId":"VICTIM","userId":"ATTACKER"}`). Also test URL-encoded body vs JSON body disagreement.
+
+Source: https://0xgaurang.medium.com/case-study-bypassing-idor-via-parameter-pollution-78f7b3f9f59d
+
+### UI / API authorization divergence
+A systematic gap: the UI correctly blocks a privileged action (e.g. edit another user's metadata) but
+the underlying API endpoint has no server-side authorization check. Pattern from CVE-2024-22278 (Harbor
+container registry): `PUT/POST/DELETE /projects/{id}/metadatas/{meta_name}` allowed a Maintainer role
+to execute ProjectAdmin-only operations because UI gating was the ONLY layer.
+
+**Hunting approach:** find every UI-blocked action → capture the underlying raw API request → replay it
+with a lower-priv session. Any 2xx = authorization delegated to the UI only = IDOR/BAC.
+
+Source: https://unit42.paloaltonetworks.com/bola-vulnerability-impacts-container-registry-harbor/
+
+### WebSocket IDOR
+Object-ref IDs in WebSocket / real-time message payloads are almost never tested. Auth checks on the
+HTTP upgrade path ≠ auth checks inside WS message handlers. Test: swap the `id` / `resource` fields
+in WS frames with another account's known object ID. If the handler processes it without re-checking
+the caller's ownership, it is IDOR. Signal to look for: any WS message payload containing an `id`,
+`roomId`, `channelId`, `userId`, `orderId`, etc.
+
+### Multi-step purchase-flow IDOR
+Purchase → confirmation → receipt flows return an object ID at step N that is consumed at N+1 without
+re-validation. Intercept the confirmation/download step and substitute another account's
+order/invoice ID. High-severity because it typically exposes financial PII. Also applies to:
+subscription renewals, invoice downloads, shipping labels, return authorizations.
+
+### JWT `sub` claim IDOR
+Unsubscribe, email-preference, and "my account" endpoints sometimes decode the token's `sub` claim to
+derive the target user but do NOT re-check that the claim matches the caller. If the `sub` is a user
+ID that the server uses for the action (not just auth), replacing it with another account's ID = IDOR.
+Note: this requires a JWT with a manipulable claim (unsigned/algorithm-confusion) OR an endpoint that
+takes the user-id separately from auth (e.g. a link-token that embeds the ID but is not signature-bound
+to a caller session).
+
+Source: https://ajakcybersecurity.medium.com/exploiting-jwt-token-leads-to-idor-ec48cb8888bb
+
+### Tooling addition
+- **BurpAPISecuritySuite** (https://github.com/Teycir/BurpAPISecuritySuite) — 15 attack types including
+  BOLA/IDOR detection, 108+ payloads. Complements Autorize for API-focused surfaces.
+
+
+---
+<!-- applied-proposal: 2026-06-30_detect-tune_class-idor -->
+### Applied research — detect-tune (2026-06-30)
+
+## IDOR Confirm Primitive — Multi-Session Body Hash
+
+Single-session automated scanners produce near-100% FP on IDOR (confirmed by BacAlarm, Dec 2025, arxiv:2512.19997). The authoritative confirm primitive requires two sessions:
+
+1. Make the same request under **session A** (owner of the object) and **session B** (different account, no ownership)
+2. Hash response bodies from both sessions
+3. If hashes match AND body contains session A's private data = **IDOR CONFIRMED**
+4. If status is `200` for both but bodies differ (session B gets empty/generic) = access control working = FP
+
+**Status-code oracle (necessary but not sufficient):**
+- `200` owner + `403` non-owner = correct access control
+- `200` owner + `200` non-owner = IDOR candidate → proceed to body comparison
+
+**Timing differential signal (supplementary):** Authorized requests are often faster (cached/indexed at auth layer). Absence of timing difference between sessions = potentially missing auth check. Not a standalone signal but corroborates body-match findings.
+
+**FP suppression in ai-hunter output:** when the hunter flags an IDOR hypothesis, the 2-account confirm step must verify response body equality cross-session, NOT just HTTP 200 status. A 200 with empty body or generic schema = FP.
+
+**Never auto-confirm IDOR:** needs 2 owned accounts + operator-executed swap. The hunter provides the ranked hypothesis + the object reference + the swap instructions; the human runs the test.
+
+Source: https://arxiv.org/pdf/2512.19997, https://apiiro.com/blog/why-dast-tools-miss-real-idor-vulnerabilities-and-how-ai-helps/

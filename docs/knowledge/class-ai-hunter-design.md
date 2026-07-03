@@ -76,3 +76,21 @@ A SCOPED autonomous hunter is more defensible than ad-hoc poking — every actio
 - https://cisoseries.com/automating-offensive-security-with-xbow/ + https://www.zeitgeist.bot/company/xbow (XBOW: LLM-explores/code-confirms, model alloying, zero-FP via execution validation)
 - https://arxiv.org/html/2508.20816v1 (Multi-Agent Pentesting AI for the Web: main-agent + sub-agent)
 - https://www.bankinfosecurity.com/bug-hunting-llms-expert-tool-seeks-more-true-flaws-a-30696 (guided questioning → 96% FP reduction; context+focus)
+
+
+---
+<!-- applied-proposal: 2026-07-01_tooling_class-ai-hunter-design -->
+### Applied research — tooling (2026-07-01)
+
+## Nuclei AI/LLM panel sweep (2026-07-01)
+
+New in nuclei-templates v10.4.3 (May 2026): 20+ AI/ML infrastructure panel detection templates.
+These are high dup-resistance targets — companies deploy AI infra without security review and the crowd isn't scanning for them.
+
+**Target panels now detectable:**
+AgentGPT, AnythingLLM, AstrBot, ClearML, ChromaDB (+ unauthenticated API), Flowise, H2O Wave, KoboldAI, Langflow, llama.cpp, Marqo, OpenHands, SillyTavern, Stable Diffusion WebUI, Weights & Biases, Xinference, Chainlit, ComfyUI, Marimo
+
+**Add to the pipeline:**
+```bash
+nuclei -update-templates  # ensure v10.4.3+
+nuclei -tags panel -l <in-scope-hosts.txt> -o ai_panels_$(date +%Y%m%d).json

@@ -44,3 +44,25 @@ also in the shipped `main.de3a8a6f.chunk.js` (grep=1), app serves unauth (`/`=20
 `prod.ecom-gateway`=NXDOMAIN; `prod.core-gateway`=live AWS APIGW, 403 ForbiddenException no-key (expected).
 Residual real lead = the e-sign `PhoneTransfer id=<opp_id>` flow (authed IDOR, separate). Source: AWS API Gateway
 docs (API keys ≠ auth); host_notes `beta.esign.*`.
+
+
+---
+<!-- applied-proposal: 2026-06-21_tooling_class-clientside-secrets -->
+### Applied research — tooling (2026-06-21)
+
+## Tool note: jsluice (BishopFox) — AST-aware JS endpoint + secret extractor
+
+**Repo:** https://github.com/BishopFox/jsluice  
+**Added:** 2026-06-21  
+
+### What it adds over regex-based extraction
+- Parses JavaScript AST rather than running regex over raw text
+- Extracts URLs/paths embedded in: template literals, nested object keys, computed property names, minified variable chains
+- Outputs structured JSON; designed for pipeline integration (`jsluice urls <file.js>`)
+- Also has a `secrets` subcommand that finds hardcoded secrets — complementary to trufflehog (different detection strategy, not a replacement)
+
+### Integration pattern
+Run as a *second pass* after existing regex extractor in `recon_jsintel.sh`. Deduplicate by URL path template before feeding `endpoints.jsonl`. Expected gain: deeper endpoint yield from complex/minified JS that regex misses.
+
+### Safety
+Static analysis only — reads already-fetched JS files, zero new target traffic.
