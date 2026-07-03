@@ -202,7 +202,7 @@ wpvivid-backuprestore|CVE-2026-1357||unauth arbitrary PHP upload → RCE (900K i
 kirki|CVE-2026-8206||unauth password-reset admin takeover (~150K installs)
 user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass"
   wpq="$(jq -nc --argjson n "$WP_HOSTS" '{size:($n*3),_source:["host","triage_program"],
-    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{match:{tech:"wordpress"}}],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{tech:{value:"wordpress",case_insensitive:true}}}],
                  must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}}}')"
   wpresp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$wpq" 2>/dev/null)"
   wp_checked=0
@@ -240,6 +240,133 @@ user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass"
     done <<< "$wp_plugins"
   done < <(printf '%s' "$wpresp" | jq -r '.hits.hits[]?._source | [.host,(.triage_program//"")] | @tsv' 2>/dev/null)
   log "🔌 WP-plugin pass · $wp_checked host(s) checked"
+fi
+
+# ---- UniFi-OS / NGINX-Rift / PHP-SOAP n-day pass (research vulns 2026-07-01). Deterministic unauth
+# version/endpoint fingerprints for the fresh criticals the WP pass doesn't cover. Same guards as the
+# WP pass: in-scope+paying ES filter, SEEN dedup, unauth GET via the trusted SAFE_PROBE (Mullvad +
+# scope+pays + rate-limit enforced there). Version-reason → LEAD (never auto-exploit; never P0 on a
+# bare version match — the operator confirms + dup-checks). ----
+NDAY_EXTRA="${NDAY_EXTRA:-1}"
+NDAY_EXTRA_HOSTS="${NDAY_EXTRA_HOSTS:-14}"
+_ver_lt() {  # echo yes if $1 < $2 (semver-ish); no if >=; unknown if $1 empty
+  [[ -z "$1" ]] && { echo unknown; return; }
+  if [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" && "$1" != "$2" ]]; then echo yes; else echo no; fi
+}
+_es_hosts() {  # $1=tech term → host<TAB>program<TAB>webserver<TAB>tech-joined for in-scope+paying, un-benched
+  local q; q="$(jq -nc --arg t "$1" --argjson n "$NDAY_EXTRA_HOSTS" '{size:($n*3),
+    _source:["host","triage_program","webserver","tech"],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{tech:{value:$t,case_insensitive:true}}}],
+                 must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}},
+                          {wildcard:{host:"*.unifi-hosting.ui.com"}}]}}}')"
+  es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
+    | jq -r '.hits.hits[]?._source | [.host,(.triage_program//""),(.webserver//""),((.tech//[])|join(" "))] | @tsv' 2>/dev/null
+}
+_es_unifi() {  # UniFi consoles by real console TITLE (no "unifi" tech tag exists); exclude Ubiquiti-owned +
+  # third-party *.unifi-hosting.ui.com shared tenants (hard line). host<TAB>program<TAB>webserver<TAB>tech
+  local q; q="$(jq -nc --argjson n "$NDAY_EXTRA_HOSTS" '{size:($n*3),
+    _source:["host","triage_program","webserver","tech"],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}}],
+      should:[{match_phrase:{title:"UniFi Network"}},{match_phrase:{title:"UniFi OS"}},{match_phrase:{title:"UniFi Dream"}}],
+      minimum_should_match:1,
+      must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}},
+                {wildcard:{host:"*.unifi-hosting.ui.com"}},{wildcard:{host:"*.ui.com"}},{term:{host:"ui.com"}}]}}}')"
+  es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
+    | jq -r '.hits.hits[]?._source | [.host,(.triage_program//""),(.webserver//""),((.tech//[])|join(" "))] | @tsv' 2>/dev/null
+}
+
+if [[ "$NDAY_EXTRA" == "1" ]]; then
+  # --- 1) UniFi OS Triple KEV — CVE-2026-34908/34909/34910 (unauth auth-bypass→traversal→cmd-inj,
+  # actively exploited; fixed UniFi OS Server 5.0.8). Unauth version confirm via /status or /api/self. ---
+  if [[ -f "$SAFE_PROBE" ]]; then
+    uf_checked=0
+    while IFS=$'\t' read -r uh uprog uws utech; do
+      [[ -z "$uh" ]] && continue
+      [[ "$uf_checked" -ge "$NDAY_EXTRA_HOSTS" ]] && break
+      grep -qxF "unifi:$uh" "$SEEN" 2>/dev/null && continue
+      printf 'unifi:%s\n' "$uh" >> "$SEEN"; uf_checked=$((uf_checked+1))
+      ver=""; hit=""
+      for upath in /status /api/self; do
+        pr="$(bash "$SAFE_PROBE" "https://${uh}${upath}" GET 2>/dev/null)"
+        [[ "$(printf '%s' "$pr" | jq -r '.ok // false')" == "true" ]] || continue
+        [[ "$(printf '%s' "$pr" | jq -r '.status // 0')" == "200" ]] || continue
+        body="$(printf '%s' "$pr" | jq -r '.body_snippet // ""')"
+        printf '%s' "$body" | grep -qiE 'unifi|server_version|softwareVersion' || continue
+        ver="$(printf '%s' "$body" | grep -ioE '(server_version|softwareVersion)"?[: ]+"?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        hit="$upath"; break
+      done
+      [[ -n "$hit" ]] || continue
+      if [[ "$(_ver_lt "$ver" "5.0.8")" == "yes" ]]; then ufconf="0.85"; ufrng="CONFIRMED in-range (< 5.0.8)"; else ufconf="0.5"; ufrng="UniFi live${ver:+ v$ver} — operator version-reason vs 5.0.8 (OS Server ver, NOT the Network-App 8.x ver)"; fi
+      ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      jq -nc --arg h "$uh" --arg p "$uprog" --arg t "$ts" --arg path "$hit" --arg ver "${ver:-unknown}" \
+        --arg why "UniFi OS $ufrng — CVE-2026-34908/34909/34910 KEV triple (unauth auth-bypass→path-traversal→OS-cmd-inj; actively exploited, rogue-admin creation; fixed UniFi OS Server 5.0.8)" --argjson conf "$ufconf" \
+        '{host:$h,program:$p,endpoint:$path,cve:"CVE-2026-34908",vuln_type:"n-day-unifi-kev",why:$why,
+          test:("Confirm UniFi OS Server version < 5.0.8 (operator; softwareVersion from "+$path+"). NEVER auto-probe the traversal/cmd-inj chain — that is exploitation. Version="+$ver),
+          impact:"critical",confidence:$conf,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+      leads=$((leads+1))
+      log "   📡 UniFi-OS $([[ "$ufconf" == "0.85" ]] && echo IN-RANGE || echo live) · $uh · ${ver:-?} · CVE-2026-34908 → worklist"
+    done < <(_es_unifi)
+    log "📡 UniFi n-day pass · $uf_checked host(s) checked"
+  fi
+
+  # --- 2) NGINX "Rift" — CVE-2026-42945 (heap overflow in ngx_http_rewrite_module; vuln < 1.30.1).
+  # Version already fingerprinted in ES (Server banner) → pure version-reason, no probe. DoS universal
+  # for the range; RCE config-dependent (unnamed-capture rewrite + no-ASLR) → LEAD-not-P0. ---
+  ngx_checked=0
+  while IFS=$'\t' read -r nh nprog nws ntech; do
+    [[ -z "$nh" ]] && continue
+    [[ "$ngx_checked" -ge "$NDAY_EXTRA_HOSTS" ]] && break
+    grep -qxF "ngxrift:$nh" "$SEEN" 2>/dev/null && continue
+    printf 'ngxrift:%s\n' "$nh" >> "$SEEN"
+    # version is NOT in ES (webserver is name-only) → read it from a live Server: banner (HEAD, via safe_probe)
+    npr="$(bash "$SAFE_PROBE" "https://${nh}/" HEAD 2>/dev/null)"
+    [[ "$(printf '%s' "$npr" | jq -r '.ok // false')" == "true" ]] || continue
+    nver="$(printf '%s' "$npr" | jq -r '.headers.server // ""' | grep -ioE 'nginx/[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    [[ -n "$nver" ]] || continue   # Server banner has no version → cannot version-reason, skip (avoid FP)
+    [[ "$(_ver_lt "$nver" "1.30.1")" == "yes" ]] || { log "   · $nh nginx $nver >= 1.30.1 — patched, skip CVE-2026-42945"; continue; }
+    ngx_checked=$((ngx_checked+1))
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    jq -nc --arg h "$nh" --arg p "$nprog" --arg t "$ts" --arg ver "$nver" \
+      --arg why "nginx $nver < 1.30.1 → CVE-2026-42945 'Rift' heap overflow in ngx_http_rewrite_module (public PoC). Unauth DoS reliable across the range; RCE needs an unnamed-capture rewrite config + no-ASLR (config-dependent)." \
+      '{host:$h,program:$p,endpoint:"/",cve:"CVE-2026-42945",vuln_type:"n-day-nginx-rift",why:$why,
+        test:("nginx "+$ver+" version-confirmed in-range. DoS submittable with version PoC where the program pays infra n-days; RCE only after confirming an unnamed-capture rewrite (operator). Version-only = LEAD-not-CONFIRMED."),
+        impact:"high",confidence:0.6,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+    leads=$((leads+1))
+    log "   🩸 NGINX-Rift IN-RANGE · $nh · nginx $nver < 1.30.1 · CVE-2026-42945 → worklist"
+  done < <(_es_hosts "nginx")
+  log "🩸 NGINX-Rift n-day pass · $ngx_checked in-range host(s)"
+
+  # --- 3) PHP SOAP UAF RCE — CVE-2026-6722 (unauth when SOAP endpoint public; PHP < 8.2.31/8.3.31/
+  # 8.4.21/8.5.6). Endpoint-presence LEAD: a live WSDL/SOAP endpoint on a PHP host → operator
+  # version-reasons the PHP branch. NEVER send malformed SOAP (that is exploitation). ---
+  if [[ -f "$SAFE_PROBE" ]]; then
+    soap_checked=0
+    while IFS=$'\t' read -r ph pprog pws ptech; do
+      [[ -z "$ph" ]] && continue
+      [[ "$soap_checked" -ge "$NDAY_EXTRA_HOSTS" ]] && break
+      grep -qxF "phpsoap:$ph" "$SEEN" 2>/dev/null && continue
+      printf 'phpsoap:%s\n' "$ph" >> "$SEEN"; soap_checked=$((soap_checked+1))
+      soaphit=""
+      for spath in '/?wsdl' /soap /api/soap /services/soap; do
+        pr="$(bash "$SAFE_PROBE" "https://${ph}${spath}" GET 2>/dev/null)"
+        [[ "$(printf '%s' "$pr" | jq -r '.ok // false')" == "true" ]] || continue
+        [[ "$(printf '%s' "$pr" | jq -r '.status // 0')" == "200" ]] || continue
+        printf '%s' "$pr" | jq -r '.body_snippet // ""' | grep -qiE 'wsdl|soap:envelope|soap:binding|<definitions' || continue
+        soaphit="$spath"; break
+      done
+      [[ -n "$soaphit" ]] || continue
+      pver="$(printf '%s' "$pr" | jq -r '.headers["x-powered-by"] // ""' | grep -ioE 'php/?[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+      ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      jq -nc --arg h "$ph" --arg p "$pprog" --arg t "$ts" --arg sp "$soaphit" --arg ver "${pver:-unknown}" \
+        --arg why "Live SOAP/WSDL endpoint on a PHP host${pver:+ (PHP $pver)} → CVE-2026-6722 SOAP-extension use-after-free RCE (unauth when the SOAP endpoint is public; fixed 8.2.31/8.3.31/8.4.21/8.5.6)." \
+        '{host:$h,program:$p,endpoint:$sp,cve:"CVE-2026-6722",vuln_type:"n-day-php-soap",why:$why,
+          test:("SOAP endpoint present. Operator confirm PHP branch < patched (detected "+$ver+") then verify per CVE; NEVER send malformed SOAP (exploitation)."),
+          impact:"high",confidence:0.45,exploit_available:false,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+      leads=$((leads+1))
+      log "   🧼 PHP-SOAP endpoint · $ph · $soaphit${pver:+ · PHP $pver} · CVE-2026-6722 → worklist"
+    done < <(_es_hosts "php")
+    log "🧼 PHP-SOAP n-day pass · $soap_checked host(s) checked"
+  fi
 fi
 
 tail -n 8000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
