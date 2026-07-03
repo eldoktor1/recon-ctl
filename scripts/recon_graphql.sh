@@ -55,6 +55,19 @@ command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 vpn_gate() { [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — refusing target-facing graphql work"; exit 0; }; }
 es_curl() { curl -sS -m30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
 
+# ---- optional adopter (research tooling 2026-07-01): graphql-cop 12-check audit. Gated on the
+# binary being present (dormant until `pipx install git+https://github.com/dolevf/graphql-cop.git`),
+# read-only, timeout-bounded, run ONLY on introspection-ON endpoints (already-permissive → bounds the
+# alias/batch amplification volume). Mullvad is enforced by the daemon's run_scanner wrapper. ----
+GQL_COP_BIN="${GQL_COP_BIN:-$(command -v graphql-cop 2>/dev/null || echo "$HOME/.local/bin/graphql-cop")}"
+GQL_COP_TIMEOUT="${GQL_COP_TIMEOUT:-40}"
+graphql_cop_findings() {   # $1=url -> compact JSON array of {title,severity}; [] if tool absent/none
+  [[ -x "$GQL_COP_BIN" ]] || { echo '[]'; return; }
+  local out; out="$(timeout "$GQL_COP_TIMEOUT" "$GQL_COP_BIN" -t "$1" -o json 2>/dev/null)"
+  printf '%s' "$out" | jq -c '[ .. | objects | select(has("title") and has("result"))
+      | select(.result==true or ((.result|type)=="string")) | {title:.title, severity:(.severity//"info")} ] // []' 2>/dev/null || echo '[]'
+}
+
 # ---- candidate endpoint discovery (in-scope provenance, dup-resistant) ----
 # A) jsintel endpoints that look like graphql; B) ES recon_alive in-scope hosts whose url/title/tech
 # signal graphql (exact url used as-is; tech/title-only hosts get bounded path expansion).
@@ -156,7 +169,8 @@ cmd_scan() {
     rcv="$(jq -r '.recovery // "none"' <<<"$rec")"
     nsens="$(jq -r '.n_sensitive // 0' <<<"$rec")"
     local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    jq -c --arg h "$host" --arg p "$prog" --arg ts "$now" '. + {host:$h,program:$p,ts:$ts,status:"to-test"}' <<<"$rec" >> "$WORK/enriched.jsonl"
+    local cop='[]'; [[ "$intro" == "true" ]] && cop="$(graphql_cop_findings "$ep")"
+    jq -c --arg h "$host" --arg p "$prog" --arg ts "$now" --argjson cop "${cop:-[]}" '. + {host:$h,program:$p,ts:$ts,status:"to-test",graphqlcop:$cop}' <<<"$rec" >> "$WORK/enriched.jsonl"
     es_stamp "$host" "$intro" "$nsens" "$rcv"
     nsens_total=$(( nsens_total + nsens ))
     [[ "$intro" == "true" ]] && nintro=$((nintro+1))

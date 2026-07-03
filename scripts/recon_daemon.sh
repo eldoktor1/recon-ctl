@@ -755,6 +755,13 @@ run_permute() { v21_killed permute && return 0; [[ -f "$PERMUTE_SCRIPT" ]] && ba
 UNCOVER_SCRIPT="${UNCOVER_SCRIPT:-$(script_path recon_uncover.sh)}"
 UNCOVER_INTERVAL="${UNCOVER_INTERVAL:-21600}"   # 6h (budget guard is the real limiter)
 run_uncover() { v21_killed uncover && return 0; [[ -f "$UNCOVER_SCRIPT" ]] && bash "$UNCOVER_SCRIPT" cycle >>"$LOG_FILE" 2>&1 || true; }
+# recon_baddns — takeover-lane augmenter (BadDNS, ADOPT 2026-07-01): SECOND-ORDER takeover (embedded
+# 3rd-party domains in HTML) + NSEC/CNAME/NS/TXT/WILDCARD. references module fetches target HTML → the
+# script self-gates fail-closed on vpn_down. LEAD-only (never auto-mints a confirmed takeover).
+# Killswitch: state/kill/v2_baddns.
+BADDNS_SCRIPT="${BADDNS_SCRIPT:-$(script_path recon_baddns.sh)}"
+BADDNS_INTERVAL="${BADDNS_INTERVAL:-14400}"   # 4h — 20 hosts/cycle slides through the in-scope pool
+run_baddns() { v21_killed baddns && return 0; [[ -f "$BADDNS_SCRIPT" ]] && bash "$BADDNS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 # recon_unauth_expose — U1 lane: shadow-endpoint UNAUTHENTICATED data-exposure confirmer.
 # jsintel endpoints -> recon_safe_probe GET -> precision classifier -> state.py record-confirmed
 # -> ai-pending -> 2IC verify -> SUBMIT. Target-facing -> run_scanner (reconrun, egress slot +
@@ -978,6 +985,7 @@ run_discord_bot() {
   supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
+  supervise_loop "baddns"         "BADDNS_INTERVAL"        run_baddns         &
   supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
