@@ -61,11 +61,17 @@ es_curl() { curl -sS -m30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' "$
 # alias/batch amplification volume). Mullvad is enforced by the daemon's run_scanner wrapper. ----
 GQL_COP_BIN="${GQL_COP_BIN:-$(command -v graphql-cop 2>/dev/null || echo "$HOME/.local/bin/graphql-cop")}"
 GQL_COP_TIMEOUT="${GQL_COP_TIMEOUT:-40}"
-graphql_cop_findings() {   # $1=url -> compact JSON array of {title,severity}; [] if tool absent/none
+# EXCLUDE the DoS/amplification tests — they SEND 100-alias / batched / circular / directive-flood
+# queries at the target (anti-burn). Keep the 8 quiet single-probe checks (introspection,
+# field_suggestions, detect_graphiql, get_method_support, trace_mode, get_based_mutation,
+# post_based_csrf, unhandled_error_detection).
+GQL_COP_EXCLUDE="${GQL_COP_EXCLUDE:-alias_overloading,batch_query,directive_overloading,circular_query_introspection}"
+graphql_cop_findings() {   # $1=url -> compact JSON array of DETECTED {title,severity,impact}; [] otherwise
   [[ -x "$GQL_COP_BIN" ]] || { echo '[]'; return; }
-  local out; out="$(timeout "$GQL_COP_TIMEOUT" "$GQL_COP_BIN" -t "$1" -o json 2>/dev/null)"
-  printf '%s' "$out" | jq -c '[ .. | objects | select(has("title") and has("result"))
-      | select(.result==true or ((.result|type)=="string")) | {title:.title, severity:(.severity//"info")} ] // []' 2>/dev/null || echo '[]'
+  local out json
+  out="$(timeout "$GQL_COP_TIMEOUT" "$GQL_COP_BIN" -t "$1" -o json -e "$GQL_COP_EXCLUDE" 2>/dev/null)"
+  json="$(printf '%s' "$out" | grep -m1 -E '^\[')"; [[ -n "$json" ]] || { echo '[]'; return; }   # isolate the JSON array (skip "not GraphQL" notices)
+  printf '%s' "$json" | jq -c '[ .[] | select(.result==true) | {title:.title, severity:(.severity//"INFO"), impact:(.impact//"")} ] // []' 2>/dev/null || echo '[]'
 }
 
 # ---- candidate endpoint discovery (in-scope provenance, dup-resistant) ----
