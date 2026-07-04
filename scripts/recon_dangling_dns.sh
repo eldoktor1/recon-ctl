@@ -52,6 +52,19 @@ mark_seen() { printf '%s\t%s\n' "$1" "$(date -u +%s)" >> "$SEEN" 2>/dev/null || 
 apex_of() { awk -F. '{n=NF; if(n>=2) print $(n-1)"."$n; else print $0}' <<<"$1"; }
 # NXDOMAIN on a name at a resolver? (status: NXDOMAIN in dig comments)
 is_nxdomain() { dig "$1" NS "@$2" +noall +comments +time=4 +tries=1 2>/dev/null | grep -q 'status: NXDOMAIN'; }
+# strict RFC-ish hostname validator — a real NS is labelled alnum/hyphen with an alpha TLD.
+# On a resolver timeout dig can print junk to STDOUT (";; communications error to 1.1.1.1#53:
+# timed out") which previously flowed into the NS list, got mangled by apex_of into an apex
+# like "1.1#53: timed out", and a malformed name can return NXDOMAIN on both resolvers => a
+# BOGUS takeover mint (id196/197, 2026-07-03). This drops any such junk before it is used.
+valid_hostname() { [[ "$1" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; }
+# delegated NS for a host from a given resolver, junk-filtered to valid hostnames only
+get_valid_ns() {
+  local h="$1" r="$2" n; local -a out=()
+  while IFS= read -r n; do valid_hostname "$n" && out+=("$n"); done \
+    < <(dig +short NS "$h" "@$r" +time=4 +tries=1 2>/dev/null | sed 's/\.$//' | awk 'NF')
+  printf '%s\n' "${out[@]}"
+}
 
 q="$(jq -nc --argjson n "$DANGLING_HOSTS" '{size:($n*3),_source:["host","triage_program"],
   query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}}],
@@ -69,13 +82,15 @@ for line in "${cand[@]}"; do
   seen_recent "$host" && continue
   [[ -f "$STATE_DIR/vpn_down" ]] && break
   mark_seen "$host"; hosts_done=$((hosts_done+1))
-  # delegated NS for this host (only delegation points return their own NS)
-  mapfile -t nslist < <(dig +short NS "$host" "@$R1" +time=4 +tries=1 2>/dev/null | sed 's/\.$//' | awk 'NF')
+  # delegated NS for this host (only delegation points return their own NS), junk-filtered.
+  # If R1 yields nothing valid (timeout/junk), re-resolve on R2 before giving up.
+  mapfile -t nslist < <(get_valid_ns "$host" "$R1")
+  [[ "${#nslist[@]}" -gt 0 ]] || mapfile -t nslist < <(get_valid_ns "$host" "$R2")
   [[ "${#nslist[@]}" -gt 0 ]] || continue
   checked=$((checked+1))
   for ns in "${nslist[@]}"; do
     [[ -n "$ns" ]] || continue
-    apex="$(apex_of "$ns")"; [[ -n "$apex" ]] || continue
+    apex="$(apex_of "$ns")"; { [[ -n "$apex" ]] && valid_hostname "$apex"; } || continue
     # the NS apex must be registrable (NXDOMAIN) on BOTH resolvers => dangling delegation
     if is_nxdomain "$apex" "$R1" && is_nxdomain "$apex" "$R2"; then
       url="https://${host}/"
