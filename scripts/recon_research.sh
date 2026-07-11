@@ -25,6 +25,19 @@ IFS=$'\n\t'
 log()  { printf '[%s RESEARCH] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 warn() { printf '[%s RESEARCH WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 
+# Alert #ops when the headless CLI is logged out / rate-limited (an OPERATOR action — re-run /login).
+# Cooled down to once per 24h across all topics so a broken login can't spam the channel every cycle.
+cli_error_alert() {
+  local topic="$1" errline="$2" stamp="$STATE_DIR/research_cli_error.alerted"
+  [[ -f "$stamp" && "$(find "$stamp" -mmin -1440 2>/dev/null)" ]] && return 0
+  local hook; hook="$(discord_hook ops 2>/dev/null || true)"
+  [[ -n "$hook" ]] || hook="$(discord_hook digest 2>/dev/null || true)"
+  if [[ -n "$hook" ]]; then
+    discord_post "$hook" "$(jq -nc --arg c "⚠️ **recon-research halted** — headless Claude CLI: \`${errline:0:120}\`. Research digests are paused until you re-auth: run \`~/.local/bin/claude\` → \`/login\`. (No junk committed.)" '{content:$c}')" >/dev/null 2>&1 || true
+  fi
+  : > "$stamp" 2>/dev/null || true
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/recon_net.sh"
@@ -153,6 +166,18 @@ run_topic() {
   timeout "$RESEARCH_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$RESEARCH_MODEL" \
     --permission-mode dontAsk --allowedTools "WebSearch WebFetch" > "$raw" 2>/dev/null || true
   if [[ ! -s "$raw" ]]; then warn "$topic — no research output (auth/timeout?)"; return 0; fi
+
+  # GUARD: the headless CLI emits a short meta-error (logged out / rate-limited) to stdout instead of
+  # research. That is NOT a digest — never commit/push it (it poisoned git history Jun 28–Jul 09).
+  # A real digest is multi-KB and starts with content; an error stub is one short line. Gate on both.
+  if [[ "$(wc -c < "$raw")" -lt 1000 ]] && grep -qiE \
+       'not logged in|please run /login|hit your (weekly|usage) limit|invalid api key|authentication_error|credit balance is too low' \
+       "$raw"; then
+    local errline; errline="$(head -1 "$raw" | tr -d '\r')"
+    warn "$topic — CLI auth/limit error, skipping commit: ${errline}"
+    cli_error_alert "$topic" "$errline"
+    return 0
+  fi
 
   summary="$(python3 "$HELPER" route --topic "$topic" --date "$today" --input "$raw" \
               --kb-dir "$KB_DIR" --research-dir "$RESEARCH_DIR" 2>/dev/null)" || summary=""

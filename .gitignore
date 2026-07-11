@@ -51,6 +51,10 @@ engine/__pycache__/
 # github-subdomains / scanner stray outputs in repo root
 /*.txt
 
+# local scratch / desktop-app artifacts (never mirror personal notes or attachment caches)
+/IDEA.md
+.hermes/
+
 # recon-audit runtime reports (regenerated every run / every 6h by the daemon).
 # The machine-readable source of truth is ~/recon/state/selfaudit_latest.json (outside
 # the repo). The tracked manual deep-audit (docs/audit_2026-06-11.md) stays tracked;
