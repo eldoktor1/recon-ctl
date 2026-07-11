@@ -137,3 +137,14 @@ rewrite ^/(.*)$ /index.php?$1 last;
 
 # SAFE: named capture
 rewrite ^/(?P<path>.*)$ /index.php?$path last;
+```
+
+### Applied research — vulns (2026-07-03)
+
+## CVE-2026-9256 — Buffer Overflow in `ngx_http_rewrite_module`
+- **Affected:** Nginx 0.1.17–1.31.0; **Fixed:** 1.31.1 / 1.30.2 — broader range than "Rift".
+- **Class:** Buffer overflow (DoS / possible RCE). **Same config-dependency as CVE-2026-42945**: needs an
+  unnamed PCRE capture (`$1`/`$2`) + `?` in the replacement, followed by another `rewrite`/`if`/`set`.
+  **Version alone = LEAD; vulnerable-config confirmation required for CONFIRMED.**
+- **Fingerprint (unauth):** `Server: nginx/<version>` ≤ 1.31.0.
+- **Source:** https://nginx.org/en/security_advisories.html

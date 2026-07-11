@@ -119,3 +119,18 @@ WordPress is shipped product in many programs — confirm per-asset scope before
 for plugin in updraftplus wpvivid-backuprestore kirki user-registration; do
   curl -sk "https://<host>/wp-content/plugins/${plugin}/readme.txt" | grep -i "Stable tag"
 done
+```
+
+### Applied research — vulns (2026-07-03)
+
+## Unauth SQLi plugin CVEs — 2026 (add to n-day lane)
+
+| CVE | Plugin | Affected | Vector | Fingerprint |
+|-----|--------|----------|--------|-------------|
+| CVE-2026-6433 ⚠️ | Custom CSS JS PHP | ≤ 2.0.7 | **Unauth SQLi → RCE (CVSS 10.0)** — SQL result `eval()`'d | `/wp-content/plugins/custom-css-js-php/readme.txt` |
+| CVE-2026-4352 ⚠️ | JetEngine (Crocoblock) | ≤ 3.8.6.1 | Unauth SQLi via CCT REST API search | `/wp-content/plugins/jet-engine/readme.txt` |
+| CVE-2026-1581 ⚠️ | wpForo Forum | ≤ 2.4.14 | Unauth time-based SQLi via `wpfob` param | `/wp-content/plugins/wpforo/readme.txt` |
+| CVE-2026-2576 ⚠️ | Business Directory Plugin | — | Unauth time-based SQLi | `/wp-content/plugins/business-directory-plugin/readme.txt` |
+
+**Confirm gate (all):** `recon-params confirm sqli <host>` → `'` vs `''` differential → sqlmap verify
+(in-scope+paying, `--delay 1 --threads 1`, PoC-only, never mass `--dump`). ⚠️ = LLM-sourced CVE, NVD/version-verify before minting.

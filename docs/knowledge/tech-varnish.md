@@ -19,3 +19,16 @@ Fingerprinting and exploitation surface for Varnish-fronted hosts. Relevant for 
 
 ```bash
 curl -X PURGE https://<target>/<path> -sv 2>&1 | grep -E "< HTTP|< Age|< X-Varnish"
+```
+
+## Active CVEs (2026)
+
+### CVE-2026-34475 — URL Mishandling → Cache Poisoning / Auth Bypass (CVSS 5.4)
+- **Affected:** Varnish Cache < 8.0.1; Varnish Enterprise < 6.0.16r12.
+- **Class:** Mishandled root-path `/` requests under an `unchecked req.url` VCL → cache-key confusion →
+  cache poisoning or auth-boundary bypass.
+- **Fingerprint (unauth):** `Via: 1.1 varnish` + `X-Varnish:` headers; some configs leak version in
+  `X-Varnish-Backend`.
+- **WCD lane note:** directly amplifies the web-cache-deception lane for Varnish ≤ 8.0.0 — flag matched
+  hosts in the WCD briefing.
+- **Source:** https://security.glexia.com/cves/CVE-2026-34475 · ⚠️ LLM-sourced — NVD/version-verify before minting.
