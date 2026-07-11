@@ -61,3 +61,4 @@ engine/__pycache__/
 # a new manual audit, if ever desired, can be force-added.
 /docs/audit_20*.md
 /docs/selfaudit_fixprompt_*.md
+.mcp.json
