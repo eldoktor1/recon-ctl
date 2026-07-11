@@ -2160,20 +2160,18 @@ cmd_bulk() {
       fi
 
       local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
-      local batch_n=0 batch_count=0 batch_file="" found=0 queued=0 dom_n=0
+      local batch_n=0 found=0 queued=0 dom_n=0
+      local KNOWN="${KNOWN_HOSTS:-$STATE_DIR/known_hosts.txt}"   # 4M-host ever-seen ledger (has NUL → grep -a)
+      local all_hosts; all_hosts="$(mktemp)"                     # collect ALL discovered → dedup once, at end
       mkdir -p "$QUEUE_DIR/inbox"
 
+      # Collect every discovered host to ONE file (streamed to disk, not memory). Dedup
+      # against the ever-seen ledger + split into batches happens once, after discovery —
+      # so already-seen hosts never re-flood the validator (see the finalize block below).
       _bulk_write_host() {
         local h="$1"
         [[ -z "$h" ]] && return
-        if [[ -z "$batch_file" || "$batch_count" -ge "$batch_size" ]]; then
-          batch_n=$(( batch_n + 1 ))
-          batch_file="$QUEUE_DIR/inbox/bulk_${ts}_${batch_n}.txt"
-          batch_count=0
-        fi
-        printf '%s\n' "$h" >> "$batch_file"
-        batch_count=$(( batch_count + 1 ))
-        queued=$(( queued + 1 ))
+        printf '%s\n' "$h" >> "$all_hosts"
       }
 
       # ── Phase 1: queue direct hosts immediately (no subfinder) ─────────────
@@ -2224,12 +2222,42 @@ cmd_bulk() {
       # Clean exit — delete resume file so next run starts fresh
       rm -f "$BULK_RESUME_FILE"
 
+      # ── Finalize: dedup against the ever-seen ledger, queue only NEW hosts ──────────
+      # Each weekly bulk re-enumerates the SAME roots → ~2.5M mostly-already-seen
+      # subdomains. Without this dedup they re-flood the validator faster than it drains
+      # (4 weekly dumps had stacked to 21k+ batch files). Same doctrine as permute/uncover/
+      # true_fresh: only hosts NOT in known_hosts.txt reach the queue. grep -a: ledger has NUL.
+      local disc_u new_hosts seen_sorted skipped_seen=0
+      new_hosts="$(mktemp)"; seen_sorted="$(mktemp)"
+      LC_ALL=C sort -u "$all_hosts" -o "$all_hosts"
+      disc_u="$(wc -l < "$all_hosts" | tr -d ' ')"
+      if [[ -s "$KNOWN" ]]; then
+        # The ledger uses NUL as a record separator in places → split (not delete) so NUL-joined
+        # hostnames dedup correctly; sort -u to a clean set; comm keeps only NOT-yet-seen hosts.
+        # comm needs both inputs identically sorted → LC_ALL=C on both. Bounded RAM (sort spills).
+        tr '\0' '\n' < "$KNOWN" | LC_ALL=C sort -u > "$seen_sorted"
+        LC_ALL=C comm -23 "$all_hosts" "$seen_sorted" > "$new_hosts"
+      else
+        cp "$all_hosts" "$new_hosts"
+      fi
+      queued="$(wc -l < "$new_hosts" | tr -d ' ')"
+      skipped_seen=$(( disc_u - queued ))
+
+      # Split NEW hosts into FIFO batch files (zero-padded suffix → correct lexical sort).
+      if [[ "$queued" -gt 0 ]]; then
+        split -l "$batch_size" -d -a 6 --additional-suffix=.txt \
+          "$new_hosts" "$QUEUE_DIR/inbox/bulk_${ts}_"
+        batch_n="$(find "$QUEUE_DIR/inbox" -maxdepth 1 -name "bulk_${ts}_*.txt" 2>/dev/null | wc -l | tr -d ' ')"
+      fi
+      rm -f "$all_hosts" "$new_hosts" "$seen_sorted"
+
       echo
       printf "  ── Done ────────────────────────────────────────────────────\n"
       printf "  Wildcard domains enumerated: %s  (skipped: %s already done)\n" "$dom_n" "$skipped"
-      printf "  Subdomains discovered:       %s\n" "$found"
-      printf "  Direct hosts queued:         %s\n" "$total_h"
-      printf "  Total hosts queued:          %s  (in %s batch files)\n" "$queued" "$batch_n"
+      printf "  Subdomains discovered:       %s (raw)\n" "$found"
+      printf "  Unique hosts discovered:     %s\n" "$disc_u"
+      printf "  Already-seen (deduped out):  %s\n" "$skipped_seen"
+      printf "  NEW hosts queued:            %s  (in %s batch files)\n" "$queued" "$batch_n"
       printf "  Queue inbox:                 %s\n" "$QUEUE_DIR/inbox"
       echo
       printf "  Daemon will probe + triage all of these automatically.\n"
