@@ -178,7 +178,10 @@ TKO_NOTVULN="${TKO_NOTVULN:-fastly firebase aws_cloudfront acquia freshdesk hubs
 # name is provably free WITHOUT needing NXDOMAIN): S3 "NoSuchBucket", Beanstalk. For
 # everyone else, confirmation REQUIRES NXDOMAIN on the CNAME target.
 TKO_HTTP_AUTH="${TKO_HTTP_AUTH:-aws_s3 aws_elasticbeanstalk}"
-svc_in_list() { local s="$1" l="$2" x; for x in $l; do [[ "$s" == "$x" ]] && return 0; done; return 1; }
+# NOTE: the script sets a global IFS=$'\n\t' (no space), which would stop `for x in $l`
+# from splitting these SPACE-separated lists — silently breaking every gate that uses this
+# helper (TKO_NOTVULN / TKO_HTTP_AUTH / TKO_CLAIMABILITY_VERIFY). Force a local IFS with a space.
+svc_in_list() { local s="$1" l="$2" x; local IFS=$' \n\t'; for x in $l; do [[ "$s" == "$x" ]] && return 0; done; return 1; }
 # provider's OWN namespace = unclaimable by an outsider (github.github.io is GitHub's own
 # org pages; *.map.fastly.net is Fastly's service-map; live *.cloudfront.net 404s at root).
 cname_provider_own() {
@@ -187,6 +190,112 @@ cname_provider_own() {
   [[ "$c" =~ \.map\.fastly\.net$ ]] && return 0
   [[ "$c" =~ \.cloudfront\.net$ ]] && return 0
   return 1
+}
+
+# ---- GATE 0: scope/pays — a takeover on an out-of-scope or non-paying host is
+# unreportable/unrewardable, so it must never mint a CLAIM or page #takeovers.
+# The reported FP (8degreespizzeria.mealnow.co.uk) was program=null and slipped
+# through because the hunter had NO scope gate at all. Uses recon_scope_check.sh
+# (local scope files, no network). FAIL-OPEN: only a POSITIVE out-of-scope/non-pay
+# determination suppresses; a lookup error → "unknown" → proceed (never lose a real one).
+# Echoes: yes | no | unknown
+SCOPE_CHECK_SH="${SCOPE_CHECK_SH:-$SCRIPT_DIR/recon_scope_check.sh}"
+host_paying_scope() {
+  local host="$1"
+  [[ -x "$SCOPE_CHECK_SH" || -f "$SCOPE_CHECK_SH" ]] || { echo unknown; return; }
+  local sc; sc="$(timeout 20 bash "$SCOPE_CHECK_SH" "$host" 2>/dev/null)"
+  [[ -z "$sc" ]] && { echo unknown; return; }
+  local ins pays
+  # NOTE: do NOT use jq `// empty` here — `//` treats a boolean `false` as absent, so
+  # `.in_scope // empty` returns "" for an out-of-scope host and we'd wrongly fail-open.
+  # Read the raw value: jq prints "true"/"false"/"null".
+  ins="$(jq -r '.in_scope' <<<"$sc" 2>/dev/null)"
+  pays="$(jq -r '.pays'     <<<"$sc" 2>/dev/null)"
+  [[ -z "$ins" || "$ins" == "null" ]] && { echo unknown; return; }   # unparseable → fail-open
+  if [[ "$ins" == "true" && "$pays" == "true" ]]; then echo yes; else echo no; fi
+}
+
+# ---- GATE C: authoritative claimability verification (beyond the NXDOMAIN heuristic) --------
+# NXDOMAIN on a CNAME target does NOT prove the backing name is free to register. PROVEN FP:
+# an azure_websites CNAME NXDOMAINs yet `az … checkNameAvailability` reports AlreadyExists — the
+# App Service name is still reserved in some subscription → UNCLAIMABLE → not a takeover. For
+# every provider that exposes an authoritative name-availability check we run it and DROP the
+# candidate when the name is provably reserved; providers here that CANNOT be authoritatively
+# verified (tool/creds/api unavailable) are DOWNGRADED to WATCH, never auto-claimed.
+#   azure_* → ARM checkNameAvailability (needs authed `az`)   github_pages → GitHub user/org API
+#   aws_s3  → NoSuchBucket on the bucket endpoint (unauth, authoritative)
+TKO_CLAIMABILITY_VERIFY="${TKO_CLAIMABILITY_VERIFY:-azure_websites azure_blob azure_cdn github_pages aws_s3}"
+
+# lazy-cached Azure subscription id; empty string if az is missing/unauthed → checks return "unverified"
+_AZ_SUB=""; _AZ_CHECKED=0
+az_sub() {
+  [[ "$_AZ_CHECKED" -eq 1 ]] && { printf '%s' "$_AZ_SUB"; return; }
+  _AZ_CHECKED=1
+  command -v az >/dev/null 2>&1 || { _AZ_SUB=""; return; }
+  # 30s: the first az call in a fresh process can trigger a slow token refresh; a short
+  # timeout there returns empty and would wrongly mark every azure name "unverified".
+  _AZ_SUB="$(timeout 30 az account show --query id -o tsv 2>/dev/null | tr -d '[:space:]')"
+  # fallback: default subscription from the account list (same value, different code path)
+  [[ -z "$_AZ_SUB" ]] && _AZ_SUB="$(timeout 30 az account list --query '[?isDefault].id | [0]' -o tsv 2>/dev/null | tr -d '[:space:]')"
+  printf '%s' "$_AZ_SUB"
+}
+
+# first DNS label of a CNAME target = the registerable resource name (site/bucket/account/endpoint)
+first_label() { local h="${1%.}"; printf '%s' "${h%%.*}"; }
+
+# Azure ARM checkNameAvailability via authed az. args: <name> <provider-path> <type> → true|false|unknown
+_az_checkname() {
+  local name="$1" prov="$2" rtype="$3"
+  local sub; sub="$(az_sub)"; [[ -z "$sub" ]] && { echo unknown; return; }
+  local avail
+  # NOTE: plain `.nameAvailable` — NOT `// empty`: jq's `//` treats boolean false as absent,
+  # so a RESERVED name (nameAvailable:false) would wrongly parse to "" → "unknown".
+  avail="$(timeout 25 az rest --method post \
+      --uri "https://management.azure.com/subscriptions/${sub}/providers/${prov}/checkNameAvailability?api-version=2023-12-01" \
+      --body "{\"name\":\"${name}\",\"type\":\"${rtype}\"}" 2>/dev/null \
+    | jq -r '.nameAvailable' 2>/dev/null)"
+  case "$avail" in true) echo true ;; false) echo false ;; *) echo unknown ;; esac
+}
+
+# Returns: claimable | reserved | unverified   (per-provider authoritative name check)
+verify_claimability() {
+  local svc="$1" cname="$2" host="$3"
+  local n; n="$(first_label "$cname")"
+  [[ -z "$n" ]] && { echo unverified; return; }
+  case "$svc" in
+    azure_websites)
+      case "$(_az_checkname "$n" "Microsoft.Web" "Microsoft.Web/sites")" in
+        true) echo claimable ;; false) echo reserved ;; *) echo unverified ;; esac ;;
+    azure_cdn)
+      # CDN endpoint availability (api-version differs; best-effort → unverified on error)
+      local sub; sub="$(az_sub)"; [[ -z "$sub" ]] && { echo unverified; return; }
+      local avail
+      avail="$(timeout 25 az rest --method post \
+          --uri "https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Cdn/checkNameAvailability?api-version=2023-05-01" \
+          --body "{\"name\":\"${n}\",\"type\":\"Microsoft.Cdn/Profiles/Endpoints\"}" 2>/dev/null \
+        | jq -r '.nameAvailable' 2>/dev/null)"
+      case "$avail" in true) echo claimable ;; false) echo reserved ;; *) echo unverified ;; esac ;;
+    azure_blob)
+      command -v az >/dev/null 2>&1 || { echo unverified; return; }
+      local avail
+      avail="$(timeout 25 az storage account check-name --name "$n" --query nameAvailable -o tsv 2>/dev/null | tr -d '[:space:]')"
+      case "$avail" in true|True) echo claimable ;; false|False) echo reserved ;; *) echo unverified ;; esac ;;
+    github_pages)
+      # owner = <owner>.github.io ; 404 on the user/org API = account free = claimable, 200 = owner exists
+      local code
+      code="$(curl_net -s -o /dev/null -w '%{http_code}' -m "$HTTP_TIMEOUT" \
+              -H 'Accept: application/vnd.github+json' "https://api.github.com/users/${n}" 2>/dev/null)"
+      case "$code" in 404) echo claimable ;; 200) echo reserved ;; *) echo unverified ;; esac ;;
+    aws_s3)
+      # NoSuchBucket on the bucket endpoint = name free = claimable (authoritative, unauth)
+      local body
+      body="$(curl_net -sk -m "$HTTP_TIMEOUT" "https://${cname%.}/" 2>/dev/null | tr -d '\0')"
+      if printf '%s' "$body" | grep -qiE 'NoSuchBucket|The specified bucket does not exist' 2>/dev/null; then
+        echo claimable
+      elif [[ -n "$body" ]]; then echo reserved
+      else echo unverified; fi ;;
+    *) echo unverified ;;
+  esac
 }
 
 # Fix 7: check HackerOne disclosed reports for this host
@@ -594,6 +703,15 @@ probe_host() {
 
   log "STAGE 2 hit: $host → $svc via CNAME $cname"
 
+  # ---- GATE 0: scope/pays — suppress out-of-scope / non-paying hosts (unreportable) ----
+  # Runs after the provider-match funnel (cheap: narrow candidate set, local scope files).
+  local scope_state; scope_state="$(host_paying_scope "$host")"
+  if [[ "$scope_state" == "no" ]]; then
+    log "SKIP $host → $svc via $cname: out-of-scope / non-paying (takeover unreportable) — not minting"
+    printf '%s\t%s\t%s\tOOS\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$host" "$svc" "$cname" >> "$EVENT_LOG"
+    return 0
+  fi
+
   # ---- STAGE 3: NXDOMAIN check on CNAME target ----
   local stage3=0 nx_state="resolves"
   if target_nxdomains "$cname"; then
@@ -627,6 +745,27 @@ probe_host() {
   if printf '%s' "$body_check" | grep -qiE 'this web app is stopped' 2>/dev/null; then
     log "SKIP $host → $svc: Azure 'web app stopped' — resource owned (disqualifier)"
     return 0
+  fi
+
+  # ---- GATE C: authoritative claimability (drop provably-RESERVED names before we invest) ----
+  # NXDOMAIN ≠ claimable. Run the provider's authoritative name-availability check; a RESERVED
+  # name is not a takeover regardless of how many DNS/HTTP stages fired. This is the direct fix
+  # for the azure_websites NXDOMAIN-but-AlreadyExists FP. Only runs on real candidates (3+ stages)
+  # and only for providers with an authoritative check.
+  local claimability="unverified"
+  local _pre_stages=$((stage1 + stage2 + stage3 + stage4))
+  if [[ "$_pre_stages" -ge 3 ]] && svc_in_list "$svc" "$TKO_CLAIMABILITY_VERIFY"; then
+    claimability="$(verify_claimability "$svc" "$cname" "$host")"
+    case "$claimability" in
+      reserved)
+        log "SKIP $host → $svc via $cname: claimability=RESERVED (authoritative name check: already registered) — NOT a takeover"
+        printf '%s\t%s\t%s\tRESERVED-FP\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$host" "$svc" "$cname" >> "$EVENT_LOG"
+        return 0 ;;
+      claimable)
+        log "  ✓ $host → $svc: claimability=CLAIMABLE (authoritative) — strong takeover signal" ;;
+      *)
+        log "  ? $host → $svc: claimability=UNVERIFIED (tool/creds/api unavailable) — will not auto-claim" ;;
+    esac
   fi
 
   # ---- STAGE 5: Stability re-check ----
@@ -672,12 +811,31 @@ probe_host() {
     confidence="MEDIUM"   # -> WATCH file: re-checked each cycle; promotes only if it later NXDOMAINs
   fi
 
+  # ---- GATE C follow-through: Azure names can't be claimed on NXDOMAIN alone. If the authoritative
+  # checkNameAvailability could NOT run (az missing/unauthed/api error), never auto-CLAIM — hold at
+  # WATCH for operator verify. (github_pages/aws_s3 keep their own authoritative gates, no downgrade.)
+  if [[ "$claimability" == "unverified" ]] && svc_in_list "$svc" "$TKO_CLAIMABILITY_VERIFY"; then
+    case "$svc" in
+      azure_*)
+        if [[ "$confidence" == "CRITICAL" || "$confidence" == "HIGH" || "$confidence" == "MEDIUM-HIGH" ]]; then
+          log "  → $host ($svc): claimability UNVERIFIED — downgrade $confidence→MEDIUM (WATCH; run checkNameAvailability to confirm)"
+          confidence="MEDIUM"
+          claimability="unverified-azure-downgraded"
+        fi
+        ;;
+    esac
+  fi
+
   # Build notes about what fired
   local notes=""
   [[ "$nx_state" == "nxdomain" ]] && notes+="NXDOMAIN "
   [[ "$http_state" == "match" ]] && notes+="HTTP-match "
   [[ "$http_state" == "fetcherr" ]] && notes+="HTTP-err "
   [[ "$stage5" -eq 1 ]] && notes+="stable "
+  case "$claimability" in
+    claimable)                    notes+="claimable-CONFIRMED " ;;
+    unverified-azure-downgraded)  notes+="claimability-unverified " ;;
+  esac
   [[ -z "$notes" ]] && notes="(no extra signals)"
 
   # ---- Routing decision ----
