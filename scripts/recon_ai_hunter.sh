@@ -45,6 +45,10 @@ KILL_FILE="$STATE_DIR/kill/v2_ai_hunter"
 BRIEF_DIR="${BRIEF_DIR:-$BASE_DIR/briefings}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
 HUNTER_MODEL="${HUNTER_MODEL:-opus}"            # the creative hunt = frontier model (XBOW model-alloying)
+# Adjudication (judging real probe responses vs expected) is discriminative, not creative — a cheaper
+# model does it well. Defaults to HUNTER_MODEL (no behaviour change); set HUNTER_ADJ_MODEL=sonnet in
+# state/token_budget.env to keep Opus only for hypothesis generation (token economy).
+HUNTER_ADJ_MODEL="${HUNTER_ADJ_MODEL:-$HUNTER_MODEL}"
 HUNTER_TIMEOUT="${HUNTER_TIMEOUT:-300}"
 HUNTER_MAX_HYP="${HUNTER_MAX_HYP:-6}"           # cap probes per target (anti-burn; safe_probe also caps)
 HUNTER_PROBE_BUDGET="${HUNTER_PROBE_BUDGET:-8}" # per-target probe budget (passed to safe_probe)
@@ -215,7 +219,7 @@ Below are bug hypotheses and the ACTUAL unauthenticated probe responses the harn
 - refuted: the evidence does not support it.
 Give severity + the evidence string. Hypotheses+probes:
 $(printf '%s' "$tested")"
-  adj_out="$(claude_json "$HUNTER_MODEL" "$ADJ_SCHEMA" "$adj_in")"
+  adj_out="$(claude_json "$HUNTER_ADJ_MODEL" "$ADJ_SCHEMA" "$adj_in")"
   [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$adj_out" > "$STATE_DIR/hunter_dbg_adj.json"
 
   # ---- MINT / PLAN / LEARN ----
@@ -268,7 +272,7 @@ case "${1:-cycle}" in
     in_scope_pays "$2" || { warn "$2 is NOT in-scope+paying (authoritative) — refusing"; exit 1; }
     hunt_host "$2" ;;
   status)
-    echo "hunter: model=$HUNTER_MODEL  hunted(window)=$(wc -l < "$SEEN" 2>/dev/null | tr -d ' ')  endpoints=$( [ -f "$ENDPOINTS" ] && wc -l < "$ENDPOINTS" | tr -d ' ' || echo 0)"
+    echo "hunter: model=$HUNTER_MODEL adj=$HUNTER_ADJ_MODEL  hunted(window)=$(wc -l < "$SEEN" 2>/dev/null | tr -d ' ')  endpoints=$( [ -f "$ENDPOINTS" ] && wc -l < "$ENDPOINTS" | tr -d ' ' || echo 0)"
     echo "killswitch: $( [ -f "$KILL_FILE" ] && echo ON || echo off )" ;;
   *) echo "usage: recon_ai_hunter.sh {cycle|host <host>|status}" >&2; exit 1 ;;
 esac

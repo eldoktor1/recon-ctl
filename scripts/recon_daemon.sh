@@ -26,6 +26,18 @@ PID_FILE="$STATE_DIR/recon_daemon.pid"
 LOG_FILE="$LOG_DIR/recon_daemon.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- Token-budget overrides (optional, operator-tunable) --------------------
+# A single place to pace/right-tier the Claude layer WITHOUT editing code. If
+# state/token_budget.env exists it is sourced here (before every ${VAR:-default}
+# interval/model default below), so its `export`s win. Absent => stock defaults.
+# Reversible: `rm state/token_budget.env` + restart to revert. NOT git-mirrored
+# (it lives under ~/recon/state). Template: docs/token_budget.env.example.
+TOKEN_BUDGET_ENV="${TOKEN_BUDGET_ENV:-$STATE_DIR/token_budget.env}"
+if [[ -f "$TOKEN_BUDGET_ENV" ]]; then
+  set -a; # shellcheck disable=SC1090
+  source "$TOKEN_BUDGET_ENV" 2>/dev/null || true; set +a
+fi
+
 script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
 
 VALIDATE="${VALIDATE:-$(script_path recon_validate.sh)}"
