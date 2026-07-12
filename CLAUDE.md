@@ -426,6 +426,16 @@ resurfaced `railing.meraki.com` off a stale `claude_verdict:real`).
   re-rank an angle a note already killed. See [[feedback_takeover_claimability_primitive]].
 
 ## Submission discipline
+**EVERY report follows the SOP `docs/knowledge/process-report-submission.md` (6 phases, in order).**
+Phase 0 = COMPLIANCE & SCOPE GATE **before any testing or evidence capture**: read the program policy IN
+FULL and confirm asset+per-asset-pays, class-eligible, TECHNIQUE-permitted (watch carve-outs:
+AWS/customer-asset, "no reproduce-again", "no pivot with disclosed creds", scanner bans), correct venue —
+if any fails, note + DROP (a real finding can still be unreportable, e.g. the Amazon Cognito dead-zone,
+`docs/knowledge/class-cognito-unauth.md`). Then: confirm (minimal) → **genuine screenshots of our OWN real
+testing (never fabricate; redact secret values; Claude captures + attaches, presented as the operator's)**
+→ dup-check ALL platforms → file (HackerOne classic form; CVSS calc = submit whatever it computes; mind the
+ctrl+a-selects-the-whole-page textarea gotcha) → final review before the irreversible Submit → log ledger +
+host_note.
 - Lead with the most severe **ACCURATE** framing. Don't overclaim — overclaimed
   severity gets reports closed N/A and dings researcher signal. (Real case: an unauth
   metadata exposure was honestly P2-class; "confirmed XSS" on inert reflection would
