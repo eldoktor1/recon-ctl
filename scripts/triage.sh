@@ -1296,6 +1296,22 @@ apply_cluster_and_submission() {
         triage_ignored_reason: "shared-tenant per-customer console (uuid.unifi-hosting.ui.com) — third-party data, HARD LINE"
       }
     else . end) |
+    # Product-class per-customer hyperscale wildcards (Automattic/Shopify/Atlassian-Statuspage):
+    # every subdomain under these apexes is a DIFFERENT customer site (wordpress.com blogs,
+    # myshopify.com stores, statuspage.io pages) — third-party data + guaranteed dup, the exact
+    # same HARD LINE as the UniFi shared-tenant rule above (61 percent of the paying corpus is
+    # Automattic and it was flooding the lead lanes, e.g. the Tumblr "KEV-RCE" cards). Mark
+    # triage_ignored so they drop from every worklist (all must_not triage_ignored). Apex ROOTS are
+    # unaffected — the leading dot requires a subdomain, so wordpress.com / vendor infra is kept.
+    map(if (.host | test("\\.(wordpress|tumblr|wpcomstaging|myshopify)\\.com$"; "i"))
+           or (.host | test("\\.statuspage\\.io$"; "i")) then
+      . + {
+        score: 0,
+        signals: (.signals + ["suppress:product-class-thirdparty"]),
+        triage_ignored: true,
+        triage_ignored_reason: "product-class per-customer wildcard (wordpress/tumblr/myshopify/statuspage) — third-party data + dup, HARD LINE"
+      }
+    else . end) |
     # Unverified-KEV no-P0 cap (mirrors cap:pattern-only-no-p0). A host whose only
     # high-value evidence is a version/surface/plugin-unverified KEV fingerprint
     # (kev_unverified_sole, computed in apply_scope_kev_enrichment) is a LEAD, not a
