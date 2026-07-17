@@ -101,6 +101,32 @@ in_scope_pays() {  # in_scope_pays <host> -> 0 if in-scope AND paying AND not be
   r="$(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null | jq -r '.hits.total.value // 0' 2>/dev/null)"
   [[ "${r:-0}" -ge 1 ]]
 }
+# Saturated mega-programs the hunter should stay off (dup sea) unless something compelling. Matched
+# case-insensitively by whole-word program name, so a capitalized label ("Etsy") is still caught — do
+# NOT rely on the saturated_deprioritized flag alone (its backfill can lag / miss case variants).
+HUNTER_SATURATED="${HUNTER_SATURATED:-etsy amazonvrp quora elastic epicgames shopify reddit xiaomi automattic}"
+dup_sea() {  # dup_sea <host> -> 0 (skip) if it's the mainstream dup sea WITHOUT a compelling override.
+  #   - triage_ignored (product-class per-customer / third-party) = HARD skip, no override (never ours).
+  #   - saturated mega-program own surface (by flag OR program name) = skip UNLESS fresh or a KEV signal
+  #     makes it worth the dup-risk (the "absolutely has to be looked at" carve-out).
+  local host="$1" r ign dep prog fresh kev is_giant=0
+  r="$(es "$ES_URL/$INDEX_NAME/_search" -d "$(jq -nc --arg h "$host" '{size:1,_source:["triage_ignored","saturated_deprioritized","triage_program","triage_true_fresh","triage_kev_match"],query:{term:{host:$h}}}')" 2>/dev/null \
+      | jq -c '.hits.hits[0]._source // {}' 2>/dev/null)"
+  [[ -z "$r" || "$r" == "{}" ]] && return 1   # unknown host -> not dup-sea, allow
+  ign="$(jq -r '.triage_ignored // false' <<<"$r")"
+  dep="$(jq -r '.saturated_deprioritized // false' <<<"$r")"
+  prog="$(jq -r '(.triage_program // "") | ascii_downcase' <<<"$r")"
+  fresh="$(jq -r '.triage_true_fresh // false' <<<"$r")"
+  kev="$(jq -r '.triage_kev_match // false' <<<"$r")"
+  [[ "$ign" == "true" ]] && return 0                                   # product-class/third-party: always skip
+  [[ "$dep" == "true" ]] && is_giant=1
+  case " ${HUNTER_SATURATED} " in *" ${prog} "*) is_giant=1 ;; esac    # program-name catch (case-insensitive)
+  if [[ "$is_giant" == "1" ]]; then
+    [[ "$fresh" == "true" || "$kev" == "true" ]] && return 1           # compelling override -> look at it
+    return 0                                                           # saturated giant, nothing compelling -> skip
+  fi
+  return 1
+}
 program_of() {  # scope_check first (offline, authoritative), ES fallback
   local p=""
   [[ -f "$SCOPE_CHECK" ]] && p="$(bash "$SCOPE_CHECK" "$1" 2>/dev/null | jq -r '.program // empty' 2>/dev/null | sed 's/[[:space:]]*$//')"
@@ -123,16 +149,22 @@ FRAMEWORK-DEBUG HINT: PHP/Laravel/Symfony signals present — add UNAUTH-SAFE GE
   printf '%s\n' "$base"
 }
 
-pick_target() {  # autonomous: next in-scope+pays host with endpoints, not yet hunted
+pick_target() {  # autonomous: next in-scope+pays host with endpoints, not yet hunted, not worked-dead
   [[ -s "$ENDPOINTS" ]] || { warn "no endpoints feedstock ($ENDPOINTS)"; return 1; }
   local h
+  # worked-and-killed hosts (host_notes verdict=dead per tools/note_verdict.py) — never re-serve
+  # them (fixes the DIG card re-carrying killed hosts like charts.etoro; open/armed hosts survive).
+  local killed_file; killed_file="$(mktemp)"
+  python3 "$SCRIPT_DIR/../tools/note_verdict.py" killed-hosts "${NOTES_FILE:-$STATE_DIR/host_notes.jsonl}" 2>/dev/null > "$killed_file" || true
   while read -r h; do
     [[ -z "$h" ]] && continue
     grep -qxF "$h" "$SEEN" 2>/dev/null && continue
+    grep -qxF "$h" "$killed_file" 2>/dev/null && { printf '%s\n' "$h" >> "$SEEN"; continue; }  # skip worked-dead
     in_scope_pays "$h" || continue
-    printf '%s\n' "$h"; return 0
+    dup_sea "$h" && continue                                   # skip the mainstream dup sea (no SEEN mark — fresh/worth can flip)
+    printf '%s\n' "$h"; rm -f "$killed_file"; return 0
   done < <(jq -r '.host // empty' "$ENDPOINTS" 2>/dev/null | awk 'NF && !s[$0]++' | head -2000)
-  return 1
+  rm -f "$killed_file"; return 1
 }
 
 # ============================== the hunt =====================================================
@@ -161,13 +193,20 @@ ALREADY-COLLECTED ENDPOINT SURFACE (from JS mining of this host):
 $(printf '%s\n' "$endpoints")
 
 Do VARIANT-ANALYSIS-style reasoning (not open-ended): (1) build a concise app-model — the API surface,
-the auth/tenancy model, object types & ID schemes, roles, and business flows you can infer; then
-(2) produce SPECIFIC, FOCUSED, TESTABLE bug hypotheses a SCANNER CANNOT FIND — IDOR/BOLA, BAC/BFLA,
-business-logic, auth bypass, injection in real params, SSRF, sensitive exposure. For EACH hypothesis
-give the exact target_url + method, the concrete test, the expected-positive signal, whether it needs
-authentication, and whether it is SAFE to probe UNAUTHENTICATED with GET/HEAD/OPTIONS only
-(safe_to_probe=true ONLY for non-destructive unauth reads). DUP-AWARENESS: prefer unique per-app
-surface; mark product-class/common endpoints dup_risk=high. Be precise — 'looks interesting' is useless.
+the auth/tenancy model, object types & ID schemes, roles, tech stack, and business flows you can infer; then
+(2) pursue WHATEVER is genuinely interesting and high-EV on THIS host — do NOT tunnel on one vuln class.
+Range across the FULL surface as the evidence warrants: access control (IDOR/BOLA, BAC/BFLA), auth bypass,
+business-logic, injection in real params (SQLi/NoSQLi/command/template), SSRF, XSS, sensitive-data / secret
+exposure, exposed admin/debug/metrics/config panels, misconfiguration, request smuggling, open redirect,
+dangerous upload/file surfaces, n-day on the observed tech — plus anything the app-model suggests that a
+SCANNER CANNOT FIND. Follow the signal, not a checklist: if something warrants a look, form a hypothesis
+for it whatever its class; if nothing on this host warrants it, return few or zero hypotheses rather than
+forcing weak ones. For EACH hypothesis give the exact target_url + method, its vuln_class, the concrete
+test, the expected-positive signal, whether it needs authentication, and whether it is SAFE to probe
+UNAUTHENTICATED with GET/HEAD/OPTIONS only (safe_to_probe=true ONLY for non-destructive unauth reads;
+authed / active-exploit / 2-account classes -> safe_to_probe=false, they become an operator plan).
+DUP-AWARENESS: prefer unique per-app surface; mark product-class/common endpoints dup_risk=high and do
+NOT spend hypotheses on saturated commodity surface. Be precise — 'looks interesting' is useless.
 Rank by (real exploitability x payout x uniqueness). Return the app_model + up to 10 hypotheses."
   hyp_out="$(claude_json "$HUNTER_MODEL" "$HYP_SCHEMA" "$hyp_in")"
   [[ -n "$hyp_out" ]] || { warn "  hypothesize empty — retry once in 20s (rate-limit?)"; sleep 20; hyp_out="$(claude_json "$HUNTER_MODEL" "$HYP_SCHEMA" "$hyp_in")"; }
