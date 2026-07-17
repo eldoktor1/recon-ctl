@@ -1312,6 +1312,20 @@ apply_cluster_and_submission() {
         triage_ignored_reason: "product-class per-customer wildcard (wordpress/tumblr/myshopify/statuspage) — third-party data + dup, HARD LINE"
       }
     else . end) |
+    # Saturated mega-program DEPRIORITIZE — ranking only, NOT a hard suppression. Unlike the
+    # product-class rule above (third-party data => triage_ignored), these are the vendors OWN
+    # sprawling surface (etsy.com / amazon / shopify core): legitimately in scope, and a genuinely
+    # confirmed bug still counts and still flows to #review via db_confirm (which never reads this
+    # score). But they are high dup-risk mega-programs, so they must rank BELOW fresh/under-hunted
+    # surface in every lane (all sort by score desc). Subtract a penalty, floor at MIN_SCORE — the
+    # host stays workable, just never leads the card. NO triage_ignored (never removed).
+    map( ((.triage_program // "") | ascii_downcase) as $prog |
+         if (["etsy","amazonvrp","quora","elastic","epicgames","shopify","reddit","xiaomi"] | index($prog)) then
+           . + {
+             score: ([((.score // 0) - 8), 3] | max),
+             signals: (.signals + ["deprioritize:saturated-giant"])
+           }
+         else . end ) |
     # Unverified-KEV no-P0 cap (mirrors cap:pattern-only-no-p0). A host whose only
     # high-value evidence is a version/surface/plugin-unverified KEV fingerprint
     # (kev_unverified_sole, computed in apply_scope_kev_enrichment) is a LEAD, not a
