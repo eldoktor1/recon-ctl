@@ -90,9 +90,17 @@ fi
 # --- 1) IDOR/BAC worklist: rank then feed a WIDE pool to the filter. We must filter
 # BEFORE capping — if 88% of the worklist is product-class/shared-tenant noise, a
 # pre-filter .[0:12] would be all noise and crowd out the genuine leads ranked #13+. -->
+# FRESHNESS: a to-test entry stays to-test forever, so without an age bound the same
+# months-old lead (e.g. an admin.* IDOR from weeks back) re-serves every night. Drop
+# entries whose `at` is older than the window; keep un-stamped ones (never seen, but a
+# producer without `at` shouldn't be silently muted). Mirrors the digest-leads gate.
+WL_FRESH_DAYS="${WL_FRESH_DAYS:-30}"
+WL_CUTOFF="$(date -u -d "${WL_FRESH_DAYS} days ago" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+  || date -u -v-"${WL_FRESH_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')"
 leads="$(grep -aE '"status":"to-test"' "$WORKLIST" 2>/dev/null \
   | jq -c '. ' 2>/dev/null \
-  | jq -s 'unique_by(.host+.endpoint)
+  | jq -s --arg cut "$WL_CUTOFF" 'map(select((.at // "") == "" or (.at >= $cut)))
+           | unique_by(.host+.endpoint)
            | map(. + {rank: (({"critical":4,"high":3,"medium":2,"low":1}[.impact]) // 0) + (.confidence // 0)})
            | sort_by(-.rank) | .[0:80]' 2>/dev/null || echo '[]')"
 nlead="$(printf '%s' "$leads" | jq 'length' 2>/dev/null || echo 0)"
@@ -221,6 +229,20 @@ show_idor="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") != "n
 show_nday="$(printf '%s' "$show" | jq -c '[.[] | select((.vuln_type // "") == "n-day-cve")] | .[0:12]' 2>/dev/null || echo '[]')"
 nidor="$(printf '%s' "$show_idor" | jq 'length' 2>/dev/null || echo 0)"
 nnday="$(printf '%s' "$show_nday" | jq 'length' 2>/dev/null || echo 0)"
+
+# --- SUPPRESS worked-and-killed hosts: stop re-serving corpses. A host whose host_notes
+# verdict is "dead" (killed / not-a-finding / by-design / "do NOT re-walk", not re-armed) is
+# dropped from every LEAD stream. Confirmed findings (subs/held) are NOT touched. Open/armed
+# leads (RESUME/precondition-still-met without a kill) survive. See tools/note_verdict.py. ---
+NOTES_FILE="${NOTES_FILE:-$STATE_DIR/host_notes.jsonl}"
+KILLED_JSON="$(python3 "$REPO_DIR/tools/note_verdict.py" killed-hosts "$NOTES_FILE" 2>/dev/null | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
+_dk(){ printf '%s' "$1" | jq -c --argjson k "$KILLED_JSON" '[.[] | select((((.host // .source_host // "")|ascii_downcase) as $h | ($k|index($h)|not)))]' 2>/dev/null || printf '%s' "$1"; }
+_klen(){ printf '%s' "$1" | jq 'length' 2>/dev/null || echo 0; }
+_before=$(( $(_klen "$vleads") + $(_klen "$bkts") + $(_klen "$gql") + $(_klen "$wcd") + $(_klen "$show_idor") + $(_klen "$show_nday") ))
+vleads="$(_dk "$vleads")"; bkts="$(_dk "$bkts")"; gql="$(_dk "$gql")"; wcd="$(_dk "$wcd")"; show_idor="$(_dk "$show_idor")"; show_nday="$(_dk "$show_nday")"
+nvln="$(_klen "$vleads")"; nbkt="$(_klen "$bkts")"; ngql="$(_klen "$gql")"; nwcd="$(_klen "$wcd")"; nidor="$(_klen "$show_idor")"; nnday="$(_klen "$show_nday")"
+nkilled_supp=$(( _before - (nvln + nbkt + ngql + nwcd + nidor + nnday) ))
+[[ "$nkilled_supp" -gt 0 ]] && log "🔕 suppressed $nkilled_supp worked-and-killed lead(s) (host_notes verdict=dead — no longer re-served)"
 
 if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nneed:-0}" -eq 0 && "${nvln:-0}" -eq 0 && "${nbkt:-0}" -eq 0 && "${ngql:-0}" -eq 0 && "${nwcd:-0}" -eq 0 ]]; then
   [[ "${nsupp:-0}" -gt 0 ]] && log "all $nlead lead(s) suppressed ($supp_reasons); nothing to submit" \
