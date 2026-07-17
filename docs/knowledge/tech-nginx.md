@@ -116,7 +116,7 @@ curl -s -o /dev/null -w "%{http_code}" "https://<host>/static../"
 # 200 (same as /static/) → vulnerable; try:
 curl "https://<host>/static../.git/config"
 curl "https://<host>/static../etc/passwd"
-
+```
 
 ---
 <!-- applied-proposal: 2026-07-01_vulns_tech-nginx -->
@@ -148,3 +148,29 @@ rewrite ^/(?P<path>.*)$ /index.php?$path last;
   **Version alone = LEAD; vulnerable-config confirmation required for CONFIRMED.**
 - **Fingerprint (unauth):** `Server: nginx/<version>` ≤ 1.31.0.
 - **Source:** https://nginx.org/en/security_advisories.html
+
+
+---
+<!-- applied-proposal: 2026-07-11_vulns_tech-nginx + 2026-07-17_vulns_tech-nginx -->
+### Applied research — vulns (2026-07-11 / 2026-07-17) — "Rift wave" consolidation + detection caveats
+
+The three-CVE May-2026 "Rift" wave, consolidated (mostly detailed above — new here: version-range nuance
+per CVE, PoC pointer, and the `server_tokens` detection caveat). Our ES top-tech shows an exact running
+`Nginx:1.29.7` — IN RANGE for CVE-2026-42945 and CVE-2026-9256.
+
+| CVE | Component | Affected | Fixed | Notes |
+|---|---|---|---|---|
+| CVE-2026-42945 ("NGINX Rift") | ngx_http_rewrite_module | 0.6.27–1.30.0 (OSS) / Plus R32–R36 | 1.30.1 / 1.31.0 (OSS); R32 P6 / R36 P4 (Plus) | Unauth heap overflow; DoS reliable, RCE only w/o ASLR. Config-gated (unnamed capture `$1`/`$2` + `?` in replacement + chained `rewrite`/`if`/`set`) → **version match alone = LEAD**. CVSS 9.2. Public PoC: github.com/depthfirstdisclosures/nginx-rift (verify vs source). |
+| CVE-2026-9256 | ngx_http_rewrite_module (2nd overflow, overlapping captures) | 0.1.17–1.31.0 | 1.30.2 / 1.31.1+ | **NOT closed by patching Rift — separate fix required.** Same rewrite-config dependency as 42945. |
+| CVE-2026-8711 | njs `js_fetch_proxy` / `ngx.fetch()` | njs 0.9.4–0.9.8 *(njs version range — verify vs F5 advisory K000161307)* | njs 0.9.9 | Only relevant if njs module in use AND `ngx.fetch()` called with a client-controlled URL var. Heap overflow → RCE/DoS. |
+
+**Detection caveat (reusable):** `Server:`/error-page banner is the primary version fingerprint, but
+`server_tokens off` suppresses it — **absence of a version banner ≠ clean/safe**; treat unbannered Nginx
+hosts as unknown-version, not patched. The rewrite-config dependency (42945/9256) can't be confirmed
+unauth from the version alone; a genuine CONFIRMED needs a safe non-destructive differential
+(response-length / 500 on crafted `?`-bearing paths) — never a blind RCE/crash payload. Until that
+differential is built, in-range version = LEAD only.
+
+**Sources:** https://nvd.nist.gov/vuln/detail/CVE-2026-42945 · https://my.f5.com/manage/s/article/K000161019 ·
+https://almalinux.org/blog/2026-05-13-nginx-rift-cve-2026-42945/ ·
+https://lilting.ch/en/articles/nginx-njs-8711-rewrite-9256-second-wave *(2nd source obscure — CVE IDs/ranges verify vs NVD)*

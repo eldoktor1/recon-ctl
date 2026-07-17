@@ -21,6 +21,17 @@ Fingerprinting and exploitation surface for Varnish-fronted hosts. Relevant for 
 curl -X PURGE https://<target>/<path> -sv 2>&1 | grep -E "< HTTP|< Age|< X-Varnish"
 ```
 
+### Safe (non-state-changing) detection — OPTIONS `Allow:` probe (added 2026-07-11)
+The `curl -X PURGE` above is a **state-changing** action (issues a real cache invalidation) and stays
+operator-gated — NOT part of the autonomous safe-probe set. To fingerprint the misconfig *without* issuing
+a PURGE, send `OPTIONS` and inspect the `Allow:` response header for `PURGE` (with no auth challenge):
+```bash
+curl -X OPTIONS https://<target>/<path> -sv 2>&1 | grep -iE "< allow|< HTTP"
+```
+`Allow: ...PURGE...` on an unauthenticated OPTIONS = LEAD (deployment likely accepts unauth PURGE). Zero
+risk — nothing is purged. Confirming actual unauth cache invalidation/poisoning (the real `-X PURGE`) stays
+operator-gated.
+
 ## Active CVEs (2026)
 
 ### CVE-2026-34475 — URL Mishandling → Cache Poisoning / Auth Bypass (CVSS 5.4)

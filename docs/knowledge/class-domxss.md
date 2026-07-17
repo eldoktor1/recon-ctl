@@ -71,3 +71,20 @@ When scanning JS for DOMPurify:
 # Version detection
 grep -oE 'DOMPurify[^"]*"version"\s*:\s*"[0-9.]+"' *.js
 # Regex: 3\.(0\.[1-9]|[1-2]\.|3\.[0-3]) → vulnerable range
+```
+
+
+---
+<!-- applied-proposal: 2026-07-03_tooling_class-domxss -->
+### Applied research — tooling (2026-07-03)
+
+## Prototype Pollution → DOM-XSS: pphack (detection tool)
+- **Tool:** pphack — https://github.com/edoardottt/pphack (v0.1.4, May 2026; actively maintained as of 2026-07-03).
+- **What it does:** headless-Chromium scanner that injects client-side prototype-pollution payloads and detects
+  DOM-level impact dynamically — finds PP sinks dalfox and static miners are blind to.
+- **Our use pattern:** detection-only (autonomous runs keep the exploit `-e` flag OFF). A pphack hit is a **LEAD**;
+  feed it to `dalfox --deep-domxss --force-headless-verification` for the EXECUTION-confirmed primitive
+  (reflection/pollution ≠ XSS — same CONFIRMED-vs-LEAD gate as the rest of this doc).
+- **Pipeline fit:** pre-pass in `recon-domxss` ahead of the source→sink miner. Unauthed, GET-only, non-destructive.
+- **Dup resistance:** the crowd doesn't run automated PP detection; PP + gadget = XSS PoC without direct
+  injection = low dup-risk even on saturated programs. Pairs with the DOMPurify PP-gadget chain above (3.0.1–3.3.3).

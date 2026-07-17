@@ -83,6 +83,16 @@ fires) still correlate to the host via the subdomain token, just without the fir
   53/80/443); set `BLINDXSS_SERVER`/`BLINDXSS_TOKEN`/`BLINDXSS_DOMAIN`; `rm` the session file;
   `recon-restart`.
 
+## Tooling note — dalfox v3 (Rust rewrite), 2026-07-11 (verify installed version)
+dalfox **v3.0.0** (2026-05-25) is a full **Rust rewrite** with **AST-backed DOM verification** —
+fewer FPs from blind reflections, which our EXECUTION-only confirm gate benefits from directly.
+**v3.1.1** then (a) demoted inert `javascript:` / URL-scheme **self-link** reflections (a known FP
+class) and (b) restored recall for reflected XSS inside **raw-JS-expression / regex-literal**
+contexts. Action: confirm the reflected/DOM confirm harness (`recon_params.sh confirm xss`,
+`recon_domxss_confirm.sh`) runs **dalfox >= 3.1.1** — older builds both miss some real
+raw-JS-context reflections and mis-flag inert `javascript:` self-links as hits. (Version dates
+per upstream release notes — verify against the installed binary before relying on the behavior.)
+
 ## Sources
 - dalfox blind XSS: `-b`/`--blind` + `--custom-blind-xss-payload` (verified on the installed
   binary: built-in `-b` emits ~73 blind variants to the callback URL; custom payloads are sent

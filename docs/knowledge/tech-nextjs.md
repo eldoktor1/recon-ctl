@@ -121,3 +121,23 @@ Fingerprint version via `/_next/static/<buildId>/_buildManifest.js` or error-pag
 **Edge:** `Rsc: 1` + `__PAGE__` boundary is not in community nuclei templates. Crowd doesn't probe RSC internals.
 
 Source: https://zhero-web-sec.github.io/research-and-things/re-cache-excessive-reflection-type-confusion-and-0-click-sxss-on-nextjs
+
+
+---
+<!-- applied-proposal: 2026-07-11_kb-enrich_tech-nextjs -->
+### Applied research — kb-enrich (2026-07-11)
+
+## CVE-2026-44578 ⚠️ — WebSocket-upgrade SSRF (unauth, SELF-HOSTED only)
+(verify CVE-id↔advisory vs GitHub Security Advisories / NVD before minting — LLM-sourced, and the proposal's
+trigger payload was truncated so the exact request line is unconfirmed.)
+
+- **Affected:** SELF-HOSTED Next.js only (`next start`) — NOT Vercel-hosted deployments. Reported ranges
+  13.4.13–15.5.15 and 16.0.0–16.2.4 (version-confirm before scoring).
+- **Mechanism:** an asymmetric safety check in the WS-upgrade proxy path (`router-server.ts`) — it validates
+  `parsedUrl.protocol` but skips the `finished`/`statusCode` routing-approval flags the normal HTTP path
+  enforces → an unauthenticated single request can drive a server-side fetch (SSRF).
+- **Trigger (unauth, one request):** send an absolute-form request-target carrying a WS `Upgrade` header.
+  (Exact payload line NOT captured in the source proposal — confirm against the advisory PoC before use.)
+- **Detection / safety:** fingerprint self-hosted vs Vercel first (Vercel = not affected). Treat as a **LEAD**;
+  SSRF confirmation is an OUT-OF-BAND callback to an interactsh canary only — never point it at internal/
+  metadata endpoints (SSRF hard line, `feedback_interactsh_for_report_evidence`).

@@ -238,3 +238,79 @@ Single-session automated scanners produce near-100% FP on IDOR (confirmed by Bac
 **Never auto-confirm IDOR:** needs 2 owned accounts + operator-executed swap. The hunter provides the ranked hypothesis + the object reference + the swap instructions; the human runs the test.
 
 Source: https://arxiv.org/pdf/2512.19997, https://apiiro.com/blog/why-dast-tools-miss-real-idor-vulnerabilities-and-how-ai-helps/
+
+
+---
+<!-- applied-proposal: 2026-07-11_kb-enrich_class-idor -->
+### Applied research — kb-enrich (2026-07-11)
+
+## UUIDv7 timestamp-prefix — a distinct enumerability tier from UUIDv4
+
+RFC 9562 UUIDv7 (increasingly the default over sequential ints / UUIDv4 in newer ORMs — Rails 7.2+,
+Postgres 17 `uuidv7()`, many Node/Prisma stacks) embeds a **48-bit millisecond Unix timestamp** as the
+leading bits; only the remaining ~74 bits are random. So "ID type: uuid" is no longer one bucket for
+enumerability scoring:
+- **UUIDv4** — no leak vector = practically unguessable (existing KB position, correct, keep as-is).
+- **UUIDv7** — if an attacker can bound the target's creation time (a listing endpoint shows relative
+  age, a signup-confirmation email timestamp, "created today" copy, sequential adjacent records in a
+  feed), the search space collapses to one narrow millisecond window of pure randomness per guess —
+  much cheaper to brute than full UUIDv4. The timestamp itself is also a **PII/recon leak** standalone
+  (exact account/record-creation time, even without ever guessing the full ID).
+- **Detection:** decode any UUID with a `version` nibble of `7` (the `M` position in
+  `xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx`) — instantly recover the embedded creation timestamp
+  (ms-precision) with no exploitation, useful even just to prove recon/PII-leak impact.
+- **Scoring implication for `recon_idor_candidates.py`:** split the current `uuid=harvestable` bucket
+  into `uuidv4` (needs an external leak vector, keep low-priority) vs `uuidv7` (medium-priority even
+  standalone — decode-only PII leak; escalate if a plausible timestamp-narrowing leak vector exists
+  nearby, e.g. a public listing/feed on the same host).
+
+Sources: https://medium.com/@dimpchubb/exploiting-uuids-in-account-takeover-a-penetration-testers-guide-to-bypassing-insecure-token-96de9cc520a3 ,
+https://kkm-mako.com/en/blog/articles/uuid-v4-v7-bigint-primary-key-design/
+
+
+---
+<!-- applied-proposal: 2026-07-14_kb-enrich_class-idor -->
+### Applied research — kb-enrich (2026-07-14)
+
+## Mass assignment (auto-binding) — adjacent class worth checking on every IDOR endpoint
+
+If an endpoint auto-binds JSON body fields onto a backend model without an allowlist, a client can add
+fields never in the API's documented schema (`role`, `is_admin`, `owner_id`, `verified`) to a normal
+update/create call. **Test by diffing a request against the endpoint's OpenAPI/Swagger/GraphQL-schema
+field list** (we already harvest these via jsintel / recon-graphql) — any writable field NOT in the
+documented request schema is a mass-assignment candidate. Own-account PoC only (set a benign field on
+your own object; never a privilege field on a shared/third-party resource).
+
+**Bypass-shape checklist when a direct `?id=<victim>` swap correctly 403s/404s** (2-owned-account only;
+these largely reinforce the HPP / array-wrap / type-juggling techniques already documented above, with
+one added nuance): try HTTP Parameter Pollution in **both orderings** (`user_id=<mine>&user_id=<victim>`
+and reversed — some stacks take first occurrence, some last), array-wrap (`{"user_id":[<victim>]}` /
+`{"user_id":[<mine>,<victim>]}`), nested-object wrap (`{"user":{"id":<victim>}}`), and string/int type
+juggling — each against the SAME endpoint that blocked the naive swap.
+
+Sources:
+- https://0xgaurang.medium.com/case-study-bypassing-idor-via-parameter-pollution-78f7b3f9f59d
+- https://owasp.org/www-community/attacks/insecure_direct_object_reference
+- https://arxiv.org/pdf/2507.15984 (BACFuzz, broken-access-control fuzzing, Jul 2025 — verify)
+- https://arxiv.org/pdf/2405.01111 (mining REST APIs for mass assignment — verify)
+
+
+---
+<!-- applied-proposal: 2026-07-14_tooling_class-idor -->
+### Applied research — tooling (2026-07-14)
+
+## Hadrian (praetorian-inc/hadrian) — automated BOLA/BFLA role-matrix for the authed-confirm step
+
+Go, Apache-2.0, v1.0.0 (2026-03-26). Automates the exact human-in-loop BOLA/BFLA confirm workflow the
+SOP already does by hand: define per-role creds once, it cross-tests every role combination against
+every endpoint via setup (victim creates a resource) → attack (attacker requests it) → verify (confirms
+the unauthorized read/write actually succeeded) — real mutation testing, not status-code guessing. REST
+coverage strongest; GraphQL/gRPC templates thinner; no SSRF coverage. (Same tool already noted for the
+GraphQL IDOR SOP in `class-graphql.md`.)
+
+**Doctrine fit:** NOT for the autonomous unauth pipeline (it mutates state). Use it only the way we
+already use 2-owned-account manual IDOR testing — operator-run, against your own accounts / staging
+resources, `--dry-run` preview first. A force-multiplier for the existing authed-confirm step (fewer
+hand-crafted Repeater swaps per endpoint), not a new autonomous lane.
+
+Source: https://github.com/praetorian-inc/hadrian

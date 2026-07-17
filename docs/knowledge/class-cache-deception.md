@@ -216,3 +216,28 @@ Identify CDN before running WCD probes. Skip if CDN never caches dynamic routes 
 Varnish-fronted hosts expose a secondary bug class: unauthenticated PURGE. Add as `recon-wcd confirm` step for Varnish-identified hosts:
 ```bash
 curl -X PURGE https://<host>/<path> -sv | grep "< HTTP"
+```
+
+
+---
+<!-- applied-proposal: 2026-07-11_vulns_class-cache-deception + 2026-07-17_vulns_class-cache-deception -->
+### Applied research — vulns (2026-07-11 / 2026-07-17) — Varnish CVE-2026-34475 bare-`/` path-confusion variant
+
+**CVE-2026-34475 — Varnish Cache auth-bypass / cache-poisoning via root-path `req.url`** (CVSSv3.1 5.4;
+remote, unauth-reachable, high attack complexity). *(verify vs NVD/GHSA before minting — see caveat below.)*
+- **Affected:** Varnish Cache < 8.0.1 / Varnish Enterprise < 6.0.16r12. **Fixed:** 8.0.1 (OSS) / 6.0.16r12 (Ent).
+- **Mechanism:** improper validate-before-canonicalize (CWE-180) of a request whose URL path is exactly `/`
+  under an `unchecked req.url` VCL → cache-key confusion → cache poisoning or auth-boundary bypass.
+- **Why it matters for this lane:** a genuine cacheability-flip primitive (matches our WCD confirm bar, NOT
+  the by-design-CDN FP pattern) — and a concrete probe variant beyond generic suffix path-confusion: test the
+  **bare `/` differential** the same way `recon_wcd.sh` tests other path-confusion variants (unique per-host
+  cache-buster, never touch the shared cache; check for anomalous cached auth-state leakage).
+- **Detect:** confirm Varnish via `Via: 1.1 varnish` / `X-Varnish` headers (version is usually NOT
+  banner-exposed → confirm the flip **behaviorally**, not by version string), then version-gate before
+  treating as more than a LEAD.
+- **Sources:** https://nvd.nist.gov/vuln/detail/CVE-2026-34475 · https://github.com/advisories/GHSA-m9gq-cmcj-p62x
+  · https://www.sentinelone.com/vulnerability-database/cve-2026-34475/
+
+_(Note: a 2026-07-14 proposal re-surfaced the PortSwigger "Gotta Cache 'Em All" delimiter-discrepancy
+technique — Spring `;`, Rails `.`, OpenLiteSpeed `%00`, Nginx `%0a`, `#` — already covered above; not
+re-merged.)_

@@ -134,3 +134,24 @@ done
 
 **Confirm gate (all):** `recon-params confirm sqli <host>` → `'` vs `''` differential → sqlmap verify
 (in-scope+paying, `--delay 1 --threads 1`, PoC-only, never mass `--dump`). ⚠️ = LLM-sourced CVE, NVD/version-verify before minting.
+
+
+---
+<!-- applied-proposal: 2026-07-14_vulns_tech-wordpress -->
+### Applied research — vulns (2026-07-14)
+
+## CVE-2025-9501 ⚠️ — W3 Total Cache pre-auth RCE (add to n-day lane)
+- **Plugin:** W3 Total Cache ≤ 2.9.1 (1M+ installs). (verify plugin-slug↔CVE vs Patchstack/NVD before minting.)
+- **Mechanism:** `PgCache_ContentGrabber::_parse_dynamic_mfunc()` runs `eval()` on `mfunc` comment tags in a
+  cached page. A sanitize/parse regex mismatch (`\s+` vs `\s*`) reportedly lets the bug survive the vendor's
+  2.8.13 patch through 2.8.15 — so a version-only match is NOT a clean "patched" signal; still LEAD-gate it.
+- **Fingerprint (unauth, safe):** `GET /wp-content/plugins/w3-total-cache/readme.txt` → `Stable tag:` version;
+  W3TC-specific cache-control response headers.
+- **Preconditions for actual exploitation (all required):** knowing the site's secret `W3TC_DYNAMIC_SECURITY`
+  constant + comments enabled for unauth users + Page Cache active. A bare version match is a **LEAD only**
+  (KEV-tech-class-without-verified-primitive doctrine) — do NOT attempt injection without first confirming
+  comment-post reachability.
+- **Payload shape (reference only, for authorized confirm):**
+  `<!-- mfunc<SECRET> -->echo passthru($_GET[1337])<!-- /mfunc<SECRET> -->` submitted as a WP comment.
+  RCE is a hard-line NEVER for autonomous testing — operator-only, and only if scope + preconditions hold.
+- **Source:** https://www.rcesecurity.com/2025/11/exploiting-a-pre-auth-rce-in-w3-total-cache-for-wordpress-cve-2025-9501/

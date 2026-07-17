@@ -270,3 +270,19 @@ introspection of the page ≠ data exposure. Only guest-accessible *records* ret
 A guest site with object perms correctly locked returns aura errors / empty / auth-required.
 
 Seen on: `help.etoro.com` (standing #1), `staging.help.th.jobsdb.com` (SEEK/Bugcrowd, r201).
+
+---
+
+## Appendix (2026-07-11) — favicon-hash dork as a cheap uncover-lane enumeration add
+
+Add `http.favicon.hash:<mmh3(base64(favicon))>` as another scoped dork template in the
+`recon_uncover.sh` Shodan/Censys pass — same in-scope-cert/root scoping + credit-budget
+discipline as the existing dorks. Surfaces **shared-favicon infra** (staging / internal /
+forgotten hosts running the same app) that CT + subfinder enumeration misses, feeding fresh
+surface into U1/U4.
+
+**Discriminator (never over-trust it):** a favicon-hash match is an **ENUMERATION CANDIDATE
+only** → resolve → in-scope check → normal validator queue. NEVER treat it as standalone
+identity/ownership confirmation — favicons are trivially swapped and hashes collide across
+unrelated hosts (shared frameworks/CDNs). Same posture as every other uncover dork: it widens
+the net; the confirm primitive is still the per-lane one above.

@@ -364,7 +364,7 @@ block filters that look for `__schema` at the top-level query:
 ```graphql
 query { ...schemaFrag }
 fragment schemaFrag on Query { __schema { types { name fields { name } } } }
-
+```
 
 ---
 <!-- applied-proposal: 2026-06-25_vulns_class-graphql -->
@@ -432,3 +432,64 @@ Paid $12,500 CVSS 9.1 on a fintech GraphQL API (April 2026). Source: https://inf
 - GitHub: https://github.com/omar2535/GraphQLer | v2.3.8 Mar 2026
 - Dependency-graph fuzzer: chains queries based on schema, surfaces IDOR via object-ref args
 - GATE: `--disable-mutations` required; operator-triggered only (not autonomous daemon). Sends real queries.
+
+
+---
+<!-- applied-proposal: 2026-07-11_kb-enrich_class-graphql -->
+### Applied research — kb-enrich (2026-07-11)
+
+## Apollo Federation subgraphs — `_service { sdl }` schema disclosure (bypasses introspection-off)
+
+Distinct from single-schema GraphQL: federated graphs (Apollo Router + subgraphs) have surface the
+crowd doesn't check because our tooling (`recon_graphql.sh`, graphw00f, graphql-cop) targets the
+gateway, not the subgraphs behind it.
+
+Every Apollo Federation subgraph implements a **federation-layer** field (`_service`) that is
+independent of core GraphQL introspection — so disabling `__schema` has **no effect** on it. A subgraph
+that reached us directly (or a router that forwards the query) will return the full SDL:
+```graphql
+{"query":"query{_service{sdl}}","operationName":null}
+```
+The response's `data._service.sdl` is the complete schema text — recover it even when
+`introspection: false`. Read-only, unauth-safe (`{__typename}`-class), same LEAD gate as any schema
+recovery: the SDL alone is Info/dup; value is the reasoning pass over the recovered ops (sensitive
+mutations / IDOR object-ref args / injectable args). Also probe the federation `_entities(representations:)`
+resolver, which subgraphs expose for cross-graph object resolution — a candidate object-ref/IDOR surface.
+(NOTE: the source proposal was truncated after the code fence; `_service{sdl}` behaviour and the
+introspection-off bypass are the actionable core — verify `_entities` arg shapes against the specific
+subgraph before relying on them.)
+
+Fingerprint: an `_service`/`_entities` field present, or a `sdl`/`@key`/`@external` directive in any
+recovered schema, signals a federated deployment worth the subgraph-direct check.
+
+
+---
+<!-- applied-proposal: 2026-07-14_kb-enrich_class-graphql -->
+### Applied research — kb-enrich (2026-07-14)
+
+## Nested-field authorization gap + safe batching/aliasing rate-limit-bypass detection
+
+**Nested-field authorization gap (new LEAD type for the schema-walk worklist).** Some backends
+authorize the top-level query/mutation but NOT the fields resolved underneath it — e.g. a public
+`product(id)` query whose nested `product.owner.email` resolver skips its own auth check. Distinct from
+top-level unauth-mutation exposure: same schema-harvest pass, different auth boundary. When ranking,
+flag object types whose nested fields reach PII/owner/account data even though the parent query looks
+harmless.
+
+**Batching/aliasing rate-limit bypass — a SAFE detection primitive.** GraphQL lets a client alias the
+same field/operation N times in one request; the server executes all N, but naive rate limiters count
+HTTP requests, not GraphQL operations (1 request = N operations, invisible to request-count throttling).
+This complements the existing "GraphQL Batch Query Abuse" note (array-batching) with the **aliasing**
+variant and an unauth-safe way to prove throttle-blindness without touching a sensitive op:
+- Send N aliased copies of an already-safe query (`{ a0:__typename a1:__typename … }`) in a single POST;
+  compare against sending N separate single-operation requests.
+- If the batched form completes all N where sequential single requests get rate-limited/blocked after
+  M<N, mint `graphql:ratelimit-bypass` (**LEAD, not P0** — impact requires pointing it at a real
+  throttled endpoint like login/OTP/password-reset, which is a MUTATION and stays human-owned /
+  2-account per doctrine).
+
+Sources:
+- https://checkmarx.com/blog/didnt-notice-your-rate-limiting-graphql-batching-attack/
+- https://lab.wallarm.com/graphql-batching-attack/
+- https://escape.tech/blog/graphql-batch-attacks-cause-dos/
+- https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html
