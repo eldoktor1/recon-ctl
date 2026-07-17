@@ -447,6 +447,97 @@ def chk_queue() -> dict:
     return finding("queue.state", "OK", "ok", f"queue healthy (inbox={inbox}, processing={proc}, validate cycling).", remediation_class="none")
 
 
+def _es_search_count(body: dict) -> int:
+    """POST a search body to _count. Returns -1 on any error (caller treats as 'unknown')."""
+    import urllib.request, base64
+    pw = _es_pw()
+    headers = {"Content-Type": "application/json"}
+    if pw:
+        headers["Authorization"] = "Basic " + base64.b64encode(f"elastic:{pw}".encode()).decode()
+    req = urllib.request.Request(f"{ES_URL}/{ES_INDEX}/_count",
+                                 data=json.dumps(body).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return int(json.load(r).get("count", -1))
+    except Exception:
+        return -1
+
+
+def chk_board_coverage() -> list:
+    """TARGETING-AIM invariant (not plumbing): every top-N pick on the Under-Hunted
+    Target Board must actually reach enumeration. A pick that is marked onboarded but
+    has 0 resolved hosts in recon_alive is a SILENT onboard failure — the selection
+    layer named a fresh, low-dup target and the funnel never walked it (one-shot
+    onboard ledger with no yield check, broken root extraction, or a dead drain lane).
+    This is exactly the gap that let the board keep advertising Hypixel while it had 0
+    enumerated hosts. Detect-only; roots are matched label-independently so a program
+    stored under a different triage_program key still counts."""
+    out = []
+    topn = int(os.environ.get("AUDIT_BOARD_TOPN", "5"))
+    board = os.path.join(BASE_DIR, "briefings", "targets_latest.json")
+    onboarded_f = os.path.join(STATE_DIR, "targets_onboarded.txt")
+    if not os.path.isfile(board):
+        return [finding("board.coverage", "LOW", "warn",
+                        f"target board {board} missing — under-hunted selection layer not generating.",
+                        remediation_class="human")]
+    try:
+        progs = (json.load(open(board, encoding="utf-8")).get("programs") or [])[:topn]
+    except Exception as e:
+        return [finding("board.coverage", "LOW", "warn", f"target board unreadable: {e}", remediation_class="human")]
+    try:
+        onboarded = set(l.strip() for l in open(onboarded_f, encoding="utf-8") if l.strip())
+    except Exception:
+        onboarded = set()
+
+    dark = []          # onboarded-but-0-hosts (the real defect)
+    unwalked = []      # top pick, not onboarded, 0 hosts (onboard hasn't fired yet)
+    root_users = {}    # root -> [pick names]  (shared-root anomaly = broken extraction)
+    es_ok = True
+    for r in progs:
+        if not r.get("pays"):
+            continue
+        name = r.get("name") or r.get("key") or "?"
+        roots = [x for x in (r.get("roots") or []) if x]
+        for rt in roots:
+            root_users.setdefault(rt, []).append(name)
+        if not roots:
+            dark.append(f"{name} (no roots extracted)")
+            continue
+        should = ([{"match_phrase": {"root_domain": rt}} for rt in roots]
+                  + [{"match_phrase": {"host": rt}} for rt in roots])
+        n = _es_search_count({"query": {"bool": {"should": should, "minimum_should_match": 1}}})
+        if n < 0:
+            es_ok = False
+            continue
+        if n == 0:
+            (dark if (r.get("key") in onboarded) else unwalked).append(name)
+
+    # shared-root anomaly: >1 distinct pick pinned to the SAME single root = extraction bug
+    shared = {rt: u for rt, u in root_users.items() if len(set(u)) > 1}
+
+    if not es_ok and not dark and not unwalked:
+        return [finding("board.coverage", "LOW", "warn", "ES count unavailable — board coverage not verified.",
+                        remediation_class="human")]
+    if dark:
+        out.append(finding("board.coverage", "MEDIUM", "warn",
+                           f"{len(dark)} top-{topn} board pick(s) ONBOARDED but 0 enumerated hosts (silent onboard "
+                           f"failure — fresh target dark): {', '.join(dark[:6])}. The board is advertising targets "
+                           f"the funnel never walked.", remediation_class="claude-code"))
+    if shared:
+        anom = "; ".join(f"{rt} ← {', '.join(sorted(set(u)))}" for rt, u in list(shared.items())[:4])
+        out.append(finding("board.roots", "MEDIUM", "warn",
+                           f"{len(shared)} root(s) shared across DISTINCT board picks (broken root extraction — the "
+                           f"picks will enumerate the wrong surface): {anom}.", remediation_class="claude-code"))
+    if unwalked:
+        out.append(finding("board.coverage_pending", "LOW", "warn",
+                           f"{len(unwalked)} top-{topn} pick(s) not yet enumerated (0 hosts, onboard not fired): "
+                           f"{', '.join(unwalked[:6])}.", remediation_class="human"))
+    if not out:
+        out.append(finding("board.coverage", "OK", "ok",
+                           f"all payable top-{topn} board picks have enumerated hosts.", remediation_class="none"))
+    return out
+
+
 def chk_spool() -> dict:
     failed = os.path.join(BASE_DIR, "spool", "failed")
     try:
@@ -531,6 +622,7 @@ def run_checks() -> list:
     checks.append(chk_dangling_refs())
     checks.extend(chk_daemon())
     checks.append(chk_queue())
+    checks.extend(chk_board_coverage())
     checks.append(chk_spool())
     checks.extend(chk_perms())
     checks.extend(chk_growth())

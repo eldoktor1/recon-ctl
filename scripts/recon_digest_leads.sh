@@ -39,6 +39,13 @@ INDEX_NAME="${INDEX_NAME:-recon_alive}"
 LEDGER="${LEDGER:-$STATE_DIR/worked_targets.jsonl}"
 IGNORED="${IGNORED:-$STATE_DIR/ignored.jsonl}"
 MAXN="${LEADS_MAX:-25}"
+# Freshness window: a signal not re-seen within this many days is stale — do NOT re-serve it.
+# A portscan/KEV/secret result never ages out of the index on its own, so without this bound
+# the same weeks-old lead re-posts to #digest every night. Computed as an ISO cutoff so the
+# ES range works whether last_seen is date- or keyword-mapped.
+LEADS_FRESH_DAYS="${LEADS_FRESH_DAYS:-30}"
+FRESH_CUTOFF="$(date -u -d "${LEADS_FRESH_DAYS} days ago" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+  || date -u -v-"${LEADS_FRESH_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '1970-01-01T00:00:00Z')"
 
 MODE="${1:-print}"
 NOTE_FILE="${2:-}"          # optional: file whose contents become a 2nd "Claude enforcer" embed
@@ -50,6 +57,19 @@ touch "$LEDGER" "$IGNORED" 2>/dev/null || true
 
 ec() { curl -sS -m 30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
 
+# Product-class / per-customer hyperscale wildcards: every subdomain under these apexes is a
+# DIFFERENT customer's site (wordpress.com blogs, myshopify.com stores, statuspage.io pages) —
+# third-party data + guaranteed dup, the Automattic/Shopify analogue of the UniFi shared-tenant
+# HARD LINE. Excluded from the vuln-leads lane so a KEV/portscan signal on a customer blog (the
+# Tumblr/WordPress "KEV-RCE" flood) never reaches the card. Apex roots themselves are unaffected
+# (`*.wordpress.com` matches sub.wordpress.com, not wordpress.com). Tunable via env.
+PRODUCT_CLASS_APEXES="${PRODUCT_CLASS_APEXES:-wordpress.com tumblr.com wpcomstaging.com myshopify.com statuspage.io}"
+PC_MUSTNOT=""
+# NOTE: script-level IFS=$'\n\t' means an unquoted $PRODUCT_CLASS_APEXES will NOT word-split on
+# spaces — force a space split here so each apex becomes its own wildcard clause.
+IFS=' ' read -r -a _pc_apexes <<< "$PRODUCT_CLASS_APEXES"
+for _apex in "${_pc_apexes[@]}"; do [ -n "$_apex" ] && PC_MUSTNOT+="{\"wildcard\": {\"host\": \"*.${_apex}\"}}, "; done
+
 # ── 1) Fetch candidates: any high-value signal, gated to paying scope ────────
 read -r -d '' QBODY <<JSON || true
 {
@@ -57,8 +77,15 @@ read -r -d '' QBODY <<JSON || true
   "track_total_hits": true,
   "query": {
     "bool": {
-      "filter": [ {"term": {"triage_pays": true}} ],
-      "must_not": [ {"term": {"triage_ignored": true}} ],
+      "filter": [
+        {"term":  {"triage_pays": true}},
+        {"range": {"last_seen": {"gte": "$FRESH_CUTOFF"}}}
+      ],
+      "must_not": [
+        $PC_MUSTNOT
+        {"term":  {"triage_ignored": true}},
+        {"range": {"ignore_expires_at": {"gt": "now"}}}
+      ],
       "minimum_should_match": 1,
       "should": [
         {"term":  {"triage_kev_match": true}},
@@ -127,7 +154,13 @@ selected="$(jq -n \
     . as $h | (.triage_kev_cves // []) as $cves
     | if   (.takeover_confirmed // false) then {cls:"takeover", w:100, floor:true,  what:"Confirmed subdomain takeover — claim now"}
       elif ((.v2_nuclei_status // "") == "confirmed") then {cls:"nuclei", w:96, floor:true,  what:("Nuclei-confirmed: " + (.v2_nuclei_template // "?") + " [" + (.v2_nuclei_severity // "?") + "]")}
-      elif (((.portscan_critical // 0)|tonumber) == 1) then {cls:"portcrit", w:90, floor:true,  what:("Exposed critical port(s): " + ((.portscan_open_ports // [])|map(tostring)|join(",")))}
+      elif (((.portscan_critical // 0)|tonumber) == 1) then
+        ( ((.portscan_open_ports // [])|length) as $np
+          | if ((.cdn_name // "") != "" or $np > 6)
+            then {cls:"portcrit-artifact", w:5, floor:false,
+                  what:("Likely scan artifact — " + (if (.cdn_name//"")!="" then ("CDN-fronted ("+(.cdn_name)+"): CDNs ACK every port") else (($np|tostring)+" \"open\" critical ports on one host = scan noise") end))}
+            else {cls:"portcrit", w:90, floor:false,
+                  what:("Exposed critical port(s): " + ((.portscan_open_ports // [])|map(tostring)|join(",")))} end )
       elif (((.bypass_top_confidence // 0)|tonumber) >= 60) then {cls:"bypass", w:88, floor:true,  what:("Auth bypass conf " + ((.bypass_top_confidence)|tostring) + " via " + (.bypass_technique // "?"))}
       elif ((.triage_kev_match // false) and (srvkev.w > 0)) then (srvkev as $k | {cls:$k.kind, w:$k.w, floor:false, what:("KEV " + (.triage_kev_signal // "") + ": " + ($cves|join(", ")))})
       elif ((.triage_breaking_vuln // false) and (($cves|length)>0) and (is_wp|not)) then {cls:"breaking", w:66, floor:false, what:("Breaking vuln " + (.triage_vuln_tier // "") + ": " + ($cves|join(", ")))}
@@ -177,11 +210,12 @@ selected="$(jq -n \
     | ($seen[.host] // null) as $prev
     # enforcer tiers:
     | (if   $H.floor then (if $H.w >= 88 then "PROMOTE" else "HOLD" end)
-       elif ($H.cls=="kev-rce") then "PROMOTE"
+       elif ($H.cls=="portcrit" or $H.cls=="kev-rce") then "PROMOTE"
        elif ($H.cls=="kev-cms" or $H.cls=="breaking" or $H.cls=="js") then "HOLD"
-       elif ($H.cls=="kev-wp") then "SUPPRESS"
+       elif ($H.cls=="kev-wp" or $H.cls=="portcrit-artifact") then "SUPPRESS"
        else "SUPPRESS" end) as $tier
     | (if   $H.cls=="kev-wp" then "managed/CDN WordPress; core KEV map not version-confirmed, high FP"
+       elif $H.cls=="portcrit-artifact" then $H.what
        elif $H.cls=="low" then "below promotion threshold; no confirmed or server-software signal"
        else "" end) as $supreason
     | {

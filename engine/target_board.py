@@ -41,8 +41,22 @@ def _get(url, timeout=25):
     req = urllib.request.Request(url, headers={"User-Agent": "recon-targets"})
     return urllib.request.urlopen(req, timeout=timeout).read()
 
+# Shared third-party app-marketplace / hosting hosts. A program whose scope points here
+# (e.g. an Atlassian-Marketplace app vendor's Bugcrowd scope = marketplace.atlassian.com/apps/…)
+# has NO ownable enumeration surface — subdomain recon on the shared host finds only the
+# PLATFORM's assets, never the vendor's. These collapse many distinct programs onto one root
+# and poison the board's top slots (RV Softwares / 55 Degrees / AppLiger all → marketplace.atlassian.com).
+# The board exists to point ENUMERATION depth; a host we can't enumerate for THIS program is not a root.
+PLATFORM_HOSTS = {
+    "marketplace.atlassian.com", "apps.shopify.com", "chromewebstore.google.com",
+    "chrome.google.com", "addons.mozilla.org", "apps.apple.com", "play.google.com",
+    "marketplace.visualstudio.com", "workspace.google.com", "gsuite.google.com",
+    "appsource.microsoft.com", "store.salesforce.com", "appexchange.salesforce.com",
+}
+
 def _host(s):
-    """Extract a bare hostname from a scope string (URL / host / wildcard)."""
+    """Extract a bare hostname from a scope string (URL / host / wildcard).
+    Returns None for shared-platform hosts (see PLATFORM_HOSTS) so they never become roots."""
     if not s or not isinstance(s, str): return None
     s = s.strip()
     s = re.sub(r"^[a-zA-Z]+://", "", s)          # strip scheme
@@ -50,7 +64,9 @@ def _host(s):
     s = s.split("@")[-1].split(":")[0]           # strip creds/port
     s = s.lstrip("*.").strip(". ")               # *.x.com -> x.com
     if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", s, re.I): return None
-    return s.lower()
+    s = s.lower()
+    if s in PLATFORM_HOSTS: return None
+    return s
 
 # ---- per-platform normalizers -> common program record ----
 def norm_hackerone(p):
@@ -199,7 +215,10 @@ def score(r):
 
 def write_outputs(progs):
     today = date.today().isoformat()
-    payable_authed = [r for r in progs if r["pays"] and r["authed"]]
+    # require a REAL enumeration root: a paying+authed program whose only scope was a shared
+    # platform host (roots now empty) can't be enumerated for itself — keep it off the board so
+    # it never occupies a top slot or gets onboarded to walk someone else's marketplace.
+    payable_authed = [r for r in progs if r["pays"] and r["authed"] and r.get("roots")]
     md = [f"# 🎯 UNDER-HUNTED TARGET BOARD — {today}",
           "",
           "Ranked by **Under-Hunted EV** (freshness + low-saturation dominate; payout capped = anti-dup).",
