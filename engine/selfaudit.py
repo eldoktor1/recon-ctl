@@ -46,6 +46,7 @@ SELFAUDIT_INTERVAL_H = float(os.environ.get("AUDIT_INTERVAL_H", "6"))
 OPS_COOLDOWN_H    = float(os.environ.get("AUDIT_OPS_COOLDOWN_H", "12"))
 ES_MIN_DOCS       = int(os.environ.get("AUDIT_ES_MIN_DOCS", "1000"))
 QUEUE_BACKLOG_WARN = int(os.environ.get("AUDIT_QUEUE_BACKLOG_WARN", "2000"))
+QUEUE_BULK_WARN    = int(os.environ.get("AUDIT_QUEUE_BULK_WARN", "10000"))  # deprioritized bulk_ pile size that never drains -> surface it
 DRAIN_STALE_MIN   = float(os.environ.get("AUDIT_DRAIN_STALE_MIN", "20"))   # validate lock older => not draining
 DAEMON_CHILD_FLOOR = int(os.environ.get("AUDIT_DAEMON_CHILD_FLOOR", "12")) # supervise subshells expected
 
@@ -426,25 +427,50 @@ def _validate_draining() -> bool:
 
 def chk_queue() -> dict:
     import glob
-    def _count(sub, pat="*.txt"):
-        return len(glob.glob(os.path.join(BASE_DIR, "queue", sub, pat)))
-    inbox = _count("inbox")
-    proc = _count("processing")
+    qi = os.path.join(BASE_DIR, "queue", "inbox")
+    inbox   = len(glob.glob(os.path.join(qi, "*.txt")))
+    bulk    = len(glob.glob(os.path.join(qi, "bulk_*.txt")))
+    restale = len(glob.glob(os.path.join(qi, "restale_*.txt")))
+    active  = inbox - bulk - restale     # the fast-drain queue fresh producers gate on (they exclude bulk_/restale_)
+    proc    = len(glob.glob(os.path.join(BASE_DIR, "queue", "processing", "*.txt")))
     draining = _validate_draining()
-    # BROKEN = inbox piled up AND validate is NOT cycling (stale lock). STARVED = empty
-    # inbox + nothing draining (idle, not a fault). A big inbox while validate cycles is
-    # a backlog warning, never a page.
-    if inbox >= QUEUE_BACKLOG_WARN and not draining:
+    # Trend memory (mirrors chk_spool): a backlog that is NOT shrinking run-over-run is chronic —
+    # validate cycles but producers outpace it. This is the blind spot that let a 47k bulk pile
+    # soft-warn "watch it drain" for weeks without ever escalating.
+    prev_f = os.path.join(STATE_DIR, ".selfaudit_queue_inbox_prev")
+    prev = None
+    try: prev = int(open(prev_f).read().strip())
+    except Exception: prev = None
+    try: open(prev_f, "w").write(str(inbox))
+    except Exception: pass
+
+    # BROKEN = the fast-drain queue piled up AND validate is NOT cycling (stale lock) => page.
+    if active >= QUEUE_BACKLOG_WARN and not draining:
         return finding("queue.state", "HIGH", "fail",
-                       f"queue BROKEN: inbox={inbox} and validate not draining (no validate*.lock newer than {DRAIN_STALE_MIN}min).",
+                       f"queue BROKEN: active inbox={active} and validate not draining (no validate*.lock newer than {DRAIN_STALE_MIN}min).",
                        remediation_class="human")
-    if inbox >= QUEUE_BACKLOG_WARN:
+    if active >= QUEUE_BACKLOG_WARN:
+        # cycling but not shrinking across runs = chronic; producers outpace the validator => escalate.
+        if prev is not None and inbox >= prev:
+            return finding("queue.state", "HIGH", "fail",
+                           f"queue backlog CHRONIC: active inbox={active} (total={inbox}, bulk={bulk}) NOT shrinking (was {prev} last run) "
+                           f"— validate cycles but producers outpace it. Find the flooding producer / drain or purge.",
+                           remediation_class="human")
         return finding("queue.state", "MEDIUM", "warn",
-                       f"queue backlog high (inbox={inbox} >= {QUEUE_BACKLOG_WARN}); validate IS cycling — watch it drain.",
+                       f"queue backlog high (active inbox={active} >= {QUEUE_BACKLOG_WARN}, was {prev}); validate cycling and shrinking — watch it drain.",
+                       remediation_class="human")
+    # Deprioritized bulk pile: drains LAST (every fresh producer excludes bulk_*), so it can sit
+    # indefinitely. Not a page, but never let a large stale pile hide — surface it with the purge cmd.
+    if bulk >= QUEUE_BULK_WARN:
+        return finding("queue.state", "MEDIUM", "warn",
+                       f"deprioritized bulk pile: {bulk} bulk_*.txt jobs (active queue healthy at {active}); bulk drains last so this "
+                       f"sits indefinitely — purge if stale: find {qi} -maxdepth 1 -name 'bulk_*.txt' -delete.",
                        remediation_class="human")
     if inbox == 0 and not draining:
         return finding("queue.state", "INFO", "ok", "queue STARVED (empty inbox, validate idle) — idle, not broken.", remediation_class="none")
-    return finding("queue.state", "OK", "ok", f"queue healthy (inbox={inbox}, processing={proc}, validate cycling).", remediation_class="none")
+    return finding("queue.state", "OK", "ok",
+                   f"queue healthy (inbox={inbox}, active={active}, bulk={bulk}, processing={proc}, validate cycling).",
+                   remediation_class="none")
 
 
 def _es_search_count(body: dict) -> int:
