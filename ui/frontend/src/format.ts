@@ -8,6 +8,11 @@ export function fmtDuration(sec: number | null | undefined): string {
   return `${m}m`;
 }
 
+// Coerce a possibly-scalar ES field (tech/classes can be string or array) to an array.
+export function asArr(v: any): any[] {
+  return Array.isArray(v) ? v : v == null || v === "" ? [] : [v];
+}
+
 export function fmtNum(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString();

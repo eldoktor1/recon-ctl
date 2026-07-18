@@ -45,6 +45,18 @@ class TaskManager:
     def list(self) -> list[dict[str, Any]]:
         return [t.snapshot() for t in sorted(self.tasks.values(), key=lambda x: -x.id)]
 
+    def _prune(self, keep: int = 60) -> None:
+        """Drop the oldest finished tasks so the registry doesn't grow unbounded."""
+        if len(self.tasks) <= keep:
+            return
+        finished = sorted(
+            (t for t in self.tasks.values() if t.state != "running"),
+            key=lambda x: x.id,
+        )
+        drop = len(self.tasks) - keep
+        for t in finished[:drop]:
+            self.tasks.pop(t.id, None)
+
     def get(self, tid: int) -> Task | None:
         return self.tasks.get(tid)
 
@@ -55,6 +67,7 @@ class TaskManager:
         # started_at needs a wall clock; time.time is fine here (not a workflow script)
         t = Task(id=tid, label=label, argv=argv, started_at=_t.time())
         self.tasks[tid] = t
+        self._prune()
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
@@ -78,9 +91,12 @@ class TaskManager:
                         pass
             await t.proc.wait()
             t.returncode = t.proc.returncode
-            t.state = "done" if t.proc.returncode == 0 else "failed"
+            # don't clobber a state stop() already set to "stopped"
+            if t.state == "running":
+                t.state = "done" if t.proc.returncode == 0 else "failed"
         except Exception as e:
-            t.state = "failed"
+            if t.state == "running":
+                t.state = "failed"
             t.lines.append(f"[task error] {e}")
         finally:
             for q in list(t.subscribers):

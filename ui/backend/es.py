@@ -17,7 +17,7 @@ SOURCE_FIELDS = [
     "host", "triage_priority", "triage_score", "triage_payout_tier", "triage_program",
     "triage_classes", "triage_kev_match", "triage_kev_cves", "triage_true_fresh",
     "triage_pays", "triage_ignored", "takeover_confirmed", "takeover_service",
-    "takeover_cname", "takeover_confidence", "js_secret_hit", "js_endpoint_hit",
+    "takeover_cname", "takeover_confidence", "takeover_payout", "js_secret_hit", "js_endpoint_hit",
     "host_notes", "host_notes_count", "host_notes_text", "ignore_active",
     "ignore_reason", "ignore_expires_at", "title", "tech", "portscan_critical",
     "first_seen", "last_seen",
@@ -91,8 +91,9 @@ async def search(
     body = {
         "query": _build_query(q, program, priority, cls, tech, kev, fresh, pays, include_benched),
         "_source": SOURCE_FIELDS,
-        "from": offset,
-        "size": min(limit, 500),
+        # ES max_result_window is 10000 — clamp from+size so a deep page never errors
+        "from": max(0, min(offset, 10000)),
+        "size": max(0, min(limit, 500, 10000 - min(offset, 10000))),
         "sort": [{sort: {"order": "desc", "unmapped_type": "long"}}, "_score"],
     }
     try:

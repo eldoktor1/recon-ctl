@@ -1,5 +1,5 @@
-import { NavLink, Route, Routes } from "react-router-dom";
-import { useLiveStatus } from "./hooks";
+import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { useLiveStatus, StatusProvider } from "./hooks";
 import { Pill } from "./components/ui";
 import { fmtNum } from "./format";
 import CommandCenter from "./pages/CommandCenter";
@@ -13,9 +13,12 @@ import Ops from "./pages/Ops";
 import Telemetry from "./pages/Telemetry";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
+import TargetBoard from "./pages/TargetBoard";
+import Digest from "./pages/Digest";
 import { ToastProvider } from "./components/controls";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Logo } from "./components/Logo";
+import { CommandPalette } from "./components/CommandPalette";
 
 interface NavItem { to: string; label: string; icon: string; phase?: string }
 
@@ -25,26 +28,33 @@ const NAV: NavItem[] = [
   { to: "/assets", label: "Asset Explorer", icon: "❑" },
   { to: "/leads", label: "Leads", icon: "✦" },
   { to: "/notes", label: "Notes", icon: "✎" },
+  { to: "/targets", label: "Target Board", icon: "◈" },
   { to: "/hunt", label: "Hunt Control", icon: "➤" },
   { to: "/ops", label: "Daemon / Ops", icon: "⚙" },
+  { to: "/digest", label: "Digest", icon: "▦" },
   { to: "/telemetry", label: "Telemetry", icon: "▤" },
   { to: "/reports", label: "Reports", icon: "✉" },
   { to: "/settings", label: "Settings", icon: "⧉" },
 ];
 
 function TopBar() {
-  const { status, connected } = useLiveStatus();
+  const { status, connected, staleMs } = useLiveStatus();
   const d = status?.daemon;
   const vpn = status?.vpn;
   const es = status?.es;
+  const stale = staleMs > 12_000;
+  const openPalette = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
   return (
     <header className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-panel)]/80 px-5 py-2.5 backdrop-blur">
-      <div className="flex items-center gap-2">
-        <span className="text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">live</span>
+      <div className="flex items-center gap-3">
+        <button onClick={openPalette}
+          className="mono flex items-center gap-2 rounded-md border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-3 py-1 text-[11px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]">
+          <span>⌕ search…</span><span className="rounded bg-[var(--color-bg)] px-1">⌘K</span>
+        </button>
         <span
-          className={`inline-block h-2 w-2 rounded-full ${connected ? "live-dot" : ""}`}
-          style={{ background: connected ? "var(--color-good)" : "var(--color-ink-faint)" }}
-          title={connected ? "websocket connected" : "polling"}
+          className={`inline-block h-2 w-2 rounded-full ${connected && !stale ? "live-dot" : ""}`}
+          style={{ background: connected && !stale ? "var(--color-good)" : connected ? "var(--color-warn)" : "var(--color-ink-faint)" }}
+          title={!connected ? "reconnecting…" : stale ? "stale — no update >12s" : "live"}
         />
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -109,21 +119,26 @@ export default function App() {
 }
 
 function AppShell() {
+  const loc = useLocation();
   return (
+    <StatusProvider>
+    <CommandPalette />
     <div className="flex h-full">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
         <main className="flex-1 overflow-auto p-5">
-          <ErrorBoundary resetKey={location.pathname}>
+          <ErrorBoundary resetKey={loc.pathname}>
           <Routes>
             <Route path="/" element={<CommandCenter />} />
             <Route path="/findings" element={<Findings />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/leads" element={<Leads />} />
             <Route path="/notes" element={<Notes />} />
+            <Route path="/targets" element={<TargetBoard />} />
             <Route path="/hunt" element={<Hunt />} />
             <Route path="/ops" element={<Ops />} />
+            <Route path="/digest" element={<Digest />} />
             <Route path="/telemetry" element={<Telemetry />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/settings" element={<Settings />} />
@@ -132,5 +147,6 @@ function AppShell() {
         </main>
       </div>
     </div>
+    </StatusProvider>
   );
 }

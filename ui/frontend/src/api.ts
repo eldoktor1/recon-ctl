@@ -33,6 +33,11 @@ async function req<T>(path: string, opts: RequestInit = {}, _auth = false): Prom
     try {
       detail = (await r.json()).detail || detail;
     } catch {}
+    // token rotated/invalidated mid-session -> drop it and return to the unlock gate
+    if (r.status === 401 && getToken()) {
+      clearToken();
+      location.reload();
+    }
     throw new ApiError(r.status, detail);
   }
   const ct = r.headers.get("content-type") || "";

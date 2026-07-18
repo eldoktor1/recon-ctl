@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useFetch } from "../hooks";
 import { Panel, Stat, Badge, Empty, Spinner } from "../components/ui";
 import { HostDrawer } from "../components/HostDrawer";
@@ -9,7 +10,8 @@ interface NotesResp { stats: { total: number; hosts: number; by_source: Record<s
 interface Ignore { host: string; reason?: string; added_at?: string; expires_at?: string }
 
 export default function Notes() {
-  const [q, setQ] = useState("");
+  const [sp] = useSearchParams();
+  const [q, setQ] = useState(sp.get("q") || "");
   const [host, setHost] = useState<string | null>(null);
   const [tab, setTab] = useState<"notes" | "benched">("notes");
   const { data } = useFetch<NotesResp>(`/api/notes${q ? `?q=${encodeURIComponent(q)}` : ""}`, [q]);

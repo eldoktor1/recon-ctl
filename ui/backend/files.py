@@ -98,6 +98,19 @@ def reports(limit: int = 200) -> list[dict[str, Any]]:
     return list(reversed(_read_jsonl(config.REVIEW_QUEUE, limit)))
 
 
+def target_board() -> dict[str, Any]:
+    """Under-hunted program board (briefings/targets_latest.json)."""
+    p = config.BRIEF_DIR / "targets_latest.json"
+    try:
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            data["_mtime"] = int(p.stat().st_mtime)
+            return data
+    except Exception as e:
+        return {"error": str(e), "programs": []}
+    return {"programs": []}
+
+
 def active_ignores() -> list[dict[str, Any]]:
     now = time.time()
     out = []

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from typing import Any
 
 from . import config
@@ -37,7 +38,7 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
 
 
 def state_counts() -> dict[str, int]:
-    with _conn() as c:
+    with closing(_conn()) as c:
         return {
             r["state"]: r["c"]
             for r in c.execute("SELECT state, COUNT(*) c FROM findings GROUP BY state")
@@ -67,7 +68,7 @@ def list_findings(
         where.append("(host LIKE ? OR url LIKE ? OR program LIKE ?)")
         params += [f"%{q}%"] * 3
     clause = (" WHERE " + " AND ".join(where)) if where else ""
-    with _conn() as c:
+    with closing(_conn()) as c:
         total = c.execute(f"SELECT COUNT(*) n FROM findings{clause}", params).fetchone()["n"]
         rows = c.execute(
             f"SELECT {LIST_COLS} FROM findings{clause} "
@@ -79,7 +80,7 @@ def list_findings(
 
 
 def get_finding(fid: int) -> dict[str, Any] | None:
-    with _conn() as c:
+    with closing(_conn()) as c:
         r = c.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone()
         if not r:
             return None
@@ -97,7 +98,7 @@ def get_finding(fid: int) -> dict[str, Any] | None:
 def facets() -> dict[str, list[str]]:
     """Distinct values for filter dropdowns."""
     out: dict[str, list[str]] = {}
-    with _conn() as c:
+    with closing(_conn()) as c:
         for col in ("state", "program", "vuln_class", "ai_verdict"):
             out[col] = [
                 r[col]
@@ -111,7 +112,7 @@ def facets() -> dict[str, list[str]]:
 
 
 def recent_confirmed(limit: int = 8) -> list[dict[str, Any]]:
-    with _conn() as c:
+    with closing(_conn()) as c:
         rows = c.execute(
             f"SELECT {LIST_COLS} FROM findings WHERE state IN ('confirmed','reported','submitted') "
             "ORDER BY COALESCE(state_changed_at, updated_at, created_at) DESC LIMIT ?",

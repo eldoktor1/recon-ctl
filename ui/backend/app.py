@@ -55,6 +55,13 @@ async def security_gate(request: Request, call_next):
     resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     resp.headers["Server"] = "recon-ui"  # drop the uvicorn version banner
+    # Cache policy: content-hashed /assets/ can live forever; the SPA shell, SW,
+    # manifest and all API responses must revalidate so a rebuild is picked up
+    # immediately (stale index.html -> old bundle was the "old nav" bug).
+    if path.startswith("/assets/"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
     return resp
 
 
@@ -332,6 +339,47 @@ async def api_reports():
     return files.reports()
 
 
+@app.get("/api/targets")
+async def api_targets():
+    return files.target_board()
+
+
+@app.post("/api/targets/onboard")
+async def api_targets_onboard(body: dict = Depends(safety.require_confirm)):
+    key = (body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "program key required")
+    r = await run_recon("targets", "onboard", key, timeout=120)
+    return {"ok": r.ok, "result": (r.stdout or r.stderr).strip()[-4000:]}
+
+
+@app.get("/api/digest")
+async def api_digest():
+    r = await run_observability("json")
+    return r.json() or {"error": r.stderr or "unavailable"}
+
+
+# --------------------------------------------------------------------------- global search
+@app.get("/api/search")
+async def api_search(q: str):
+    q = q.strip()
+    if len(q) < 2:
+        return {"hosts": [], "findings": [], "notes": [], "programs": []}
+    import asyncio as _a
+
+    async def hosts():
+        r = await es.search(q=q, limit=8, include_benched=True)
+        return r.get("items", [])
+
+    hosts_r, = await _a.gather(hosts())
+    fnd = findings.list_findings(q=q, limit=8)["items"]
+    nts = files.notes(q=q, limit=8)
+    tb = files.target_board().get("programs", [])
+    ql = q.lower()
+    progs = [p for p in tb if ql in (p.get("name", "") + " " + p.get("key", "")).lower()][:8]
+    return {"hosts": hosts_r, "findings": fnd, "notes": nts, "programs": progs}
+
+
 # --------------------------------------------------------------------------- live stream
 @app.websocket("/api/stream")
 async def ws_stream(ws: WebSocket):
@@ -359,14 +407,18 @@ async def ws_stream(ws: WebSocket):
 if config.FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(config.FRONTEND_DIST / "assets")), name="assets")
 
+    _DIST_ROOT = config.FRONTEND_DIST.resolve()
+
     @app.get("/{full_path:path}")
     async def spa(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(404, "not found")
-        index = config.FRONTEND_DIST / "index.html"
-        candidate = config.FRONTEND_DIST / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(str(candidate))
+        index = _DIST_ROOT / "index.html"
+        if full_path:
+            # confine to dist — resolve() collapses ../ so traversal can't escape
+            cand = (_DIST_ROOT / full_path).resolve()
+            if (cand == _DIST_ROOT or _DIST_ROOT in cand.parents) and cand.is_file():
+                return FileResponse(str(cand))
         return FileResponse(str(index))
 else:
     @app.get("/")

@@ -109,9 +109,11 @@ function TaskConsole({ tid, onClose, onChanged }: { tid: number; onClose: () => 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/tasks/${tid}/output?token=${encodeURIComponent(getToken())}`);
     ws.onmessage = (ev) => {
-      const m = JSON.parse(ev.data);
-      if (m.type === "line") setLines((l) => [...l, m.data]);
-      else if (m.type === "end") { setState(m.state); onChanged(); }
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === "line") setLines((l) => [...l, m.data]);
+        else if (m.type === "end") { setState(m.state); onChanged(); }
+      } catch {}
     };
     return () => ws.close();
   }, [tid]);

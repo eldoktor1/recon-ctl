@@ -1,9 +1,10 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
 import { Btn } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
-import { priorityColor } from "../format";
+import { priorityColor, asArr } from "../format";
 
 interface Asset {
   host: string; triage_program?: string; triage_priority?: string; triage_score?: number;
@@ -18,7 +19,8 @@ const TECH_CHIPS = ["wordpress", "jira", "graphql", "spring", "jenkins", "gitlab
   "tomcat", "drupal", "laravel", "django", "grafana", "elasticsearch", "kibana", "swagger", "nginx", "apache"];
 
 export default function Assets() {
-  const [q, setQ] = useState("");
+  const [sp] = useSearchParams();
+  const [q, setQ] = useState(sp.get("q") || "");
   const [tech, setTech] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [toggles, setToggles] = useState<Record<string, boolean>>({});
@@ -88,7 +90,7 @@ export default function Assets() {
                   className="cursor-pointer border-b border-[var(--color-border)]/50 hover:bg-[var(--color-panel-2)]">
                   <td className="px-4 py-2">{a.triage_priority && <Badge color={priorityColor[a.triage_priority] || "var(--color-ink-dim)"}>{a.triage_priority}</Badge>}</td>
                   <td className="mono max-w-sm truncate px-2 py-2 text-xs text-[var(--color-ink)]" title={a.host}>{a.host}</td>
-                  <td className="max-w-[130px] truncate px-2 py-2 text-[11px] text-[var(--color-ink-faint)]">{(a.tech || []).slice(0, 3).join(", ") || "—"}</td>
+                  <td className="max-w-[130px] truncate px-2 py-2 text-[11px] text-[var(--color-ink-faint)]">{asArr(a.tech).slice(0, 3).join(", ") || "—"}</td>
                   <td className="max-w-[120px] truncate px-2 py-2 text-xs text-[var(--color-ink-faint)]">{a.triage_program || "—"}</td>
                   <td className="mono px-2 py-2 text-xs">{a.triage_score ?? "—"}</td>
                   <td className="px-4 py-2 text-right">
@@ -109,7 +111,7 @@ export default function Assets() {
         )}
       </Panel>
 
-      {data && data.total > 60 && offset + 60 < Math.min(data.total, 10000) && (
+      {data && data.total > 60 && offset + 120 <= Math.min(data.total, 10000) && (
         <div className="flex items-center justify-center gap-3">
           <Btn size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 60))}>← prev</Btn>
           <span className="text-xs text-[var(--color-ink-faint)]">{offset + 1}–{offset + 60}</span>

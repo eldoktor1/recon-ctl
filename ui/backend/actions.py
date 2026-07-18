@@ -50,8 +50,10 @@ async def maintenance(mode: str) -> dict[str, Any]:
 
 def killswitch_set(lane: str, on: bool) -> dict[str, Any]:
     """Create/remove a per-lane killswitch file (state/kill/v2_<lane>)."""
-    lane = lane.strip().lstrip("v2_")
-    if not lane.replace("_", "").isalnum():
+    lane = lane.strip()
+    if lane.startswith("v2_"):          # strip the prefix, not the char-set
+        lane = lane[3:]
+    if not lane or not lane.replace("_", "").replace("-", "").isalnum():
         return {"ok": False, "error": "invalid lane name"}
     path = config.KILL_DIR / f"v2_{lane}"
     try:

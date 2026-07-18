@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, type Finding } from "../api";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner } from "../components/ui";
@@ -11,8 +12,9 @@ interface Facets { state: string[]; program: string[]; vuln_class: string[]; ai_
 const RESOLUTIONS = ["accepted", "dup", "na", "info"] as const;
 
 export default function Findings() {
+  const [sp] = useSearchParams();
   const [filters, setFilters] = useState<Record<string, string>>({});
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(sp.get("q") || "");
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const { data: facets } = useFetch<Facets>("/api/findings/facets");

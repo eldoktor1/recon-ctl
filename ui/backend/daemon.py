@@ -15,11 +15,15 @@ from . import config
 
 
 def _pid_alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
-        return isinstance(pid, int)  # PermissionError => exists but not ours
+    except ProcessLookupError:
+        return False           # no such process => dead
+    except PermissionError:
+        return True            # exists but owned by another user
     except Exception:
         return False
 

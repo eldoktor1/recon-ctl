@@ -1,7 +1,7 @@
 // recon-ui service worker — minimal, makes the app installable (Brave/Chromium).
 // Network-first for navigations (always fresh app shell when online); never touches
 // /api or websockets; caches hashed static assets for offline shell.
-const CACHE = "recon-ui-v1";
+const CACHE = "recon-ui-v2";
 
 self.addEventListener("install", (e) => {
   self.skipWaiting();

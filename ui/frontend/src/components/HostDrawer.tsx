@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Empty, Spinner, Badge } from "./ui";
 import { Drawer, Btn, useToast, ConfirmModal } from "./controls";
-import { priorityColor } from "../format";
+import { priorityColor, asArr } from "../format";
 
 // Shared host detail + actions drawer (used by Assets, Leads, Notes).
 export function HostDrawer({ host, onClose }: { host: string; onClose: () => void }) {
@@ -50,10 +50,10 @@ export function HostDrawer({ host, onClose }: { host: string; onClose: () => voi
           </div>
           <Row k="program" v={data.triage_program} />
           <Row k="title" v={data.title} />
-          <Row k="tech" v={(data.tech || []).join(", ")} />
-          <Row k="classes" v={(data.triage_classes || []).join(", ")} />
+          <Row k="tech" v={asArr(data.tech).join(", ")} />
+          <Row k="classes" v={asArr(data.triage_classes).join(", ")} />
           <Row k="payout tier" v={data.triage_payout_tier} />
-          {data.triage_kev_cves?.length ? <Row k="kev cves" v={data.triage_kev_cves.join(", ")} /> : null}
+          {asArr(data.triage_kev_cves).length ? <Row k="kev cves" v={asArr(data.triage_kev_cves).join(", ")} /> : null}
           {data.takeover_cname && <Row k="cname" v={data.takeover_cname} />}
           {data.ignore_expires_at && <Row k="benched until" v={data.ignore_expires_at} />}
 
