@@ -16,6 +16,9 @@ LOG="$HOME/recon/logs/recon_ui.log"
 UNIT="recon-ui.service"
 UNIT_SRC="$UI/systemd/$UNIT"
 UNIT_DST="$HOME/.config/systemd/user/$UNIT"
+RUNNER="recon-ui-runner.service"
+RUNNER_SRC="$UI/systemd/$RUNNER"
+RUNNER_DST="$HOME/.config/systemd/user/$RUNNER"
 TOKEN_FILE="$HOME/recon/state/ui_token"
 
 cmd="${1:-start}"
@@ -80,7 +83,9 @@ case "$cmd" in
     _manual_stop >/dev/null 2>&1 || true
     mkdir -p "$(dirname "$UNIT_DST")"
     cp "$UNIT_SRC" "$UNIT_DST"
+    cp "$RUNNER_SRC" "$RUNNER_DST"
     _uctl daemon-reload
+    _uctl enable --now "$RUNNER"   # runner first so lanes can execute immediately
     _uctl enable --now "$UNIT"
     # linger => user services run at boot without an interactive login
     if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
@@ -90,25 +95,28 @@ case "$cmd" in
     sleep 2
     _uctl --no-pager status "$UNIT" | head -5
     echo; echo "recon-ui installed as an always-on service → http://localhost:$PORT"
+    echo "hunt runner: $(_uctl is-active "$RUNNER")"
     echo "access token: $(cat "$TOKEN_FILE" 2>/dev/null || echo '(generated on first request)')"
     ;;
   uninstall)
     _uctl disable --now "$UNIT" 2>/dev/null || true
-    rm -f "$UNIT_DST"; _uctl daemon-reload
-    echo "recon-ui service removed"
+    _uctl disable --now "$RUNNER" 2>/dev/null || true
+    rm -f "$UNIT_DST" "$RUNNER_DST"; _uctl daemon-reload
+    echo "recon-ui + runner services removed"
     ;;
   start)
     _ensure_token
-    if _have_unit; then _uctl start "$UNIT" && echo "recon-ui started → http://localhost:$PORT"; else _manual_start; fi ;;
+    if _have_unit; then _uctl start "$RUNNER" 2>/dev/null; _uctl start "$UNIT" && echo "recon-ui started → http://localhost:$PORT"; else _manual_start; fi ;;
   stop)
-    if _have_unit; then _uctl stop "$UNIT" && echo "recon-ui stopped"; else _manual_stop; fi ;;
+    if _have_unit; then _uctl stop "$UNIT" "$RUNNER" && echo "recon-ui stopped"; else _manual_stop; fi ;;
   restart)
-    if _have_unit; then _ensure_build; _uctl restart "$UNIT" && echo "recon-ui restarted"; else bash "$0" stop; sleep 1; bash "$0" start; fi ;;
+    if _have_unit; then _ensure_build; _uctl restart "$RUNNER" 2>/dev/null; _uctl restart "$UNIT" && echo "recon-ui restarted"; else bash "$0" stop; sleep 1; bash "$0" start; fi ;;
   status)
-    if _have_unit; then _uctl --no-pager status "$UNIT" | head -6; else
+    if _have_unit; then _uctl --no-pager status "$UNIT" | head -6; echo "runner: $(_uctl is-active "$RUNNER" 2>/dev/null)"; else
       _manual_running && echo "recon-ui running (pid $(cat "$PIDFILE")) → http://localhost:$PORT" || echo "recon-ui not running"; fi ;;
   logs)
-    if _have_unit; then _uctl --no-pager -n "${2:-60}" -u "$UNIT" 2>/dev/null || journalctl --user -n "${2:-60}" -u "$UNIT"; else tail -n "${2:-60}" "$LOG"; fi ;;
+    if [[ "${2:-}" == "runner" ]]; then _uctl --no-pager -n "${3:-60}" -u "$RUNNER" 2>/dev/null || journalctl --user -n "${3:-60}" -u "$RUNNER";
+    elif _have_unit; then _uctl --no-pager -n "${2:-60}" -u "$UNIT" 2>/dev/null || journalctl --user -n "${2:-60}" -u "$UNIT"; else tail -n "${2:-60}" "$LOG"; fi ;;
   token)
     cat "$TOKEN_FILE" 2>/dev/null || echo "(no token yet — start the service once to generate it)" ;;
   rebuild)

@@ -47,6 +47,15 @@ FRONTEND_DIST = REPO_DIR / "ui" / "frontend" / "dist"
 
 UI_TOKEN_FILE = STATE_DIR / "ui_token"
 
+# Hunt-lane spool: the sandboxed web process drops jobs here; the unsandboxed
+# runner service (recon-ui-runner) executes them (can sudo -> reconrun) and writes
+# output/status back. This keeps the internet-facing process non-escalating.
+HUNT_DIR = STATE_DIR / "ui_hunt"
+HUNT_QUEUE = HUNT_DIR / "queue"
+HUNT_OUT = HUNT_DIR / "out"
+HUNT_STATUS = HUNT_DIR / "status"
+HUNT_STOP = HUNT_DIR / "stop"
+
 # Host-header allowlist (anti DNS-rebinding). Only these Host values are served.
 ALLOWED_HOSTS = {
     f"localhost:{PORT}", f"127.0.0.1:{PORT}", "localhost", "127.0.0.1",

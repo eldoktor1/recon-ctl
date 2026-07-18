@@ -1,14 +1,17 @@
-"""Background task manager for long-running, on-demand lanes (hunts, verify).
+"""Background task manager for on-demand lanes (hunts, verify).
 
-Each task is a detached async subprocess whose stdout/stderr is captured into a
-ring buffer and streamed to WebSocket subscribers. Read-only w.r.t. the pipeline
-except that it *runs pipeline commands* the operator explicitly launches (gated by
-token + confirm + the fail-closed VPN check in the route layer).
+The web process is sandboxed and cannot escalate, so it does NOT run lanes
+directly. It writes a job to the spool (config.HUNT_*) for the unsandboxed
+recon-ui-runner service to execute, then tails the runner's output file and
+streams it to WebSocket subscribers. The public interface (spawn/list/get/stop/
+subscribe) is unchanged.
 """
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,16 +29,13 @@ class Task:
     state: str = "running"          # running | done | failed | stopped
     returncode: int | None = None
     lines: deque = field(default_factory=lambda: deque(maxlen=2000))
-    subscribers: set[asyncio.Queue] = field(default_factory=set)
-    proc: asyncio.subprocess.Process | None = None
+    subscribers: set = field(default_factory=set)
     started_at: float = 0.0
+    stop_requested: bool = False
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "id": self.id, "label": self.label, "state": self.state,
-            "returncode": self.returncode, "line_count": len(self.lines),
-            "argv": self.argv,
-        }
+        return {"id": self.id, "label": self.label, "state": self.state,
+                "returncode": self.returncode, "line_count": len(self.lines), "argv": self.argv}
 
 
 class TaskManager:
@@ -45,87 +45,108 @@ class TaskManager:
     def list(self) -> list[dict[str, Any]]:
         return [t.snapshot() for t in sorted(self.tasks.values(), key=lambda x: -x.id)]
 
-    def _prune(self, keep: int = 60) -> None:
-        """Drop the oldest finished tasks so the registry doesn't grow unbounded."""
-        if len(self.tasks) <= keep:
-            return
-        finished = sorted(
-            (t for t in self.tasks.values() if t.state != "running"),
-            key=lambda x: x.id,
-        )
-        drop = len(self.tasks) - keep
-        for t in finished[:drop]:
-            self.tasks.pop(t.id, None)
-
     def get(self, tid: int) -> Task | None:
         return self.tasks.get(tid)
 
-    async def spawn(self, label: str, argv: list[str]) -> Task:
-        import time as _t
+    def _prune(self, keep: int = 60) -> None:
+        if len(self.tasks) <= keep:
+            return
+        finished = sorted((t for t in self.tasks.values() if t.state != "running"), key=lambda x: x.id)
+        for t in finished[: len(self.tasks) - keep]:
+            self.tasks.pop(t.id, None)
+            for p in (config.HUNT_OUT / f"{t.id}.log", config.HUNT_STATUS / f"{t.id}.json"):
+                try: p.unlink(missing_ok=True)
+                except Exception: pass
 
+    async def spawn(self, label: str, argv: list[str]) -> Task:
+        for d in (config.HUNT_QUEUE, config.HUNT_OUT, config.HUNT_STATUS, config.HUNT_STOP):
+            d.mkdir(parents=True, exist_ok=True)
         tid = next(_ids)
-        # started_at needs a wall clock; time.time is fine here (not a workflow script)
-        t = Task(id=tid, label=label, argv=argv, started_at=_t.time())
+        t = Task(id=tid, label=label, argv=argv, started_at=time.time())
         self.tasks[tid] = t
+        # clear any stale spool files for this id (ids reset on web restart)
+        for p in (config.HUNT_OUT / f"{tid}.log", config.HUNT_STATUS / f"{tid}.json"):
+            try: p.unlink(missing_ok=True)
+            except Exception: pass
+        (config.HUNT_QUEUE / f"{tid}.job").write_text(json.dumps({"id": tid, "argv": argv, "label": label}))
+        asyncio.create_task(self._tail(t))
         self._prune()
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(config.REPO_DIR),
-        )
-        t.proc = proc
-        asyncio.create_task(self._pump(t))
         return t
 
-    async def _pump(self, t: Task) -> None:
-        assert t.proc and t.proc.stdout
+    async def _tail(self, t: Task) -> None:
+        logp = config.HUNT_OUT / f"{t.id}.log"
+        statusp = config.HUNT_STATUS / f"{t.id}.json"
+        offset = 0
+        buf = b""
+        waited = 0.0
+
+        def emit(line: str):
+            t.lines.append(line)
+            for q in list(t.subscribers):
+                try: q.put_nowait(line)
+                except Exception: pass
+
+        def read_new():
+            nonlocal offset, buf
+            if not logp.exists():
+                return
+            try:
+                with logp.open("rb") as f:
+                    f.seek(offset)
+                    chunk = f.read()
+                    offset += len(chunk)
+            except Exception:
+                return
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                emit(line.decode("utf-8", "replace"))
+
         try:
-            async for raw in t.proc.stdout:
-                line = raw.decode("utf-8", "replace").rstrip("\n")
-                t.lines.append(line)
-                for q in list(t.subscribers):
-                    try:
-                        q.put_nowait(line)
-                    except Exception:
-                        pass
-            await t.proc.wait()
-            t.returncode = t.proc.returncode
-            # don't clobber a state stop() already set to "stopped"
-            if t.state == "running":
-                t.state = "done" if t.proc.returncode == 0 else "failed"
-        except Exception as e:
-            if t.state == "running":
-                t.state = "failed"
-            t.lines.append(f"[task error] {e}")
+            while True:
+                read_new()
+                st = None
+                if statusp.exists():
+                    try: st = json.loads(statusp.read_text())
+                    except Exception: st = None
+                if st and st.get("state") in ("done", "failed", "stopped"):
+                    read_new()
+                    if buf:
+                        emit(buf.decode("utf-8", "replace")); buf = b""
+                    t.returncode = st.get("returncode")
+                    if t.state != "stopped":
+                        t.state = st["state"]
+                    break
+                # runner missing? no status + no log after a grace period
+                waited += 0.4
+                if waited > 12 and not statusp.exists() and not logp.exists():
+                    emit("[runner not available — install it: recon ui install]")
+                    t.state = "failed"; t.returncode = -1
+                    break
+                await asyncio.sleep(0.4)
         finally:
             for q in list(t.subscribers):
-                try:
-                    q.put_nowait(None)  # sentinel: stream closed
-                except Exception:
-                    pass
+                try: q.put_nowait(None)
+                except Exception: pass
 
     async def stop(self, tid: int) -> bool:
         t = self.tasks.get(tid)
-        if not t or not t.proc or t.state != "running":
+        if not t or t.state != "running":
             return False
+        t.stop_requested = True
+        t.state = "stopped"
         try:
-            t.proc.terminate()
-            try:
-                await asyncio.wait_for(t.proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                t.proc.kill()
-            t.state = "stopped"
+            config.HUNT_STOP.mkdir(parents=True, exist_ok=True)
+            (config.HUNT_STOP / str(tid)).write_text("stop")
             return True
         except Exception:
             return False
 
-    def subscribe(self, tid: int) -> asyncio.Queue | None:
+    def subscribe(self, tid: int):
         t = self.tasks.get(tid)
         if not t:
             return None
         q: asyncio.Queue = asyncio.Queue()
-        # replay buffered lines first
         for line in list(t.lines):
             q.put_nowait(line)
         if t.state != "running":
@@ -134,7 +155,7 @@ class TaskManager:
             t.subscribers.add(q)
         return q
 
-    def unsubscribe(self, tid: int, q: asyncio.Queue) -> None:
+    def unsubscribe(self, tid: int, q) -> None:
         t = self.tasks.get(tid)
         if t:
             t.subscribers.discard(q)
@@ -142,8 +163,6 @@ class TaskManager:
 
 manager = TaskManager()
 
-# On-demand lanes launchable from Hunt Control. (label -> recon subcommand + whether
-# it sends target traffic, so the route layer can apply the fail-closed VPN gate.)
 LANES: dict[str, dict[str, Any]] = {
     "hunter":   {"sub": "hunter",  "target": True,  "desc": "Claude IDOR/BAC hunter (per-target reasoning loop)"},
     "graphql":  {"sub": "graphql", "target": True,  "desc": "GraphQL introspection → schema worklist"},

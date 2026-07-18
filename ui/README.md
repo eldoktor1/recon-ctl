@@ -51,10 +51,15 @@ Threat model for a loopback control plane is DNS-rebinding and CSRF-from-a-tab. 
   exists (same rule the daemon uses).
 - **Hardened headers** — CSP `default-src 'self'`, `X-Frame-Options: DENY`, nosniff,
   `Referrer-Policy: no-referrer`, COOP; uvicorn version banner stripped.
-- **Sandboxed process** — systemd user unit runs as `d0k` with `NoNewPrivileges`, all
-  capabilities dropped, `ProtectSystem=full`, `PrivateTmp`, `RestrictAddressFamilies`,
-  `MemoryMax=1G`. The web process **never escalates**; P4 hunt lanes (which need
-  `reconrun`) are dispatched via the daemon queue, not by the web process sudo-ing.
+- **Sandboxed process** — the web unit (`recon-ui.service`) runs as `d0k` with
+  `NoNewPrivileges`, all capabilities dropped, `ProtectSystem=full`, `PrivateTmp`,
+  `RestrictAddressFamilies`, `MemoryMax=1G`. The web process **never escalates**.
+- **Decoupled hunt runner** — target lanes need `sudo -> reconrun`, which the sandbox
+  blocks by design. So the web process writes a job to a local spool
+  (`~/recon/state/ui_hunt/`) and a SEPARATE unsandboxed service (`recon-ui-runner.service`)
+  executes it in a daemon-equivalent environment, streaming output back. Escalation is
+  bounded by the reconrun sudoers policy (the same whitelisted scripts the daemon runs);
+  the runner is **not network-facing** — it only consumes the local spool.
 - Secrets (ES password, API keys) never leave the backend; ES `_source` is field-whitelisted.
 - The backend never touches egress/nftables/VPN.
 
