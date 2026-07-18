@@ -795,7 +795,18 @@ PY
     [[ -n "$AUTH_HEADER" ]] && dfx_auth+=(--header "$AUTH_HEADER")
     "$DALFOX" pipe --silence --no-color --no-spinner --skip-bav --skip-mining-all --waf-evasion \
       --delay "$DALFOX_DELAY" --worker 1 --timeout 12 --user-agent "$ua" "${dfx_auth[@]}" \
-      --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.out" || true
+      --format plain < "$WORK/urls.txt" 2>/dev/null | tee "$WORK/dalfox.raw" || true
+    # FP GATE (recon_xss_poc_verify.py): dalfox's headless check false-positives on inert
+    # reflections — Next.js RSC path echoes (self.__next_f.push on the __next_error__ page),
+    # WAF-403'd payloads, JSON-nosniff / encoded reflections. Re-fetch each PoC and keep only
+    # those with a genuine unencoded break-out. Drops logged to stderr; survivors → dalfox.out.
+    # (Verified FP 2026-07-17: hmh247.org /wp-json/oembed, 6 dalfox PoC all inert.)
+    local POC_VERIFY="${POC_VERIFY:-$SCRIPT_DIR/recon_xss_poc_verify.py}"
+    if [[ -f "$POC_VERIFY" ]] && grep -qE '\[POC\]' "$WORK/dalfox.raw" 2>/dev/null; then
+      grep -E '\[POC\]' "$WORK/dalfox.raw" | python3 "$POC_VERIFY" > "$WORK/dalfox.out" 2>>"$STATE_DIR/xss_poc_verify.log" || cp "$WORK/dalfox.raw" "$WORK/dalfox.out"
+    else
+      cp "$WORK/dalfox.raw" "$WORK/dalfox.out"
+    fi
     # grep -c prints 0 AND exits 1 on no-match; a trailing "|| echo 0" would append a 2nd 0
     # (pocs="0\n0") and break the arithmetic test — count safely instead.
     local pocs; pocs="$(grep -cE '\[POC\]' "$WORK/dalfox.out" 2>/dev/null)"; pocs="${pocs//[^0-9]/}"; pocs="${pocs:-0}"

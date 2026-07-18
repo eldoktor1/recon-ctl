@@ -141,3 +141,25 @@ trigger payload was truncated so the exact request line is unconfirmed.)
 - **Detection / safety:** fingerprint self-hosted vs Vercel first (Vercel = not affected). Treat as a **LEAD**;
   SSRF confirmation is an OUT-OF-BAND callback to an interactsh canary only — never point it at internal/
   metadata endpoints (SSRF hard line, `feedback_interactsh_for_report_evidence`).
+
+## FALSE POSITIVE — dalfox "XSS" on Next.js RSC path/param reflection (verified 2026-07-17)
+The #1 recurring dalfox XSS false positive on Next.js apps. dalfox flags `[POC][R][GET][inJS-none]`
+(and re-flags it every daemon cycle), but it is **inert** — not reportable.
+
+- **What happens:** any unknown path (e.g. `/wp-json/oembed/1.0/embed?url=` on a host that is Cloudflare+
+  Next.js, NOT WordPress) hits the Next.js **catch-all error boundary** (`<html id="__next_error__">`,
+  content-type text/html, HTTP 404). Next.js serializes the requested route/params into the **RSC flight
+  data** as a JSON string inside a script: `<script>self.__next_f.push([1,"0:{...\"oembed;PAYLOAD\"...}"])`.
+- **Why it can't execute:** the payload sits inside a JSON string literal. The only chars that reach it
+  (the `' [ ] ( ) + ;` dalfox inJS payloads use) are inert quoted-string content; `alert` is text, never code.
+  The chars needed to break out (double-quote, angle brackets, closing script tag) are (a) escaped by React to
+  backslash-u003c etc in script JSON, and (b) usually 403-blocked by the WAF (Cloudflare) before reaching the
+  app. Confirmed on hmh247.org (K Health / khealth): a break-out marker returned 403; only the inert dalfox
+  payload passed, reflecting as %27-encoded JSON string.
+- **Signature (inert):** dalfox tag `inJS-*` AND response body contains `self.__next_f.push` /
+  `id="__next_error__"` / `__NEXT_DATA__`. A GENUINE reflected XSS on Next.js lands in real HTML/attributes,
+  so dalfox tags it `inHTML` / `inATTR` — not `inJS-none` on the error page.
+- **Suppression:** `scripts/recon_xss_poc_verify.py` gates every dalfox PoC in `recon-params confirm xss` —
+  re-fetches the PoC and DROPs on a positive inert signal (nextjs-rsc-inert; waf-blocked-poc 403/406/429/451;
+  json-nosniff-inert); keeps on uncertainty (Claude VERIFY stays the hard gate). Also kills WordPress
+  `/wp-json/oembed` JSON reflections and any WAF-stripped PoC. Drops logged to `state/xss_poc_verify.log`.
