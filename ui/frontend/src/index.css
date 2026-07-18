@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* recon ops-console theme — dark, dense, terminal-adjacent */
+@theme {
+  --color-bg: #0a0e14;
+  --color-panel: #10151f;
+  --color-panel-2: #161d2b;
+  --color-border: #1e2838;
+  --color-border-bright: #2b3a52;
+  --color-ink: #d7e0ee;
+  --color-ink-dim: #8a97ac;
+  --color-ink-faint: #5a6678;
+  --color-accent: #4dd8c0;
+  --color-accent-dim: #2b9c8a;
+  --color-good: #3ecf8e;
+  --color-warn: #f0b429;
+  --color-bad: #f2545b;
+  --color-info: #5b9dff;
+  --color-p0: #f2545b;
+  --color-p1: #f0803c;
+  --color-p2: #f0b429;
+  --color-p3: #5b9dff;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* subtle grid texture behind the app */
+#root {
+  background-image:
+    radial-gradient(circle at 15% 0%, rgba(77, 216, 192, 0.05), transparent 40%),
+    radial-gradient(circle at 100% 100%, rgba(91, 157, 255, 0.04), transparent 45%);
+}
+
+.mono { font-family: var(--font-mono); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-bright); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #3a4c68; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.live-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fade-in 0.3s ease-out; }
+
+@keyframes logospin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

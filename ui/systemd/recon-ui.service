@@ -1,0 +1,52 @@
+[Unit]
+Description=recon-ui local control plane (FastAPI + SPA, loopback only)
+Documentation=https://github.com/eldoktor1/recon-pipeline
+# HARD crash-loop guard: if it dies >5x in 5min, systemd leaves it FAILED (alertable)
+# instead of thrashing. A lightweight web server should never hit this.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/d0k/recon-pipeline
+Environment=RECON_UI_HOST=127.0.0.1
+Environment=RECON_UI_PORT=8787
+Environment=ES_URL=http://127.0.0.1:9200
+# uvicorn is the main process — systemd supervises it directly (no wrapper/backgrounding).
+ExecStart=/home/d0k/recon-pipeline/ui/backend/.venv/bin/python -m uvicorn ui.backend.app:app \
+  --host 127.0.0.1 --port 8787 --app-dir /home/d0k/recon-pipeline
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=mixed
+
+# --- hardening (max sandbox compatible with a loopback python web server) -----
+# The web process is internet-of-the-browser-facing; it must NEVER escalate. It
+# runs as d0k, drops all capabilities, and can't gain new privileges. (Target-facing
+# hunt lanes, which need reconrun, are dispatched via the daemon queue in P4 — the
+# web process itself never sudo's.)
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# resident-memory backstop for the whole cgroup
+MemoryAccounting=yes
+MemoryMax=1G
+OOMPolicy=continue
+Nice=5
+
+[Install]
+WantedBy=default.target

@@ -62,3 +62,9 @@ engine/__pycache__/
 /docs/audit_20*.md
 /docs/selfaudit_fixprompt_*.md
 .mcp.json
+
+# recon-ui build artifacts + local state (code is tracked; these are not)
+/ui/frontend/node_modules
+/ui/frontend/dist
+/ui/backend/.venv
+/ui/backend/**/__pycache__

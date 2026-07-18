@@ -2682,5 +2682,7 @@ case "${1:-}" in
   note)         shift; cmd_note "$@" ;;
   v2)           shift; cmd_v2 "$@" ;;
   inspect)      shift; cmd_inspect "$@" ;;
+  ui)           # local web control plane (FastAPI + SPA on 127.0.0.1:8787). read-only w.r.t. pipeline.
+                shift; bash "$SCRIPT_DIR/../tools/start_ui.sh" "${@:-start}" ;;
   *) echo "Unknown: $1"; usage; exit 1 ;;
 esac
