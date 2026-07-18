@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Panel, Stat, Badge, Empty, Spinner } from "../components/ui";
+import { Btn, useToast } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
 import { fmtAgo } from "../format";
 
@@ -14,14 +16,17 @@ export default function Notes() {
   const [q, setQ] = useState(sp.get("q") || "");
   const [host, setHost] = useState<string | null>(null);
   const [tab, setTab] = useState<"notes" | "benched">("notes");
-  const { data } = useFetch<NotesResp>(`/api/notes${q ? `?q=${encodeURIComponent(q)}` : ""}`, [q]);
+  const [adding, setAdding] = useState(false);
+  const { data, refetch } = useFetch<NotesResp>(`/api/notes${q ? `?q=${encodeURIComponent(q)}` : ""}`, [q]);
   const { data: ignores } = useFetch<Ignore[]>("/api/ignores");
 
   return (
     <div className="fade-in space-y-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-lg font-semibold">Notes &amp; worked-knowledge</h1>
+        <Btn variant="primary" size="sm" onClick={() => setAdding(true)}>+ add note</Btn>
       </div>
+      {adding && <AddNote onClose={() => setAdding(false)} onSaved={() => { setAdding(false); refetch(); }} initialHost={sp.get("q") || ""} />}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Notes" value={data?.stats.total ?? "—"} />
@@ -84,6 +89,46 @@ export default function Notes() {
       )}
 
       {host && <HostDrawer host={host} onClose={() => setHost(null)} />}
+    </div>
+  );
+}
+
+function AddNote({ onClose, onSaved, initialHost }: { onClose: () => void; onSaved: () => void; initialHost: string }) {
+  const [host, setHost] = useState(initialHost);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  const save = async () => {
+    if (!host.trim() || !text.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.action<any>(`/api/hosts/${encodeURIComponent(host.trim())}/note`, { text: text.trim() });
+      if (r?.ok === false) { toast("err", r.error || "failed"); setBusy(false); return; }
+      toast("ok", `noted ${host.trim()}`);
+      onSaved();
+    } catch (e: any) { toast("err", e.message); setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[14vh]" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60" />
+      <div className="relative w-[min(92vw,520px)] rounded-xl border border-[var(--color-border-bright)] bg-[var(--color-panel)] p-6 fade-in" onClick={(e) => e.stopPropagation()}>
+        <h3 className="mb-4 text-base font-semibold text-[var(--color-ink)]">Add note</h3>
+        <label className="mb-1 block text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">host</label>
+        <input value={host} onChange={(e) => setHost(e.target.value)} autoFocus placeholder="host.example.com"
+          className="mono mb-3 w-full rounded-md border border-[var(--color-border-bright)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]" />
+        <label className="mb-1 block text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">note</label>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+          onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") save(); }}
+          placeholder="worked-knowledge — what you found / why it's dead / next angle…"
+          className="w-full resize-y rounded-md border border-[var(--color-border-bright)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]" />
+        <p className="mt-1.5 text-[11px] text-[var(--color-ink-faint)]">permanent note (source: manual) · mirrors to ES · ⌘↵ to save</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Btn size="sm" onClick={onClose}>cancel</Btn>
+          <Btn size="sm" variant="primary" disabled={busy || !host.trim() || !text.trim()} onClick={save}>{busy ? "saving…" : "save note"}</Btn>
+        </div>
+      </div>
     </div>
   );
 }
