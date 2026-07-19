@@ -68,3 +68,6 @@ engine/__pycache__/
 /ui/frontend/dist
 /ui/backend/.venv
 /ui/backend/**/__pycache__
+
+# Claude Code local settings (machine-specific: permission allowlist, MCP approvals)
+.claude/settings.local.json
