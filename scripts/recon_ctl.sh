@@ -2654,6 +2654,8 @@ case "${1:-}" in
   research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
                 shift
                 bash "$SCRIPT_DIR/recon_research.sh" "${@:-vulns}" ;;
+  backup)       # ES snapshot backup (recon_alive corpus). Local ES admin, not target traffic → d0k.
+                shift; bash "$SCRIPT_DIR/recon_es_backup.sh" "${@:-status}" ;;
   account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;
   domxss)       shift; python3 "$SCRIPT_DIR/recon_domxss.py" "$@" ;;
   ai)           shift; cmd_ai "$@" ;;
