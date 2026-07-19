@@ -174,3 +174,48 @@ differential is built, in-range version = LEAD only.
 **Sources:** https://nvd.nist.gov/vuln/detail/CVE-2026-42945 · https://my.f5.com/manage/s/article/K000161019 ·
 https://almalinux.org/blog/2026-05-13-nginx-rift-cve-2026-42945/ ·
 https://lilting.ch/en/articles/nginx-njs-8711-rewrite-9256-second-wave *(2nd source obscure — CVE IDs/ranges verify vs NVD)*
+
+
+---
+<!-- applied-proposal: 2026-07-18_vulns_tech-nginx + 2026-07-19_vulns_tech-nginx -->
+### Applied research — vulns (2026-07-18 / 2026-07-19) — full version table + 1.30.4/1.31.3 release
+
+## 2026 CVE version table (as of 2026-07-18)
+
+Our current in-scope fingerprint includes exact version `nginx/1.29.7`. Full nginx.org advisory table,
+fixed-in vs vulnerable-range:
+
+| CVE | Issue | Fixed In | Vulnerable |
+|-----|-------|----------|-----------|
+| CVE-2026-42533 | Buffer overflow (map + regex) | 1.31.3+, 1.30.4+ | 0.9.6-1.31.2 |
+| CVE-2026-60005 | Memory disclosure (slice module) | 1.31.3+, 1.30.4+ | 1.15.8-1.31.2 |
+| CVE-2026-56434 | Use-after-free (SSI module) | 1.31.3+, 1.30.4+ | 0.8.11-1.31.2 |
+| CVE-2026-42530 | Use-after-free (HTTP/3) | 1.31.2+ | 1.31.0-1.31.1 |
+| CVE-2026-42055 | Buffer overflow (proxy_v2/gRPC) | 1.31.2+, 1.30.3+ | 1.13.10-1.31.1 |
+| CVE-2026-48142 | Buffer overread (charset module) | 1.31.2+, 1.30.3+ | 0.3.50-1.31.1 |
+| CVE-2026-9256 | Buffer overflow (rewrite module) | 1.31.1+, 1.30.2+ | 0.1.17-1.31.0 |
+| CVE-2026-42926 | HTTP/2 request injection (proxy module) | 1.31.0+, 1.30.1+ | 1.29.4-1.30.0 |
+| **CVE-2026-42945** ("Rift") | Heap buffer overflow (rewrite), CVSS 9.2, ITW-exploited | 1.31.0+, 1.30.1+ | 0.6.27-1.30.0 |
+| CVE-2026-42946 | Buffer overread (SCGI/uWSGI) | 1.31.0+, 1.30.1+ | 0.8.42-1.30.0 |
+| CVE-2026-42934 | Buffer overread (charset module) | 1.31.0+, 1.30.1+ | 0.3.50-1.30.0 |
+| CVE-2026-40460 | HTTP/3 address spoofing | 1.31.0+, 1.30.1+ | 1.25.0-1.30.0 |
+| CVE-2026-40701 | Resolver use-after-free (OCSP) | 1.31.0+, 1.30.1+ | 1.19.0-1.30.0 |
+| CVE-2026-27654/27784/32647/27651/28753/28755 | Various (DAV/mp4/CRAM-MD5/auth_http/stream OCSP) | 1.29.7+, 1.28.3+ | pre-1.29.7 |
+| CVE-2026-1642 | SSL upstream injection | 1.29.5+, 1.28.2+ | 1.3.0-1.29.4 |
+
+**Implication:** `nginx/1.29.7` (patched against the pre-1.29.7 batch) is STILL in-range for
+CVE-2026-42945/42926/42946/42934/40460/40701 (all vulnerable through 1.30.0). CVE-2026-42945 is
+config-dependent and unsafe to trigger (crashes the worker) — version-range LEAD only. CVE-2026-42926
+(HTTP/2 request injection) is the most promising for a future safe differential-probe design.
+
+## 2026-07-19 security release: nginx 1.30.4 stable / 1.31.3 mainline
+- **CVE-2026-42533** (critical): heap buffer overflow in `map` directive regex-capture handling under
+  crafted HTTP requests → worker crash / possible RCE if ASLR disabled. Affected 0.9.6-1.31.2;
+  our observed `nginx:1.29.7` fingerprint is in-range. Config-dependent (needs a specific `map`
+  construct referencing captures) — unauth probing can't confirm the config; treat bare version
+  match as LEAD only.
+- **CVE-2026-60005** (medium): memory disclosure via `ngx_http_slice_module` (1.15.8-1.31.2).
+- **CVE-2026-56434** (medium): UAF via `ngx_http_ssi_module` (0.8.11-1.31.2).
+- Fixed: nginx-1.30.4 stable, nginx-1.31.3 mainline.
+- Sources: https://socprime.com/blog/cve-2026-42533-analysis/ , https://nginx.org/en/CHANGES ,
+  https://nginx.org/en/security_advisories.html

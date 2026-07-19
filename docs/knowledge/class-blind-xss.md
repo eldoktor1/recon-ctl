@@ -104,3 +104,21 @@ per upstream release notes — verify against the installed binary before relyin
 
 Related: [[class-cache-deception]] (same detect-only/safe-PoC discipline), the reflected/DOM XSS
 confirmers `recon_params.sh confirm xss` + `recon_domxss_confirm.sh` (now both `--waf-evasion`).
+
+
+---
+<!-- applied-proposal: 2026-07-17_detect-tune_class-blind-xss -->
+### Applied research — detect-tune (2026-07-17)
+
+## Dalfox v3.1.2 (Rust rewrite) — new precision knobs (2026-07-17)
+Dalfox v3.1.2 (2026-06-27) is the latest stable in the Rust rewrite line (see v3 tooling note above
+re: subcommand syntax change from v2). Before trusting any "no XSS found" result from
+`recon_xss_confirm.sh` / `recon_blindxss.sh` / `recon_dast.sh`, confirm the installed `dalfox` binary
+version and that its invocation still matches v3's subcommand syntax (v2 flags may silently fail rather
+than error). v2 stays on the `v2` branch for security-only backports.
+
+New precision knobs in v3.1.2:
+- `--waf-min-confidence <0-1>` (default 0.3) tunes WAF-fingerprint confidence to cut noisy
+  evasion-attempt logging.
+- Native DOM/AST verification replaces pure blind-reflection matching for DOM-XSS confirmation,
+  which should reduce reflection-≠-execution false positives further.

@@ -286,3 +286,17 @@ only** → resolve → in-scope check → normal validator queue. NEVER treat it
 identity/ownership confirmation — favicons are trivially swapped and hashes collide across
 unrelated hosts (shared frameworks/CDNs). Same posture as every other uncover dork: it widens
 the net; the confirm primitive is still the per-lane one above.
+
+
+---
+<!-- applied-proposal: 2026-07-19_detect-tune_class-unauth-hunting -->
+### Applied research — detect-tune (2026-07-19)
+
+## Favicon-hash Shodan dork — stock-favicon FP guard (2026-07-19)
+The favicon-hash dork (`http.favicon.hash:<mmh3(base64(favicon))>`) was added in 2026-07-11 as a
+sibling-infra widener. Additional FP guard confirmed important: **SKIP when the favicon is a stock
+CMS/framework default** (WordPress, generic Nginx welcome, generic React/Vue/Angular favicon, etc.)
+— the hash will match thousands of unrelated sites and burns Shodan budget for noise. Only run the
+dork when the target has a CUSTOM (non-stock-framework) favicon specific to the organization's
+branding. Every resulting host still goes through the normal resolve → scope+pays gate before
+touching the validator queue.

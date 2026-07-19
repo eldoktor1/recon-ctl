@@ -43,3 +43,17 @@ operator-gated.
 - **WCD lane note:** directly amplifies the web-cache-deception lane for Varnish ≤ 8.0.0 — flag matched
   hosts in the WCD briefing.
 - **Source:** https://security.glexia.com/cves/CVE-2026-34475 · ⚠️ LLM-sourced — NVD/version-verify before minting.
+
+
+---
+<!-- applied-proposal: 2026-07-17_vulns_tech-varnish + 2026-07-19_vulns_tech-varnish -->
+### Applied research — vulns (2026-07-17 / 2026-07-19) — CVE-2026-34475 priority note
+
+## CVE-2026-34475 — probe priority guidance (2026-07-19)
+The CVE-2026-34475 primitive (req.url canonicalization, see Active CVEs section above) is a genuine
+confirmable primitive — not a heuristic path-confusion guess — on any host fingerprinted as Varnish
+< 8.0.1. **Prioritize this over generic path-confusion WCD probes** on matched hosts: the root-path
+HTTP/1.1 differential is a named CVE with a defined mechanism, higher confidence than a generic
+suffix-path cacheability flip. Unauth fingerprint: `X-Varnish` / `Via: 1.1 varnish` response
+headers → version-gate before treating as more than a LEAD (version usually not banner-exposed —
+confirm behaviorally). Source: https://github.com/advisories/ghsa-m9gq-cmcj-p62x

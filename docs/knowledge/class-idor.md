@@ -314,3 +314,49 @@ resources, `--dry-run` preview first. A force-multiplier for the existing authed
 hand-crafted Repeater swaps per endpoint), not a new autonomous lane.
 
 Source: https://github.com/praetorian-inc/hadrian
+
+
+---
+<!-- applied-proposal: 2026-07-17_tooling_class-idor + 2026-07-18_tooling_class-idor + 2026-07-19_vulns_class-idor -->
+### Applied research — tooling/vulns (2026-07-17 / 2026-07-18 / 2026-07-19)
+
+## Three-phase mutation proof — confirm checklist (2026-07-17)
+Formalizes what our human-in-the-loop 2-owned-account IDOR test already does manually (source:
+praetorian-inc/hadrian evaluated 2026-07-17). Useful as a checklist for Claude-in-Chrome
+authed-confirm prompts:
+
+1. **Setup** — Role/Account A creates (or has) a resource; record its object ID.
+2. **Attack** — Role/Account B (the OWNED second account) attempts to read/modify/delete that ID.
+3. **Verify** — Re-check as Account A whether the object actually changed/was exposed — don't trust
+   a 200 OK alone. APIs that accept an unauthorized write but silently no-op it are a classic
+   false-positive source for naive IDOR scanners; the verify step is what makes the finding real.
+
+Keep minimality discipline on top: stop at proof, never touch objects you don't own, prefer a
+reversible/benign action (read a field, not a destructive delete) unless impact requires it.
+
+## Autoswagger — automated unauth Swagger/OpenAPI broken-authz scanner (2026-07-18)
+`intruder-io/autoswagger` (OSS, Python) discovers Swagger/OpenAPI specs (direct file, Swagger-UI
+paths, common default paths) and probes every documented endpoint **unauthenticated, GET-only by
+default**, flagging any 200 that shouldn't be reachable without auth, then screens the response for
+PII (Presidio), secrets (regex), or oversized payloads. Matches our safe-probe doctrine exactly —
+treat a hit as a provenance-confirmed LEAD for the IDOR/BAC candidate ranker, same tier as
+`recon_idor_candidates.py` output, never auto-CONFIRMED. **Never pass its `-risk` flag** (enables
+mutating POST/PUT/PATCH/DELETE testing) in the autonomous lane. Run it wherever jsintel/kiterunner/params
+surfaces a `/swagger.json`, `/openapi.json`, or `/swagger-ui.html` on an in-scope+paying host.
+
+## Hadrian authed-BOLA context note (2026-07-18)
+`praetorian-inc/hadrian` (Go, Apache-2.0, v1.0.0 Mar 2026, 67★) automates cross-role BOLA/BFLA
+testing over REST/GraphQL/gRPC given YAML role definitions + credentials for 2+ accounts. This is a
+fit ONLY for our human-in-the-loop, 2-owned-account authed-IDOR SOP — never the autonomous pipeline
+(it is not unauth-safe or read-only). Treat as a candidate accelerant for the manual swap-test step
+once 2 owned accounts exist on a target with a published spec.
+
+## GUID IDOR amplification via a leaking list endpoint (writeup pattern, 2026-07-19)
+Recurring 2026 pattern: a UUID/GUID-keyed object reference looks low-severity ("must guess a UUID")
+until a SEPARATE query/endpoint is found that lists or leaks valid GUIDs (search, autocomplete,
+activity feed, GraphQL list query) — turns it into a fully harvestable IDOR chain and materially
+raises severity/payout. Confirms our `recon_idor_candidates.py` scoring (uuid=harvestable) — when
+ranking, also flag pairs: an IDOR-candidate endpoint + any other endpoint on the same host that
+returns a list of IDs of the same shape, since that pairing is the actual high-severity chain.
+Source: https://escape.tech/blog/idor-in-graphql/ ,
+https://infosecwriteups.com/graphql-security-how-i-found-and-exploited-critical-idor-and-authorization-bypass-in-a-42ab78e13642

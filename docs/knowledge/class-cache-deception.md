@@ -241,3 +241,35 @@ remote, unauth-reachable, high attack complexity). *(verify vs NVD/GHSA before m
 _(Note: a 2026-07-14 proposal re-surfaced the PortSwigger "Gotta Cache 'Em All" delimiter-discrepancy
 technique — Spring `;`, Rails `.`, OpenLiteSpeed `%00`, Nginx `%0a`, `#` — already covered above; not
 re-merged.)_
+
+
+---
+<!-- applied-proposal: 2026-07-18_vulns_class-cache-deception + 2026-07-19_detect-tune_class-cache-deception + 2026-07-19_vulns_class-cache-deception -->
+### Applied research — vulns/detect-tune (2026-07-18 / 2026-07-19)
+
+## Varnish CVE-2026-34475 — additional probe guidance (2026-07-18)
+Varnish Cache OSS <8.0.1 / Enterprise <6.0.16r12: this is distinct from our generic path-confusion
+WCD detector — it is a Varnish-internal root-path validation-order bug, not a suffix/path-confusion
+trick. No public PoC details beyond the advisory as of 2026-07-18. Fingerprint Varnish via `Via: varnish`
+/ `X-Varnish` response headers; check version if exposed. Design a root-path probe variant for
+`recon_wcd.sh` (root-path `/` HTTP/1.1 differential, same unique-cache-buster safety rule). CVSS 5.4.
+Source: https://github.com/advisories/GHSA-m9gq-cmcj-p62x
+
+## Capitalized-Host unkeyed-header poisoning vector (2026-07-19)
+Add capitalized `Host` header (`HOST: evil.example`) to the unkeyed-header WCP probe set alongside
+`X-Forwarded-Host`/`X-Forwarded-Scheme`/`X-Original-URL`. Root cause: some Varnish VCL cache-key
+logic and the header-match logic disagree on header-name case, so a capitalized variant reaches the
+origin unkeyed while bypassing a case-sensitive allowlist check. Same unique-cache-buster safety rule
+applies — always a unique buster, never poison the shared cache key.
+
+## PortSwigger "Gotta Cache 'Em All" (Jan 2026) + CacheKiller tool (2026-07-19)
+- Generalizes cache attacks beyond path-suffix WCD to URL/HTTP **parser discrepancies between edge
+  and origin**; demonstrates chaining cache-key confusion with an otherwise "non-exploitable" open
+  redirect to rewrite a cached static-JS response for cross-domain execution.
+- Companion OSS tool `CacheKiller` (github.com/PortSwigger/cache-killer) automates discrepancy
+  discovery — evaluate as a `recon_wcd.sh` companion for broader-than-path-confusion detection on
+  CDN-fronted in-scope hosts; keep it detect-only with our own cache-buster key (same safety primitive
+  as the current lane).
+- CVE-2026-34475 (Varnish req.url canonicalization bug, see tech-varnish.md) is a confirmable
+  cache-poisoning/auth-bypass primitive on any fingerprinted Varnish < 8.0.1 host.
+- Source: https://portswigger.net/research/a-hacking-hat-trick-previewing-three-portswigger-research-publications-coming-to-def-con-amp-black-hat-usa

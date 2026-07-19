@@ -155,3 +155,46 @@ done
   `<!-- mfunc<SECRET> -->echo passthru($_GET[1337])<!-- /mfunc<SECRET> -->` submitted as a WP comment.
   RCE is a hard-line NEVER for autonomous testing — operator-only, and only if scope + preconditions hold.
 - **Source:** https://www.rcesecurity.com/2025/11/exploiting-a-pre-auth-rce-in-w3-total-cache-for-wordpress-cve-2025-9501/
+
+
+---
+<!-- applied-proposal: 2026-07-17_vulns_tech-wordpress + 2026-07-17_detect-tune_tech-wordpress + 2026-07-19_vulns_tech-wordpress -->
+### Applied research — vulns/detect-tune (2026-07-17 / 2026-07-19)
+
+## CVE-2026-57807 — miniOrange OAuth SSO — Unauthenticated Full Account Takeover (CVSS 9.8, NO PATCH)
+- **Mechanism:** CWE-288 auth bypass via an alternate path in the plugin's password-recovery handler — skips
+  authentication entirely, lets an unauthenticated remote attacker log in as ANY user including admin.
+- **Affected:** Enterprise builds ≤ 38.5.8. Free-repo build (6.26.x) applicability unconfirmed — verify.
+- **Patch status:** none as of 2026-07-13; only mitigation is disabling the plugin. Treat any live version as in-range.
+- **Detect (unauth, safe):** `/wp-content/plugins/miniorange-oauth-2.0-single-sign-on/readme.txt` → `Stable tag`;
+  also `miniorange` string in login-page JS/jsintel.
+- **Action:** version-match = LEAD (default in-range, no patched baseline exists). Full-takeover primitive — do
+  NOT exercise without operator approval per hunt-flow step 8.
+- **Sources:** https://gbhackers.com/critical-wordpress-oauth-sso-plugin-flaw/ | https://nvd.nist.gov/vuln/detail/CVE-2026-57807
+
+## CVE-2026-15005 — Loco Translate — CSRF-chained RCE (CVSS 8.8)
+- **Affected:** ≤ 2.8.5. Disclosed by Wordfence 2026-07-15.
+- **Mechanism:** CSRF weakness chained to RCE — requires a logged-in privileged user to trigger a crafted
+  request; NOT a bare unauth primitive.
+- **Detect:** `/wp-content/plugins/loco-translate/readme.txt` → `Stable tag` ≤ 2.8.5 = LEAD (CSRF-delivery
+  lane, not autonomous-probe eligible).
+
+## wp-json user enumeration — FP/impact-gate note (2026-07-17)
+`/wp-json/wp/v2/users` and `?author=N` username enumeration is WordPress core's intentional default
+(headless/mobile API support), restricted to REST-exposed post-type authors since 4.7.1 — not a
+misconfiguration by itself. Per our impact-gate doctrine, treat a bare enumeration hit as theoretical/N/A
+unless chained with an amplifier already present on the same host: missing login rate-limiting/lockout
+(credential-stuffing path) or `xmlrpc.php` `system.multicall` still enabled (brute-force multiplier). Don't
+mint or spend probe budget on enumeration alone.
+
+## CVE-2026-63030 + CVE-2026-60137 — "wp2shell" unauth RCE chain (2026-07-19)
+- REST batch-route confusion (`/wp-json/batch/v1` or `?rest_route=/batch/v1`) lets a sub-request run
+  under a different sub-request's handler; chained with a SQLi it becomes unauthenticated RCE.
+- In-range: core 6.8.0-6.8.5 (SQLi component only), 6.9.0-6.9.4 and 7.0.0-7.0.1 (full RCE chain).
+  Fixed 6.9.5 / 7.0.2.
+- Unauth fingerprint: batch endpoint reachability (`/wp-json/batch/v1`) + core version disclosure
+  (readme.html, `?ver=` query strings on core scripts, generator meta tag). Public PoC exists
+  (GitHub, as of 2026-07-18) — version-in-range + reachable batch endpoint = candidate for
+  `recon-nday`, still requires version confirmation before treating as more than a LEAD (our
+  KEV-tech-class-without-verified-version rule applies).
+- Source: https://thehackernews.com/2026/07/new-wp2shell-wordpress-core-flaw-lets.html
