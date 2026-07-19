@@ -2501,6 +2501,7 @@ usage() {
   printf "  ${G}recon-wcd${R} [scan|confirm <host>|purge <host>|results]   Web-cache deception/poisoning LEADs (detect-only) + Varnish unauth-PURGE confirm\n"
   printf "  ${G}recon-blindxss${R} [status|test <host>|collector|correlate|plant]  Blind/stored-XSS lane (persistent interactsh + XSS Hunter; fires days later → gated #review)\n"
   printf "  ${G}recon-research${R} <tooling|vulns|kb-enrich|detect-tune|all>  Claude research routine → digest + KB (auto-commit; keeps the system updated)\n"
+  printf "  ${G}recon-research program <name>${R}                           On-demand pre-hunt brief: disclosed reports, tech stack, top attack classes for a specific target\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"

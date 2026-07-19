@@ -75,7 +75,38 @@ top_tech() {
   printf '%s' "$resp" | jq -r '[.aggregations.t.buckets[]?.key] | join(", ")' 2>/dev/null | head -c 600
 }
 
+# Build a "recently surfaced" dedup block from the last 30 days of digests for a given topic.
+# Injected into the prompt so Claude never re-surfaces what was already actioned.
+recent_surfaced() {
+  local topic="$1" cutoff out=""
+  cutoff="$(date -d '30 days ago' '+%Y-%m-%d' 2>/dev/null || date -v-30d '+%Y-%m-%d' 2>/dev/null || echo '')"
+  [[ -z "$cutoff" ]] && return 0
+  for f in "$RESEARCH_DIR"/${topic}_*.md; do
+    [[ -f "$f" ]] || continue
+    local fdate; fdate="$(basename "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')"
+    [[ -n "$fdate" && "$fdate" > "$cutoff" ]] || continue
+    # Extract the first 2000 chars of each digest (section headings + key claims)
+    out+="
+=== digest from $fdate ===
+$(head -c 2000 "$f" | grep -E '^#{1,3} |CVE-|^- \*\*|^### |^## ' | head -30)"
+  done
+  printf '%s' "$out"
+}
+
+# Build the tooling dedup block — lists tools already adopted or rejected to avoid re-recommending.
+adopted_tools() {
+  # Scan applied proposals for ADOPT/EVALUATE verdicts + the hardcoded base set
+  local base="subfinder, httpx, nuclei, katana, gau, dalfox, sqlmap, trufflehog, S3Scanner, arjun, interactsh, naabu, gungnir, kiterunner, alterx, puredns, jsluice, sourcemapper, S3Scanner, WCVS, badDNS"
+  local from_proposals=""
+  from_proposals="$(grep -rh 'ADOPT\|EVALUATE\|already use\|already have' \
+    "$RESEARCH_DIR/proposals/applied/" 2>/dev/null | grep -oE '\*\*[A-Za-z0-9_-]+\*\*' | \
+    tr -d '*' | sort -u | paste -sd', ' - 2>/dev/null || true)"
+  echo "${base}${from_proposals:+, $from_proposals}"
+}
+
 PREAMBLE() {
+  local topic="${1:-}" search_budget="${2:-8}" recent_block=""
+  [[ -n "$topic" ]] && recent_block="$(recent_surfaced "$topic")"
   cat <<EOF
 You are the standing RESEARCH routine for an autonomous bug-bounty recon pipeline. Keep the system
 UPDATED with what is NEW and ACTIONABLE — do NOT restate basics we already know.
@@ -86,13 +117,16 @@ DOCTRINE (what is useful to us):
 - unauth-safe, non-destructive, dup-resistant; IDOR/authed testing is human-in-the-loop; theoretical
   / no-impact classes (CORS, missing headers, self-XSS, version-only) get declined — don't surface them.
 - precision over volume; cite SOURCES (URLs); flag uncertainty; be concise.
-- BE EFFICIENT: at most ~6-8 web searches/fetches this run — prioritize the highest-value sources and
-  finish within a few minutes. Quality over exhaustiveness; it's fine to surface 2-3 strong items.
+- BE EFFICIENT: at most ~${search_budget} web searches/fetches this run — prioritize the highest-value
+  sources. Quality over exhaustiveness; surface 2-4 strong items. Don't pad with filler.
 
 OUR LANES: $LANES.
 OUR KB TOPICS (docs/knowledge/): $(kb_list).
 OUR IN-SCOPE TOP TECH (from our data): $(top_tech).
-
+${recent_block:+
+ALREADY SURFACED IN THE LAST 30 DAYS — skip unless meaningfully new or the situation has changed:
+$recent_block
+}
 OUTPUT CONTRACT:
 - Produce a CONCISE, SOURCE-CITED markdown digest of NEW, actionable findings (highest-value first,
   no fluff). If nothing genuinely new/actionable this run, say so in one line.
@@ -110,17 +144,27 @@ OUTPUT CONTRACT:
 EOF
 }
 
+# Returns the search budget for a topic (daily topics get 8, weekly get 15, program gets 20)
+topic_budget() {
+  case "$1" in
+    vulns) echo 8 ;;
+    program) echo 20 ;;
+    tooling|kb-enrich|detect-tune) echo 15 ;;
+    *) echo 8 ;;
+  esac
+}
+
 topic_task() {
   case "$1" in
-    tooling) cat <<'EOF'
+    tooling) cat <<EOF
 
 TASK — TOOLING WATCH: survey for NEW or BETTER open-source tools (GitHub, active in the last ~6-12
 months: releases, stars, maintenance) that would genuinely improve any of our lanes, OR a tool
 CATEGORY we lack. For each candidate: what it does, whether it BEATS what we already use, whether it
 fits our doctrine (unauth-safe? dup-resistant? or a dup-trap?), and a verdict: ADOPT / EVALUATE / SKIP
-(say why). Be skeptical — only flag real upgrades. We already use: subfinder, httpx, nuclei, katana,
-gau, dalfox, sqlmap, trufflehog, S3Scanner, arjun, native-graphql, WCVS, interactsh, naabu, gungnir.
-We REJECTED VulnAPI (no BOLA, sends mutating requests). Don't re-recommend what we have or rejected.
+(say why). Be skeptical — only flag real upgrades.
+ALREADY IN USE OR EVALUATED (do NOT re-recommend these): $(adopted_tools).
+We REJECTED VulnAPI (no BOLA, sends mutating requests).
 EOF
 ;;
     vulns) cat <<'EOF'
@@ -135,11 +179,11 @@ EOF
 ;;
     kb-enrich) cat <<'EOF'
 
-TASK — KB ENRICHMENT: pick 1-2 of OUR existing KB tech-/class- docs and research NEW (last ~12 months)
-published techniques, payloads, bypasses, sinks, or fingerprints that would deepen them. Emit the
-additions as kb-proposal:<existing-slug> blocks (these will be queued for review, not auto-applied). If
-you find a tech/class that is clearly in-scope for us but we have NO doc for, emit a kb-new:<slug> block
-with a full first draft. Favor depth on the highest-EV money classes (IDOR/BAC, GraphQL, SSRF, SQLi).
+TASK — KB ENRICHMENT: pick 2-3 of OUR existing KB tech-/class- docs and research NEW (last ~12 months)
+published techniques, payloads, bypasses, sinks, or fingerprints that would deepen them. Use your full
+search budget — go deep, not broad. Emit the additions as kb-proposal:<existing-slug> blocks. If you
+find a tech/class clearly in-scope for us but with NO doc, emit a kb-new:<slug> block with a full first
+draft. Favor depth on the highest-EV money classes (IDOR/BAC, GraphQL, SSRF, SQLi, Cognito/cloud-creds).
 EOF
 ;;
     detect-tune) cat <<'EOF'
@@ -147,19 +191,38 @@ EOF
 TASK — DETECTION & VERIFICATION TUNING: research improvements to how we DETECT and CONFIRM, aimed at
 fewer false positives + higher real-finding yield. Cover: new fingerprints/dorks (favicon hashes,
 headers, error pages, paths, Shodan/FOFA-style queries) to enumerate our classes/tech from already-
-collected data; known FALSE-POSITIVE patterns to suppress; better/safer confirm primitives; and
-precision-tuning ideas. Make each item ACTIONABLE (what to match, where). Emit durable fingerprint/FP
-knowledge as kb-proposal blocks to the relevant existing class-/tech- docs.
+collected data; known FALSE-POSITIVE patterns to suppress; better/safer confirm primitives; precision-
+tuning ideas. Use your full search budget — go deep on 2-3 high-value areas. Make each item ACTIONABLE
+(what to match, where). Emit durable fingerprint/FP knowledge as kb-proposal blocks.
+EOF
+;;
+    program) cat <<EOF
+
+TASK — PROGRAM-SPECIFIC RESEARCH for target: ${PROGRAM_TARGET:-<unknown>}.
+Research this specific bug bounty program / company exhaustively:
+1. DISCLOSED REPORTS: search HackerOne, YesWeHack, Intigriti disclosed reports for this program/company
+   — what classes have been found and paid? What was declined/N/A? What are the recurring patterns?
+2. TECH STACK: identify the specific technologies, frameworks, APIs this target runs — any public docs,
+   GitHub repos, job postings, Shodan results, BuiltWith data. Match to our KB for relevant attack classes.
+3. KNOWN BYPASSES / CARVE-OUTS: any program-specific rules, scope carve-outs, or known hardening that
+   would make certain classes unreportable or hard to exploit?
+4. WRITEUPS: find any public writeups, blog posts, conference talks, or Twitter threads about security
+   research on this target or its close peers (same industry, same platform).
+5. FRESH ATTACK SURFACE: what unique or underexplored attack surface does this target have that fits our
+   UNIQUE pillar (not what everyone runs)?
+Output a structured pre-hunt brief: top attack classes to try (ranked by EV), carve-outs to avoid,
+key endpoints/APIs to focus on, and any intel that gives us an edge over other researchers.
 EOF
 ;;
   esac
 }
 
 run_topic() {
-  local topic="$1" today raw prompt summary
+  local topic="$1" today raw prompt summary budget
   today="$(date '+%Y-%m-%d')"
   raw="$WORK/${topic}.raw.md"
-  prompt="$(PREAMBLE)$(topic_task "$topic")"
+  budget="$(topic_budget "$topic")"
+  prompt="$(PREAMBLE "$topic" "$budget")$(topic_task "$topic")"
   [[ -n "$(topic_task "$topic")" ]] || { warn "unknown topic: $topic"; return 1; }
 
   log "$topic — researching (model=$RESEARCH_MODEL, WebSearch/WebFetch)…"
@@ -182,18 +245,19 @@ run_topic() {
   summary="$(python3 "$HELPER" route --topic "$topic" --date "$today" --input "$raw" \
               --kb-dir "$KB_DIR" --research-dir "$RESEARCH_DIR" 2>/dev/null)" || summary=""
   [[ -n "$summary" ]] || { warn "$topic — router failed"; return 0; }
-  local nnew nprop headline digest
+  local nnew nprop headline top_items
   nnew="$(jq -r '.new_kb | length' <<<"$summary" 2>/dev/null || echo 0)"
   nprop="$(jq -r '.proposals | length' <<<"$summary" 2>/dev/null || echo 0)"
   headline="$(jq -r '.headline // ""' <<<"$summary" 2>/dev/null)"
-  digest="$(jq -r '.digest // ""' <<<"$summary" 2>/dev/null)"
+  # Extract top 3 section headings from the digest for the Discord card
+  top_items="$(grep -E '^#{1,3} ' "$raw" 2>/dev/null | head -4 | sed 's/^#* /• /' | tr '\n' '\n')"
   log "$topic — digest + ${nnew} new KB + ${nprop} proposal(s)"
 
-  commit_and_notify "$topic" "$today" "$nnew" "$nprop" "$headline"
+  commit_and_notify "$topic" "$today" "$nnew" "$nprop" "$headline" "$top_items"
 }
 
 commit_and_notify() {
-  local topic="$1" today="$2" nnew="$3" nprop="$4" headline="$5"
+  local topic="$1" today="$2" nnew="$3" nprop="$4" headline="$5" top_items="${6:-}"
   # commit the research outputs + any brand-new KB doc (scoped add; never code/secrets)
   [[ "$RESEARCH_GIT_COMMIT" == "1" ]] || { log "$topic — commit skipped (RESEARCH_GIT_COMMIT=0)"; return 0; }
   ( cd "$REPO_DIR" || exit 0
@@ -212,13 +276,17 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>" 2>/dev/null \
       fi
     fi
   )
-  # Discord summary (low-noise: one line per run)
+  # Discord card — headline + top findings inline so the card is actually readable
   local hook; hook="$(discord_hook research 2>/dev/null || true)"
   [[ -n "$hook" ]] || hook="$(discord_hook digest 2>/dev/null || true)"
   [[ -n "$hook" ]] || hook="$(discord_hook ops 2>/dev/null || true)"
   if [[ -n "$hook" ]]; then
-    local card; card="$(printf '🔬 **Research — %s (%s)**\n%s\n_%s new KB · %s proposal(s) → docs/research/%s_%s.md_' \
-      "$topic" "$today" "${headline:0:300}" "$nnew" "$nprop" "$topic" "$today")"
+    local card
+    card="$(printf '🔬 **Research — %s (%s)**  |  %s new KB · %s proposal(s)\n**%s**\n%s\n_→ docs/research/%s_%s.md_' \
+      "$topic" "$today" "$nnew" "$nprop" \
+      "${headline:0:200}" \
+      "${top_items:0:600}" \
+      "$topic" "$today")"
     discord_post "$hook" "$(jq -nc --arg c "${card:0:1900}" '{content:$c}')" >/dev/null 2>&1 || true
   fi
 }
@@ -227,8 +295,14 @@ main() {
   exec 9>"$LOCK_FILE"; flock -n 9 || { log "another research run in progress"; exit 0; }
   case "${1:-}" in
     tooling|vulns|kb-enrich|detect-tune) run_topic "$1" ;;
-    all) run_topic tooling; run_topic vulns; run_topic kb-enrich; run_topic detect-tune ;;
-    ""|-h|--help) echo "usage: $0 <tooling|vulns|kb-enrich|detect-tune|all>" >&2; exit 2 ;;
+    all) run_topic vulns; run_topic tooling; run_topic kb-enrich; run_topic detect-tune ;;
+    program)
+      # recon-research program <name> — on-demand pre-hunt brief for a specific target
+      [[ -n "${2:-}" ]] || { warn "usage: $0 program <program-name>"; exit 2; }
+      export PROGRAM_TARGET="$2"
+      run_topic program ;;
+    ""|-h|--help)
+      echo "usage: $0 <tooling|vulns|kb-enrich|detect-tune|all|program <name>>" >&2; exit 2 ;;
     *) warn "unknown topic: $1"; exit 2 ;;
   esac
 }
