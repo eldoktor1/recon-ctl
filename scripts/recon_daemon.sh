@@ -809,6 +809,17 @@ EXPOSED_FILES_SCRIPT="${EXPOSED_FILES_SCRIPT:-$(script_path recon_exposed_files.
 EXPOSED_FILES_INTERVAL="${EXPOSED_FILES_INTERVAL:-3600}"   # 1h
 run_exposed_files() { v21_killed exposed_files && return 0; [[ -f "$EXPOSED_FILES_SCRIPT" ]] && run_scanner bash "$EXPOSED_FILES_SCRIPT" || true; }
 
+# ---- Cognito unauth-cred lane (recon_cognito_nighthunt.sh) -------------------
+# Walks in-scope+paying hosts sorted newest-first (first_seen desc) harvesting
+# Amplify config / root main-JS for Cognito pool IDs, tests unauth issuance, and
+# blast-radius assesses issuers. Pings #review ONLY on a REAL finding (issued creds
+# with a role that actually reaches resources). RUM/zero-perm/OOS-carveout pools are
+# auto-suppressed as FP. Target-facing (curl to hosts) -> run_scanner (Mullvad gate).
+# Short interval so new hosts are picked up quickly. Killswitch: state/kill/v2_cognito.
+COGNITO_SCRIPT="${COGNITO_SCRIPT:-$(script_path recon_cognito_nighthunt.sh)}"
+COGNITO_INTERVAL="${COGNITO_INTERVAL:-300}"   # 5m — cycle is fast; new hosts surface quickly
+run_cognito() { v21_killed cognito && return 0; [[ -f "$COGNITO_SCRIPT" ]] && run_scanner bash "$COGNITO_SCRIPT" || true; }
+
 # ---- BLIND / STORED-XSS lane (recon_blindxss.sh + DAST blind-plant) ----------
 # The #1 unused dalfox feature, made into a real lane. THREE pieces:
 #  (1) collector  — a PERSISTENT interactsh-client (long-lived child like gungnir; d0k,
@@ -1003,6 +1014,7 @@ run_discord_bot() {
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
   supervise_loop "kr"             "KR_INTERVAL"            run_kr             &
   supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
+  supervise_loop "cognito"        "COGNITO_INTERVAL"       run_cognito        &
   supervise_loop "blindxss-plant"     "BLINDXSS_PLANT_INTERVAL"     run_blindxss_plant     &
   supervise_loop "blindxss-correlate" "BLINDXSS_CORRELATE_INTERVAL" run_blindxss_correlate &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &

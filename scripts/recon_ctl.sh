@@ -2359,7 +2359,7 @@ cmd_v2() {
   case "$sub" in
     status)
       hdr "V2 modules"
-      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params v2_blindxss v2_permute v2_kr v2_uncover v2_ai_hunter; do
+      for k in v2_scope v2_cve v2_vuln_feed v2_nuclei v2_cloudrecon v2_dast v2_params v2_blindxss v2_permute v2_kr v2_uncover v2_ai_hunter v2_cognito; do
         if [[ -f "$V21_KILL_DIR/$k" ]]; then
           printf "  [0;31mDISABLED[0m %s — %s
 " "$k" "$(cat "$V21_KILL_DIR/$k")"
