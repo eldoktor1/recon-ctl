@@ -2649,6 +2649,12 @@ case "${1:-}" in
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" bash "$SCRIPT_DIR/recon_kr.sh" ;;
   uncover)      # surface expansion (uncover Shodan/Censys dorks, budget-capped). 3rd-party API → d0k.
                 shift; bash "$SCRIPT_DIR/recon_uncover.sh" "${@:-cycle}" ;;
+  cognito)      # AWS Cognito unauth cred-issuance lane (bucket/JS→pool→guest creds). host-JS fetch +
+                # AWS cognito-identity/sts → reconrun (Mullvad egress). guest-only, read-only, stops at
+                # role ARN; --assess = SAFE list_/describe_ blast-radius only. bare = results (read-only).
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  bash "$SCRIPT_DIR/recon_cognito.sh" "${@:-results}" ;;
   hunter|ai-hunter)  # the Claude HUNTER (seeded per-target loop). Claude=d0k OAuth, probes=safe_probe.
                 shift; bash "$SCRIPT_DIR/recon_ai_hunter.sh" "${@:-status}" ;;
   research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
