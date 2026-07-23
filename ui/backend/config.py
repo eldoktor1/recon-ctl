@@ -35,6 +35,26 @@ RECON_CTL = REPO_DIR / "scripts" / "recon_ctl.sh"
 STATE_PY = REPO_DIR / "engine" / "state.py"
 OBSERVABILITY_PY = REPO_DIR / "engine" / "observability.py"
 
+# --- Claude co-pilot console (in-UI Claude, driven through the hunt spool) ---
+CONSOLE_SH = REPO_DIR / "scripts" / "recon_claude_console.sh"
+CONSOLE_DIR = STATE_DIR / "ui_console"
+# Full parity (operator 2026-07-22): bypassPermissions gives the headless co-pilot
+# the SAME unrestricted toolset as a Claude Code session — no allow-list, every tool
+# (incl. Burp sends + Brave writes) usable without an impossible interactive prompt.
+# Doctrine (APPEND_SYS + CLAUDE.md) is the sole guardrail. Override via RECON_CONSOLE_PERM.
+CONSOLE_PERM = os.environ.get("RECON_CONSOLE_PERM", "bypassPermissions")
+# Default is opus 4.8 (highest quality); sonnet/haiku are cheaper opt-ins.
+CONSOLE_MODELS = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+CONSOLE_DEFAULT_MODEL = os.environ.get("RECON_CONSOLE_MODEL", "opus")
+# claude slugifies the cwd to name the project transcript dir:
+# /home/d0k/recon-pipeline -> ~/.claude/projects/-home-d0k-recon-pipeline/
+_PROJ_SLUG = "-" + str(REPO_DIR).strip("/").replace("/", "-")
+CLAUDE_PROJECT_DIR = Path.home() / ".claude" / "projects" / _PROJ_SLUG
+
 # --- Elasticsearch ---------------------------------------------------------
 ES_URL = os.environ.get("ES_URL", "http://127.0.0.1:9200")
 ES_INDEX = os.environ.get("ES_INDEX", "recon_alive")

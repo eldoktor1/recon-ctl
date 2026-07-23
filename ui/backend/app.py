@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import actions, config, daemon, es, files, findings, safety
+from . import actions, claude_console, config, daemon, es, files, findings, safety
 from .runner import run_observability, run_recon, run_state
 from .tasks import LANES, manager
 
@@ -259,6 +259,56 @@ async def api_hunt(lane: str, body: dict = Depends(safety.require_confirm)):
         argv += [str(a) for a in extra][:8]
     t = await manager.spawn(f"{lane}", argv)
     return t.snapshot()
+
+
+@app.get("/api/claude/config")
+async def api_claude_config():
+    """Is the in-UI Claude co-pilot wired up, and which models are offered."""
+    return claude_console.available()
+
+
+@app.get("/api/claude/sessions")
+async def api_claude_sessions():
+    """List Co-Pilot conversations (newest first) so the operator can switch back in."""
+    return claude_console.list_sessions()
+
+
+@app.get("/api/claude/sessions/{sid}")
+async def api_claude_session(sid: str):
+    """Full transcript of one conversation, shaped for the chat UI."""
+    if not claude_console.valid_session(sid):
+        raise HTTPException(400, "bad session id")
+    return {"session_id": sid, "turns": claude_console.load_transcript(sid)}
+
+
+@app.post("/api/claude/sessions/{sid}/delete")
+async def api_claude_session_delete(sid: str, body: dict = Depends(safety.require_confirm)):
+    """Delete a Co-Pilot conversation (marker + transcript)."""
+    if not claude_console.valid_session(sid):
+        raise HTTPException(400, "bad session id")
+    return claude_console.delete_session(sid)
+
+
+@app.post("/api/claude/message")
+async def api_claude_message(body: dict = Depends(safety.require_confirm)):
+    """One conversational turn of the operator's driving console.
+
+    Off-target by construction: the console runs `recon` commands + reads state;
+    target-facing lanes it may invoke stay behind their own run_scanner/VPN gate,
+    so no VPN gate is applied to the console turn itself.
+    """
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "message required")
+    if len(message) > 16000:
+        raise HTTPException(413, "message too long")
+    sid = (body.get("session_id") or "").strip()
+    if not claude_console.valid_session(sid):
+        sid = claude_console.new_session_id()
+    model = body.get("model")
+    argv = claude_console.build_argv(sid, message, model)
+    t = await manager.spawn(f"claude:{sid[:8]}", argv)
+    return {**t.snapshot(), "session_id": sid}
 
 
 @app.post("/api/verify")

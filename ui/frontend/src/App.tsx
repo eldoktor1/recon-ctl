@@ -3,6 +3,7 @@ import { useLiveStatus, StatusProvider } from "./hooks";
 import { Pill } from "./components/ui";
 import { fmtNum } from "./format";
 import CommandCenter from "./pages/CommandCenter";
+import Console from "./pages/Console";
 import TokenGate from "./pages/TokenGate";
 import Findings from "./pages/Findings";
 import Assets from "./pages/Assets";
@@ -24,6 +25,7 @@ interface NavItem { to: string; label: string; icon: string; phase?: string }
 
 const NAV: NavItem[] = [
   { to: "/", label: "Command Center", icon: "◎" },
+  { to: "/console", label: "Co-Pilot", icon: "✧" },
   { to: "/findings", label: "Findings", icon: "◆" },
   { to: "/assets", label: "Asset Explorer", icon: "❑" },
   { to: "/leads", label: "Leads", icon: "✦" },
@@ -131,6 +133,7 @@ function AppShell() {
           <ErrorBoundary resetKey={loc.pathname}>
           <Routes>
             <Route path="/" element={<CommandCenter />} />
+            <Route path="/console" element={<Console />} />
             <Route path="/findings" element={<Findings />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/leads" element={<Leads />} />
