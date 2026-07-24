@@ -61,6 +61,14 @@ PROBE_ROUNDS="${PROBE_ROUNDS:-2}"                # max re-probe rounds per findi
 PROBE_BUDGET="${PROBE_BUDGET:-6}"                # max total probes per finding (anti-runaway)
 SAFE_PROBE="${SAFE_PROBE:-$SCRIPT_DIR/recon_safe_probe.sh}"
 AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"         # findings per cycle (quota-bounded)
+# INTAKE NOISE PRE-SCREEN (1A, 2026-07-24): documented structural-noise classes (shared-tenant
+# per-customer consoles / third-party-repo secrets / SPA-shell-200) are 100%-fp'd by the reviewer
+# anyway and were FLOODING the queue post the 06-17/06-18 lane additions — starving genuine
+# candidates of the per-cycle review budget. Auto-dismiss them here (still a recorded ai_verdict,
+# so no gate bypass) WITHOUT spending a Claude pass. Uses tools/brief_filter.py as the single
+# source of truth. Reversible: INTAKE_PRESCREEN=0.
+INTAKE_PRESCREEN="${INTAKE_PRESCREEN:-1}"
+BRIEF_FILTER="${BRIEF_FILTER:-$SCRIPT_DIR/../tools/brief_filter.py}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-180}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
@@ -273,12 +281,36 @@ lens_vote() {
   printf '%s\t%s\t%s' "$v" "$c" "$r"
 }
 
+# ---- needs-human escalation guard (restored 2026-07-24) --------------------------------
+# A confident primary `fp` that CONCEDES the finding is technically genuine/real but killed
+# ONLY on scope / duplicate / compliance / venue grounds is NOT bulk noise — it is a borderline
+# the operator should SEE (scope changes; a "dup" call can be wrong; an OOS-but-real bug may have
+# a VDP path). Route those to needs-human (batched into the nightly briefing) instead of a silent
+# cheap-fp kill. Pure noise (scan-artifact / shared-tenant / by-design / regex-misfire) still dies
+# cheaply. Env-overridable so the operator can retune/disable.
+NH_ESCALATE_ENABLED="${NH_ESCALATE_ENABLED:-1}"
+NH_GENUINE_RE="${NH_GENUINE_RE:-(\b(genuine|genuinely|actually (exposed|reachable|claimable|vulnerable|present|works)|is a real|really is|valid (bug|finding|primitive|issue)|legit(imate)?|claimable|confirmed (unauth|primitive|exposure)|exploitable (primitive|unauth))\b|\breal (\w+ ){0,3}(primitive|bug|finding|exposure|issue|vuln|takeover|endpoint|exposed|leak))}"
+NH_SCOPEKILL_RE="${NH_SCOPEKILL_RE:-\b(out[- ]?of[- ]?scope|non-?paying|not[^.]{0,8}paying|no bounty|duplicate|\bdup\b|compliance|dead[- ]?zone|unreportable|not eligible|ineligible|wrong venue|carve-?out|already reported)\b}"
+NH_PIVOT_RE="${NH_PIVOT_RE:-\b(but|however|though|yet)\b}"
+NH_PURE_NOISE_RE="${NH_PURE_NOISE_RE:-scan[- ]?artifact|shared[- ]?tenant|per-customer tenant|regex (misfire|misread|misfires)|by[- ]?design|zero values|spa[- ]?shell|acks every port|not a real finding|schema keys|marketing (page|site)|parking page}"
+
 # consensus -> sets globals FINAL_V / FINAL_C / FINAL_R / model_used / RAN_PANEL.
 # Claude is the brain: the PRIMARY pass investigates (multimodal + probe); a confident fp
 # dies cheaply; everything heading toward 'real' (or uncertain) is adjudicated by the panel.
 consensus() {
   RAN_PANEL=0
   IFS=$'\t' read -r FINAL_V FINAL_C FINAL_R <<<"$(judge "$CLAUDE_MODEL")"; model_used="$CLAUDE_MODEL"
+  # real-but-unreportable -> escalate to human instead of a silent confident-fp cheap-kill
+  if [[ "$NH_ESCALATE_ENABLED" == "1" && "$FINAL_V" == "fp" ]] && ! _lt "${FINAL_C:-0}" "$FP_FAST_CONF" \
+     && printf '%s' "$FINAL_R" | grep -qiE "$NH_GENUINE_RE" \
+     && printf '%s' "$FINAL_R" | grep -qiE "$NH_SCOPEKILL_RE" \
+     && printf '%s' "$FINAL_R" | grep -qiE "$NH_PIVOT_RE" \
+     && ! printf '%s' "$FINAL_R" | grep -qiE "$NH_PURE_NOISE_RE"; then
+    FINAL_V="needs-human"; FINAL_C="0.5"
+    FINAL_R="ESCALATED real-but-unreportable → operator eyeball (scope/dup/compliance may change). [orig-fp: $FINAL_R]"
+    log "        ↳ 🟡 escalated real-but-unreportable fp → needs-human"
+    return
+  fi
   # cheap kill: a confident fp does not need the panel (bulk noise)
   if [[ "$FINAL_V" == "fp" ]] && ! _lt "${FINAL_C:-0}" "$FP_FAST_CONF"; then return; fi
   if [[ "$CONSENSUS_ENABLED" != "1" ]]; then
@@ -344,7 +376,7 @@ EOF
 
 _lt() { awk "BEGIN{exit !(($1)<($2))}"; }   # float less-than (exit 0 if $1<$2)
 
-reviewed=0; real=0; fp=0; human=0; escalated=0; withshot=0
+reviewed=0; real=0; fp=0; human=0; escalated=0; withshot=0; prefiltered=0
 while IFS= read -r fjson; do
   [[ -z "$fjson" ]] && continue
   [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down mid-run — stopping"; break; }
@@ -353,6 +385,31 @@ while IFS= read -r fjson; do
   vclass="$(printf '%s' "$fjson" | jq -r '.vuln_class // ""')"
   sclass="$(printf '%s' "$fjson" | jq -r '.signal_class // ""')"
   program="$(printf '%s' "$fjson" | jq -r '.program // ""')"
+
+  # ---- INTAKE NOISE PRE-SCREEN (1A): auto-dismiss documented structural noise before any
+  # Claude pass (frees the per-cycle budget for genuine candidates). Two probes, both via
+  # brief_filter.py: (a) --host flags a shared-tenant per-customer console (unifi-hosting UUID
+  # etc. = third-party data, hard line); (b) --noise flags third-party-repo secrets / SPA-shell
+  # / >6-port scan-artifacts that fire on the finding's own fields. Degrades safely (ES down =>
+  # no shared-tenant hit => normal review). Still records a real ai_verdict (fp) — no gate bypass.
+  if [[ "$INTAKE_PRESCREEN" == "1" && -n "$host" && "$host" != "null" && -f "$BRIEF_FILTER" ]]; then
+    ps_reason=""
+    if [[ "$(python3 "$BRIEF_FILTER" --host "$host" 2>/dev/null | jq -r '.shared_tenant // false' 2>/dev/null)" == "true" ]]; then
+      ps_reason="shared-tenant per-customer console (third-party data, hard line)"
+    else
+      pf="$(printf '[%s]' "$fjson" | python3 "$BRIEF_FILTER" --noise 2>/dev/null | jq -r '.suppressed[0]._noise_class // empty' 2>/dev/null)"
+      case "$pf" in
+        ">6-critical-ports-scan-artifact"|third-party-repo-secret|spa-shell-200-all-routes) ps_reason="$pf" ;;
+      esac
+    fi
+    if [[ -n "$ps_reason" ]]; then
+      V3_DB="$V3_DB" python3 "$STATE_PY" ai-verdict "$fid" "fp" "0.9" \
+        "structural-prefilter: $ps_reason — documented noise class, auto-dismissed without a review pass" >/dev/null 2>&1 || true
+      prefiltered=$((prefiltered+1)); reviewed=$((reviewed+1)); fp=$((fp+1))
+      log "   ⏭  prefilter fp: $host · $ps_reason"
+      continue
+    fi
+  fi
 
   # enrich from ES: asset context + screenshot path (one fetch, best-effort)
   ctx='{}'; tech=""; shot=""; SHOT_AT=""
@@ -438,4 +495,4 @@ while IFS= read -r fjson; do
   reviewed=$((reviewed+1)); [[ "$v" == real ]] && real=$((real+1)); [[ "$v" == fp ]] && fp=$((fp+1)); [[ "$v" == needs-human ]] && human=$((human+1))
 done < <(printf '%s' "$pending" | jq -c '.[]' 2>/dev/null)
 
-log "🧠 verify done · 🟢 $real real · 🔴 $fp fp · 🟡 $human human · 🔬 $escalated panel · 📸 $withshot with-shot  (of $reviewed)"
+log "🧠 verify done · 🟢 $real real · 🔴 $fp fp (⏭ $prefiltered prefiltered) · 🟡 $human human · 🔬 $escalated panel · 📸 $withshot with-shot  (of $reviewed)"

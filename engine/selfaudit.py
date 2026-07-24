@@ -637,6 +637,65 @@ def chk_growth() -> list:
     return out
 
 
+FUNNEL_REAL_STALE_D     = int(os.environ.get("FUNNEL_REAL_STALE_D", "14"))
+FUNNEL_REPORTED_STALE_D = int(os.environ.get("FUNNEL_REPORTED_STALE_D", "21"))
+
+
+def _days_since(iso_str):
+    if not iso_str:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(iso_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
+def chk_funnel_recency() -> list:
+    """The submission funnel must MOVE: a finding must survive review (a `real` AI verdict) and
+    reach a report on some cadence. chk_lane_yield checks that lanes MINT findings; this checks
+    that findings SURVIVE review — the blind spot that let a 40-day 100%-fp stall report all-green
+    (the reviewer was correctly refuting noise, but nothing flagged that ZERO reals were getting
+    through). HIGH here means: investigate intake noise + needs-human escalation, NOT the reviewer."""
+    out = []
+    if not os.path.isfile(V3_DB):
+        return out  # db.open already HIGH-fails
+    try:
+        last_real = _sql("SELECT COALESCE(MAX(ai_reviewed_at),'') FROM findings WHERE ai_verdict='real';")
+    except Exception as e:
+        return [finding("funnel.real_recency", "LOW", "warn",
+                        f"real-verdict recency query failed: {e}", remediation_class="human")]
+    try:
+        last_reported = _sql("SELECT COALESCE(MAX(at),'') FROM audit_log WHERE to_state='reported';")
+    except Exception:
+        last_reported = ""
+    dreal, drep = _days_since(last_real), _days_since(last_reported)
+    if dreal is None:
+        out.append(finding("funnel.real_recency", "INFO", "warn",
+                           "no `real` AI verdict on record yet — funnel unproven (fresh DB or a long dry spell).",
+                           remediation_class="human"))
+    elif dreal > FUNNEL_REAL_STALE_D:
+        out.append(finding("funnel.real_recency", "HIGH", "fail",
+                           f"no `real` AI verdict in {dreal:.0f}d (> {FUNNEL_REAL_STALE_D}d) — the review→report "
+                           f"funnel is stalled (every finding auto-fp'd). Check intake noise + needs-human "
+                           f"escalation and fresh surface, not the reviewer.", remediation_class="human"))
+    else:
+        out.append(finding("funnel.real_recency", "OK", "ok",
+                           f"last `real` verdict {dreal:.1f}d ago.", remediation_class="none"))
+    if drep is not None:
+        if drep > FUNNEL_REPORTED_STALE_D:
+            out.append(finding("funnel.reported_recency", "HIGH", "fail",
+                               f"nothing reached state=reported in {drep:.0f}d (> {FUNNEL_REPORTED_STALE_D}d) — "
+                               f"submission pipeline dry.", remediation_class="human"))
+        else:
+            out.append(finding("funnel.reported_recency", "OK", "ok",
+                               f"last report {drep:.1f}d ago.", remediation_class="none"))
+    return out
+
+
 def run_checks() -> list:
     checks = []
     checks.append(chk_vpn())
@@ -645,6 +704,7 @@ def run_checks() -> list:
     checks.append(chk_es())
     checks.extend(chk_sqlite())
     checks.extend(chk_lane_yield())
+    checks.extend(chk_funnel_recency())
     checks.append(chk_dangling_refs())
     checks.extend(chk_daemon())
     checks.append(chk_queue())

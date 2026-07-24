@@ -318,18 +318,31 @@ def record_confirmed(conn, host, *, url=None, program=None, signal_class=None,
     now = _utc()
     with conn:
         conn.execute("BEGIN")
+        # A finding Claude already ruled `fp` must NOT be resurrected to 'confirmed' by a daily
+        # re-promotion (the portscan/takeover lanes re-emit the same dedup_key every cycle). Left
+        # unguarded, ai_verdict='fp' rows flipped back to 'confirmed' forever — but ai_pending only
+        # picks ai_verdict IS NULL, so they were never re-reviewed and never dismissed: they piled
+        # up in 'confirmed', inflating counts and masking the funnel stall. Keep fp'd rows as-is;
+        # only genuinely un-judged / real / needs-human rows (re)confirm. Evidence/score still
+        # refresh so a later explicit re-review (recon-verify) sees current data.
         cur = conn.execute(
             """INSERT INTO findings(dedup_key,host,url,program,signal_class,vuln_class,
                state,score,confidence,review_tier,fp_signature,evidence,created_at,updated_at,state_changed_at,verifying_since)
                VALUES(?,?,?,?,?,?, 'confirmed',?,?,?,?,?,?,?,?,NULL)
-               ON CONFLICT(dedup_key) DO UPDATE SET state='confirmed', url=COALESCE(excluded.url,url),
+               ON CONFLICT(dedup_key) DO UPDATE SET
+                 state = CASE WHEN findings.ai_verdict='fp' THEN findings.state ELSE 'confirmed' END,
+                 url=COALESCE(excluded.url,url),
                  program=excluded.program, score=excluded.score,
                  confidence=excluded.confidence, review_tier=excluded.review_tier,
                  evidence=excluded.evidence, updated_at=excluded.updated_at,
-                 state_changed_at=excluded.state_changed_at, verifying_since=NULL""",
+                 state_changed_at = CASE WHEN findings.ai_verdict='fp' THEN findings.state_changed_at ELSE excluded.state_changed_at END,
+                 verifying_since = CASE WHEN findings.ai_verdict='fp' THEN findings.verifying_since ELSE NULL END""",
             (dedup, host, url, program, signal_class, vuln_class, score, confidence, rt, sig, ev, now, now, now))
-        fid = conn.execute("SELECT id FROM findings WHERE dedup_key=?", (dedup,)).fetchone()["id"]
-        _audit(conn, fid, "promote", None, "confirmed", f"confidence={confidence} review={rt}")
+        frow = conn.execute("SELECT id, ai_verdict FROM findings WHERE dedup_key=?", (dedup,)).fetchone()
+        fid = frow["id"]
+        # only audit a genuine (re)confirm — not a suppressed fp re-promotion (avoids promote-spam)
+        if frow["ai_verdict"] != "fp":
+            _audit(conn, fid, "promote", None, "confirmed", f"confidence={confidence} review={rt}")
     return fid
 
 

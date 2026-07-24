@@ -155,8 +155,64 @@ _VERSION_OK_RE  = re.compile(r'(version\s+confirmed|confirmed\s+in[\s-]*range|ru
 _PORTS_RE       = re.compile(r'(>?\s*[6-9]\d*\+?\s*(open\s*)?critical\s*ports|scan\s*artifact|every\s*port\s*(open|acks|responds))', re.I)
 
 
+# worked-and-killed suppression — a host worked to a dead end already. Shared with
+# recon_briefing.sh + recon_ai_hunter.sh via tools/note_verdict.py so cards stop re-serving corpses.
+# Two tiers (2026-07-24 class-scoped recalibration): a HOST-WIDE kill (operator do-not-re-* /
+# whole-host exhaustion) suppresses any lead for the host; a CLASS-SCOPED kill only suppresses a
+# lead whose vuln class matches the class that was refuted — so a host killed for "version
+# disclosure = N/A" stays servable for IDOR/XSS/SQLi/etc.
+try:
+    from note_verdict import (killed_hosts as _killed_hosts_fn,
+                              killed_host_classes as _killed_classes_fn,
+                              note_classes as _note_classes_fn)
+except Exception:
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from note_verdict import (killed_hosts as _killed_hosts_fn,
+                                  killed_host_classes as _killed_classes_fn,
+                                  note_classes as _note_classes_fn)
+    except Exception:
+        _killed_hosts_fn = _killed_classes_fn = _note_classes_fn = None
+_KILLED = None
+_KILLED_CLS = None
+def _worked_dead_reason(ld):
+    """Return a suppression reason if this lead's host is worked-dead for its class, else None."""
+    global _KILLED, _KILLED_CLS
+    if _killed_hosts_fn is None:
+        return None
+    host = (ld.get("host") or ld.get("source_host") or "").strip().lower()
+    if not host:
+        return None
+    if _KILLED is None:
+        try:
+            _KILLED = {h.lower() for h in _killed_hosts_fn()}
+        except Exception:
+            _KILLED = set()
+    if host in _KILLED:
+        return ("host already worked to a dead end host-wide (operator kill / whole-host "
+                "exhaustion) per host_notes — not re-served")
+    if _killed_classes_fn is not None and _note_classes_fn is not None:
+        if _KILLED_CLS is None:
+            try:
+                _KILLED_CLS = {h.lower(): set(c) for h, c in _killed_classes_fn().items()}
+            except Exception:
+                _KILLED_CLS = {}
+        killed_cls = _KILLED_CLS.get(host)
+        if killed_cls:
+            lead_cls = _note_classes_fn(_noise_text(ld))
+            hit = killed_cls & lead_cls
+            if hit:
+                return (f"host already refuted for {'/'.join(sorted(hit))} per host_notes "
+                        f"(class-scoped) — not re-served for this class")
+    return None
+
+
 def noise_class(ld):
     """Detect a documented recurring FP/noise class. Returns (klass, action, reason) or None."""
+    # 0) worked-and-killed host — suppress before any other class check (class-scoped)
+    _wd = _worked_dead_reason(ld)
+    if _wd:
+        return ("worked-and-killed", "suppress", _wd)
     t = _noise_text(ld)
 
     # 1) public-by-design token — a "secret" that is MEANT to be public
