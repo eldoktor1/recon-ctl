@@ -84,6 +84,51 @@ emit_new() {   # emit_new <candidates-file> <root-or-tag>
   rm -f "$res" "$new"
 }
 
+# ---- favicon-hash fingerprinting (detect-tune 2026-07-11 §5 / 2026-07-19 §4) ------------
+# mmh3 hash of the base64-encoded favicon → a Shodan `http.favicon.hash:<h>` dork surfaces sibling
+# infra (staging / internal panels) that reuses one favicon, which CT/subfinder miss. The hash math
+# is pure/OFFLINE (no dependency: uses mmh3 if present, else a pure-python MurmurHash3). A favicon
+# FETCH is target-facing (a single GET) → vpn-gated + ON-DEMAND ONLY (operator: `recon-uncover
+# favicon <host>`); NEVER the autonomous cycle. The follow-on Shodan query is BUDGET-GUARDED via
+# cmd_query and is opt-in (`--query`) so no credit is spent unless the operator asks. Caveat (matches
+# our FP discipline): a favicon match is an INDICATOR only — trivially spoofable/collidable → treat
+# hits as resolve+scope-check candidates, never identity confirmation. Skip default framework-stock
+# icons (they return thousands of unrelated hosts).
+favicon_mmh3() {   # favicon bytes on stdin -> Shodan-style signed mmh3 hash on stdout
+  python3 - <<'PY'
+import sys, base64
+data = sys.stdin.buffer.read()
+if not data:
+    sys.exit(1)
+b64 = base64.encodebytes(data)          # Shodan quirk: newline-wrapped base64 (76-col + trailing \n)
+try:
+    import mmh3
+    print(mmh3.hash(b64)); sys.exit(0)
+except ImportError:
+    pass
+# pure-python MurmurHash3 x86_32 (signed) — no external dependency to install
+def murmur3_32(key, seed=0):
+    c1, c2 = 0xcc9e2d51, 0x1b873593
+    length = len(key); h1 = seed; rounded = (length // 4) * 4
+    for i in range(0, rounded, 4):
+        k1 = key[i] | key[i+1] << 8 | key[i+2] << 16 | key[i+3] << 24
+        k1 = (k1 * c1) & 0xffffffff; k1 = ((k1 << 15) | (k1 >> 17)) & 0xffffffff; k1 = (k1 * c2) & 0xffffffff
+        h1 ^= k1; h1 = ((h1 << 13) | (h1 >> 19)) & 0xffffffff; h1 = (h1 * 5 + 0xe6546b64) & 0xffffffff
+    k1 = 0; tail = length & 3
+    if tail >= 3: k1 ^= key[rounded+2] << 16
+    if tail >= 2: k1 ^= key[rounded+1] << 8
+    if tail >= 1:
+        k1 ^= key[rounded]; k1 = (k1 * c1) & 0xffffffff; k1 = ((k1 << 15) | (k1 >> 17)) & 0xffffffff
+        k1 = (k1 * c2) & 0xffffffff; h1 ^= k1
+    h1 ^= length
+    h1 ^= h1 >> 16; h1 = (h1 * 0x85ebca6b) & 0xffffffff; h1 ^= h1 >> 13
+    h1 = (h1 * 0xc2b2ae35) & 0xffffffff; h1 ^= h1 >> 16
+    return h1 - 0x100000000 if h1 & 0x80000000 else h1   # Shodan reports the SIGNED 32-bit value
+print(murmur3_32(b64))
+PY
+}
+favicon_dork() { printf 'http.favicon.hash:%s\n' "$1"; }   # <hash> -> scoped Shodan dork
+
 # ============================== MODES ====================================================
 cmd_query() {   # on-demand: query "<dork>" [engine]
   local dork="${1:-}" eng="${2:-shodan}"
@@ -93,6 +138,28 @@ cmd_query() {   # on-demand: query "<dork>" [engine]
   run_engine "$eng" "$dork" "$cands"
   emit_new "$cands" "ondemand:$eng"
   rm -f "$cands"
+}
+
+cmd_favicon() {   # on-demand: favicon <host|favicon-url> [--query]
+  local host="${1:-}"; [[ -n "$host" ]] || { echo "usage: recon-uncover favicon <host|favicon-url> [--query]"; exit 1; }
+  local runq=0; [[ "${2:-}" == "--query" ]] && runq=1
+  local url="$host"; [[ "$url" == http* ]] || url="https://$host/favicon.ico"
+  # favicon FETCH is TARGET-FACING → fail-closed on vpn_down (Mullvad covers all egress on Windows)
+  [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — refusing target-facing favicon fetch"; exit 0; }
+  local bytes; bytes="$(mktemp)"
+  curl -fsS -m 15 -A 'Mozilla/5.0' "$url" -o "$bytes" 2>/dev/null || { warn "favicon fetch failed: $url"; rm -f "$bytes"; exit 0; }
+  [[ -s "$bytes" ]] || { warn "empty/absent favicon: $url"; rm -f "$bytes"; exit 0; }
+  local h; h="$(favicon_mmh3 < "$bytes")" || { warn "hash computation failed"; rm -f "$bytes"; exit 0; }
+  rm -f "$bytes"
+  local dork; dork="$(favicon_dork "$h")"
+  log "🔖 favicon hash for $url → $dork"
+  printf '%s\n' "$dork"
+  if [[ "$runq" -eq 1 ]]; then
+    log "→ running scoped uncover query (CHARGES 1 Shodan query from the monthly budget)"
+    cmd_query "$dork" shodan
+  else
+    printf 'to surface sibling infra (charges 1 Shodan query): recon-uncover query "%s"\n' "$dork"
+  fi
 }
 
 cmd_cycle() {   # autonomous budgeted cycle
@@ -142,6 +209,7 @@ cmd_cycle() {   # autonomous budgeted cycle
 case "${1:-cycle}" in
   cycle|"") cmd_cycle ;;
   query)    shift; cmd_query "$@" ;;
+  favicon)  shift; cmd_favicon "$@" ;;
   budget)   echo "Shodan uncover budget: $(budget_used)/$UNCOVER_MONTHLY_BUDGET used this month ($MONTH)" ;;
-  *)        echo "usage: recon_uncover.sh {cycle|query \"<dork>\" [engine]|budget}" >&2; exit 1 ;;
+  *)        echo "usage: recon_uncover.sh {cycle|query \"<dork>\" [engine]|favicon <host> [--query]|budget}" >&2; exit 1 ;;
 esac

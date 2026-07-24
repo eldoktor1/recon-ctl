@@ -93,6 +93,11 @@ def cached_twice(url, extra_headers=None):
 WCD_SUFFIXES = ["/{n}.css", "/{n}.js", ";{n}.css", "%23{n}.css"]
 WCP_HEADERS = ["X-Forwarded-Host", "X-Forwarded-Scheme", "X-Host",
                "X-Forwarded-Server", "X-Original-URL", "X-Forwarded-Prefix"]
+# Varnish CVE-2026-34475 (req.url validate-before-canonicalize, CWE-180): the origin canonicalizes a
+# confusing root-path to "/" while Varnish caches on the raw (uncanonicalized) req.url — a root-path
+# cacheability-flip variant of the same class we already probe. Detect-only + unique cache-buster:
+# these NEVER touch the real shared key, only ours. Varnish-fingerprinted hosts only.
+VARNISH_WCD_SUFFIXES = ["//{n}.css", "/%2F{n}.css", "/%2e/{n}.css"]
 
 
 def probe(host, url):
@@ -110,7 +115,8 @@ def probe(host, url):
     # returning 200/204 is a reportable bug on its own, but PURGE is state-changing (not GET/HEAD/OPTIONS)
     # so the autonomous loop only FLAGS it — `recon-wcd purge <host>` fires the single confirm (operator).
     bh = {k.lower(): v for k, v in base.headers.items()}
-    if "x-varnish" in bh or "varnish" in (bh.get("via", "") + " " + bh.get("server", "")).lower():
+    is_varnish = "x-varnish" in bh or "varnish" in (bh.get("via", "") + " " + bh.get("server", "")).lower()
+    if is_varnish:
         ev_hdr = ("X-Varnish: " + bh["x-varnish"]) if "x-varnish" in bh else ("Via: " + bh.get("via", "")).strip()
         leads.append({
             "host": host, "url": url, "class": "cache-purge",
@@ -120,22 +126,32 @@ def probe(host, url):
         })
 
     # ---- WCD: path-confusion variant of a NON-cached base becomes cacheable + same body ----
+    # On Varnish-fingerprinted hosts also try the CVE-2026-34475 root-path req.url-confusion suffixes
+    # (higher-confidence, named-CVE mechanism vs a generic suffix flip). Same cache-busted safety.
     if not base_cached:
         s = urlsplit(url)
         path = s.path or "/"
-        for suf in WCD_SUFFIXES:
+        suffixes = WCD_SUFFIXES + (VARNISH_WCD_SUFFIXES if is_varnish else [])
+        for suf in suffixes:
             n = nonce()
             vpath = path.rstrip("/") + suf.format(n=n)
             vurl = add_cb(urlunsplit((s.scheme, s.netloc, vpath, "", "")), nonce())
             is_c, st, vlen, r2 = cached_twice(vurl)
             if is_c and st and 200 <= st < 300 and base_len > 0 \
                     and abs(vlen - base_len) <= max(64, base_len * 0.2):
-                leads.append({
+                _vn = suf in VARNISH_WCD_SUFFIXES
+                lead = {
                     "host": host, "url": url, "class": "web-cache-deception",
-                    "kind": "wcd-path-confusion", "severity": "medium",
-                    "evidence": "base not-cached (%s) but %s is CACHED with ~same body (origin ignored suffix)" % (base_state, vpath),
+                    "kind": "wcd-varnish-requrl" if _vn else "wcd-path-confusion",
+                    "severity": "medium",
+                    "evidence": "base not-cached (%s) but %s is CACHED with ~same body (origin ignored suffix)%s" % (
+                        base_state, vpath,
+                        " — Varnish req.url-canonicalization confusion (CVE-2026-34475 class)" if _vn else ""),
                     "probe": vpath, "base_state": base_state,
-                })
+                }
+                if _vn:
+                    lead["cve"] = "CVE-2026-34475"
+                leads.append(lead)
                 break
 
     # ---- WCP: unkeyed header reflected into a cacheable response (under OUR cb key) ----
@@ -151,6 +167,21 @@ def probe(host, url):
                 "probe": hdr, "base_state": base_state,
             })
             break
+
+    # ---- WCP (Varnish): capitalized `Host` header case-normalization poisoning (detect-tune 2026-07-19).
+    # On some Varnish VCLs the cache key normalizes host case while the app reflects the raw-case value —
+    # a differently-cased Host can reflect into a cached response. Detect-only, still under OUR cb key. ----
+    if is_varnish:
+        canary = "cnry%s.example.com" % nonce()
+        purl = add_cb(url, nonce())
+        is_c, st, _vlen, r2 = cached_twice(purl, {"HOST": canary})
+        if r2 is not None and canary in (r2.text or "") and is_c:
+            leads.append({
+                "host": host, "url": url, "class": "web-cache-poisoning",
+                "kind": "wcp-capitalized-host-varnish", "severity": "high",
+                "evidence": "capitalized `HOST:` header value reflected into a CACHED response (Varnish case-normalization; under our cache-buster key)",
+                "probe": "HOST (capitalized)", "base_state": base_state,
+            })
     return leads
 
 

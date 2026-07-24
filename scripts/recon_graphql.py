@@ -128,7 +128,8 @@ def rank_schema(schema):
 
     def score_op(op_type, f):
         name = f.get("name") or ""
-        args = [a.get("name") for a in (f.get("args") or []) if a.get("name")]
+        args_full = f.get("args") or []
+        args = [a.get("name") for a in args_full if a.get("name")]
         idor = [a for a in args if IDOR_ARG.match(a or "")]
         inj = [a for a in args if INJECTABLE_ARG.match(a or "")]
         ret = _unwrap(f.get("type"))
@@ -138,6 +139,17 @@ def rank_schema(schema):
             score += 3; reasons.append("sensitive-op-name")
         if idor:
             score += 2; reasons.append("object-ref arg (IDOR): " + ",".join(idor))
+        # Relay global-ID (arXiv 2605.25865 — the DOMINANT GraphQL BOLA pattern): an ID-typed
+        # object-ref arg (or the `node(id:)` root) carries a base64 `Type:<digits>` global id that
+        # DECODES -> increments -> re-encodes -> replays. Decodable = enumerable, so rank it ABOVE
+        # an opaque object-ref. Human 2-account test only (hard line: never third-party IDs).
+        relay = name.lower() == "node" or any(
+            (a.get("name") or "").lower() in ("id", "nodeid", "node") and _unwrap(a.get("type")) == "ID"
+            for a in args_full)
+        if relay:
+            score += 2
+            reasons.append("Relay global-ID arg (base64 Type:num — decode/increment/re-encode; "
+                           "rank above opaque UUID ref)")
         if inj:
             score += 2; reasons.append("injectable arg: " + ",".join(inj))
         if op_type == "mutation" and AUTH_MUTATION.search(name) \

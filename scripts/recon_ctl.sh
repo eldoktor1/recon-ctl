@@ -2629,6 +2629,10 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_wcd.sh" "${@:-scan}" ;;
+  autoswagger|aswg)  # unauth Swagger/OpenAPI BOLA spec-walk (GET-only, unauth, safe). target-facing → reconrun.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  bash "$SCRIPT_DIR/recon_autoswagger.sh" "${@:-scan}" ;;
   blindxss|bx)  # Blind/stored-XSS lane. status/test = read-only (d0k); collector = persistent
                 # interactsh-client (d0k, foreground — normally the daemon runs it); correlate +
                 # plant write findings.db / are target-facing → reconrun (db ownership + egress gate).

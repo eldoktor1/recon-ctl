@@ -195,12 +195,27 @@ done
 # Unauth GET only, via the trusted safe_probe (Mullvad + scope+pays + rate-limit enforced there). ----
 WP_ENABLE="${NDAY_WP:-1}"
 WP_HOSTS="${NDAY_WP_HOSTS:-12}"
+_vge() {  # echo yes if semver $1 >= $2 (self-contained; _ver_lt isn't defined until the EXTRA pass below)
+  [[ -z "$1" ]] && { echo no; return; }
+  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$2" ]] && echo yes || echo no
+}
+_wp_wp2shell_range() {  # echo full|sqli|no|unknown for WP core version $1 vs CVE-2026-63030/60137 "wp2shell"
+  local v="$1"; [[ -z "$v" ]] && { echo unknown; return; }
+  # full unauth RCE chain: core 6.9.0–6.9.4 or 7.0.0–7.0.1 (fixed 6.9.5 / 7.0.2)
+  if { [[ "$(_vge "$v" 6.9.0)" == yes ]] && [[ "$(_vge "$v" 6.9.5)" == no ]]; } \
+     || { [[ "$(_vge "$v" 7.0.0)" == yes ]] && [[ "$(_vge "$v" 7.0.2)" == no ]]; }; then echo full; return; fi
+  # SQLi-only precursor (CVE-2026-60137 present, no RCE): core 6.8.0–6.8.5
+  if [[ "$(_vge "$v" 6.8.0)" == yes ]] && [[ "$(_vge "$v" 6.8.6)" == no ]]; then echo sqli; return; fi
+  echo no
+}
 if [[ "$WP_ENABLE" == "1" && -f "$SAFE_PROBE" ]]; then
   # slug|cve|vuln_ceiling(empty=unknown → report presence+version for operator version-reasoning)|note
   wp_plugins="updraftplus|CVE-2026-10795|1.26.4|unauth admin RCE (3M+ installs, actively exploited); patch 1.26.5
 wpvivid-backuprestore|CVE-2026-1357||unauth arbitrary PHP upload → RCE (900K installs)
 kirki|CVE-2026-8206||unauth password-reset admin takeover (~150K installs)
-user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass"
+user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass
+miniorange-oauth-single-sign-on|CVE-2026-57807||unauth login bypass via password-recovery flow → admin takeover (CVSS 9.8, ≤38.5.8, no vendor patch as of 2026-07)
+miniorange-oauth|CVE-2026-57807||unauth login bypass via password-recovery flow → admin takeover (CVSS 9.8, ≤38.5.8, no vendor patch as of 2026-07)"
   wpq="$(jq -nc --argjson n "$WP_HOSTS" '{size:($n*3),_source:["host","triage_program"],
     query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{tech:{value:"wordpress",case_insensitive:true}}}],
                  must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}}}')"
@@ -211,6 +226,51 @@ user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass"
     [[ "$wp_checked" -ge "$WP_HOSTS" ]] && break
     grep -qxF "wp:$wh" "$SEEN" 2>/dev/null && continue
     printf 'wp:%s\n' "$wh" >> "$SEEN"; wp_checked=$((wp_checked+1))
+
+    # ---- WP core "wp2shell" — CVE-2026-63030 (REST /batch/v1 route-confusion) + CVE-2026-60137 (unauth
+    # SQLi) → unauth RCE for core 6.9.0–6.9.4 / 7.0.0–7.0.1 (ITW per 2026-07-21). Version-gate first
+    # (readme.html / generator meta), then a SAFE /wp-json/batch/v1 EXISTENCE probe (GET only — route
+    # presence, NOT the batch exploit). In-range core is RCE-class ⇒ strong LEAD; operator confirms +
+    # dup-checks + NEVER auto-exploits the chain. ----
+    wpcore=""
+    for cpath in /readme.html '/?rest_route=/'; do
+      cpr="$(bash "$SAFE_PROBE" "https://${wh}${cpath}" GET 2>/dev/null)"
+      [[ "$(printf '%s' "$cpr" | jq -r '.ok // false')" == "true" ]] || continue
+      cbody="$(printf '%s' "$cpr" | jq -r '.body_snippet // ""')"
+      wpcore="$(printf '%s' "$cbody" | grep -ioE 'wordpress[^0-9]{0,8}[0-9]+\.[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+      [[ -z "$wpcore" ]] && wpcore="$(printf '%s' "$cbody" | grep -ioE 'version[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+      [[ -n "$wpcore" ]] && break
+    done
+    w2range="$(_wp_wp2shell_range "$wpcore")"
+    if [[ "$w2range" != "no" ]]; then   # full | sqli | unknown → check the batch route before flagging
+      batchhit=""
+      for bpath in /wp-json/batch/v1 '/?rest_route=/batch/v1'; do
+        bpr="$(bash "$SAFE_PROBE" "https://${wh}${bpath}" GET 2>/dev/null)"
+        [[ "$(printf '%s' "$bpr" | jq -r '.ok // false')" == "true" ]] || continue
+        bbody="$(printf '%s' "$bpr" | jq -r '.body_snippet // ""')"
+        printf '%s' "$bbody" | grep -qi 'rest_no_route' && continue   # route not registered
+        batchhit="$bpath"; break
+      done
+      # emit only on a real signal: version in-range, OR (version unknown AND batch route present)
+      if [[ "$w2range" == "full" || "$w2range" == "sqli" || ( "$w2range" == "unknown" && -n "$batchhit" ) ]]; then
+        case "$w2range" in
+          full)    w2conf="0.8"; w2imp="critical"; w2rng="core ${wpcore} in-range (6.9.0–6.9.4 / 7.0.0–7.0.1) — full unauth RCE chain";;
+          sqli)    w2conf="0.55"; w2imp="high"; w2rng="core ${wpcore} in SQLi-only band (6.8.0–6.8.5) — CVE-2026-60137 precursor, no RCE";;
+          *)       w2conf="0.5"; w2imp="critical"; w2rng="core version unknown but /wp-json/batch/v1 route present — operator version-reason vs 6.9.0–7.0.1";;
+        esac
+        [[ -n "$batchhit" ]] && w2conf="$(awk "BEGIN{printf \"%.2f\", ($w2conf+0.05>0.9?0.9:$w2conf+0.05)}")"
+        ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        jq -nc --arg h "$wh" --arg p "$wprog" --arg t "$ts" --arg ver "${wpcore:-unknown}" --arg bh "${batchhit:-not-confirmed}" \
+          --arg why "WordPress wp2shell — $w2rng. CVE-2026-63030 (REST /batch/v1 sub-request handler desync) + CVE-2026-60137 (unauth SQLi) → unauth RCE; PoC public + actively exploited ITW." \
+          --argjson conf "$w2conf" --arg imp "$w2imp" \
+          '{host:$h,program:$p,endpoint:"/wp-json/batch/v1",cve:"CVE-2026-63030",vuln_type:"n-day-wp-core-wp2shell",why:$why,
+            test:("Confirm WP core in 6.9.0–6.9.4/7.0.0–7.0.1 (detected "+$ver+"; batch route "+$bh+"). Operator confirms + dup-checks; NEVER auto-exploit the batch/SQLi chain (RCE)."),
+            impact:$imp,confidence:$conf,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+        leads=$((leads+1))
+        log "   🐚 WP2SHELL $([[ "$w2range" == "full" ]] && echo IN-RANGE || echo "$w2range") · $wh · core ${wpcore:-?} · batch ${batchhit:-none} · CVE-2026-63030 → worklist"
+      fi
+    fi
+
     while IFS='|' read -r slug cve ceiling note; do
       [[ -z "$slug" ]] && continue
       purl="https://${wh}/wp-content/plugins/${slug}/readme.txt"
@@ -252,6 +312,18 @@ NDAY_EXTRA_HOSTS="${NDAY_EXTRA_HOSTS:-14}"
 _ver_lt() {  # echo yes if $1 < $2 (semver-ish); no if >=; unknown if $1 empty
   [[ -z "$1" ]] && { echo unknown; return; }
   if [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" && "$1" != "$2" ]]; then echo yes; else echo no; fi
+}
+_ngx_42533_inrange() {  # echo yes if nginx $1 is in the CVE-2026-42533 map-regex range: 0.9.6–1.31.2,
+  # branch-aware fix (stable 1.30.4 / mainline 1.31.3). Anything below 0.9.6 or a fixed build = no.
+  local v="$1"; [[ -z "$v" ]] && { echo unknown; return; }
+  [[ "$(_ver_lt "$v" "0.9.6")" == "yes" ]] && { echo no; return; }     # below range floor
+  if [[ "$(_ver_lt "$v" "1.31.0")" == "no" ]]; then                     # mainline branch (>=1.31.0)
+    [[ "$(_ver_lt "$v" "1.31.3")" == "yes" ]] && echo yes || echo no; return
+  fi
+  if [[ "$(_ver_lt "$v" "1.30.0")" == "no" ]]; then                     # stable 1.30.x branch
+    [[ "$(_ver_lt "$v" "1.30.4")" == "yes" ]] && echo yes || echo no; return
+  fi
+  echo yes                                                              # 0.9.6 – 1.29.x → in range
 }
 _es_hosts() {  # $1=tech term → host<TAB>program<TAB>webserver<TAB>tech-joined for in-scope+paying, un-benched
   local q; q="$(jq -nc --arg t "$1" --argjson n "$NDAY_EXTRA_HOSTS" '{size:($n*3),
@@ -323,18 +395,31 @@ if [[ "$NDAY_EXTRA" == "1" ]]; then
     [[ "$(printf '%s' "$npr" | jq -r '.ok // false')" == "true" ]] || continue
     nver="$(printf '%s' "$npr" | jq -r '.headers.server // ""' | grep -ioE 'nginx/[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     [[ -n "$nver" ]] || continue   # Server banner has no version → cannot version-reason, skip (avoid FP)
-    [[ "$(_ver_lt "$nver" "1.30.1")" == "yes" ]] || { log "   · $nh nginx $nver >= 1.30.1 — patched, skip CVE-2026-42945"; continue; }
+    rift="$(_ver_lt "$nver" "1.30.1")"        # CVE-2026-42945 "Rift": range 0.6.27–1.30.0 (fixed 1.30.1/1.31.0)
+    maprx="$(_ngx_42533_inrange "$nver")"      # CVE-2026-42533 map-regex: range 0.9.6–1.31.2 (fixed 1.30.4/1.31.3)
+    [[ "$rift" == "yes" || "$maprx" == "yes" ]] || { log "   · $nh nginx $nver — patched vs Rift + map-regex, skip"; continue; }
     ngx_checked=$((ngx_checked+1))
     ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    jq -nc --arg h "$nh" --arg p "$nprog" --arg t "$ts" --arg ver "$nver" \
-      --arg why "nginx $nver < 1.30.1 → CVE-2026-42945 'Rift' heap overflow in ngx_http_rewrite_module (public PoC). Unauth DoS reliable across the range; RCE needs an unnamed-capture rewrite config + no-ASLR (config-dependent)." \
-      '{host:$h,program:$p,endpoint:"/",cve:"CVE-2026-42945",vuln_type:"n-day-nginx-rift",why:$why,
-        test:("nginx "+$ver+" version-confirmed in-range. DoS submittable with version PoC where the program pays infra n-days; RCE only after confirming an unnamed-capture rewrite (operator). Version-only = LEAD-not-CONFIRMED."),
-        impact:"high",confidence:0.6,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
-    leads=$((leads+1))
-    log "   🩸 NGINX-Rift IN-RANGE · $nh · nginx $nver < 1.30.1 · CVE-2026-42945 → worklist"
+    if [[ "$rift" == "yes" ]]; then
+      jq -nc --arg h "$nh" --arg p "$nprog" --arg t "$ts" --arg ver "$nver" \
+        --arg why "nginx $nver < 1.30.1 → CVE-2026-42945 'Rift' heap overflow in ngx_http_rewrite_module (public PoC, actively exploited ITW). Unauth DoS reliable across the range; RCE needs an unnamed-capture rewrite config + no-ASLR (config-dependent)." \
+        '{host:$h,program:$p,endpoint:"/",cve:"CVE-2026-42945",vuln_type:"n-day-nginx-rift",why:$why,
+          test:("nginx "+$ver+" version-confirmed in-range. DoS submittable with version PoC where the program pays infra n-days; RCE only after confirming an unnamed-capture rewrite (operator). Version-only = LEAD-not-CONFIRMED; never trigger (DoS = out of bounds)."),
+          impact:"high",confidence:0.6,exploit_available:true,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+      leads=$((leads+1))
+      log "   🩸 NGINX-Rift IN-RANGE · $nh · nginx $nver < 1.30.1 · CVE-2026-42945 → worklist"
+    fi
+    if [[ "$maprx" == "yes" ]]; then
+      jq -nc --arg h "$nh" --arg p "$nprog" --arg t "$ts" --arg ver "$nver" \
+        --arg why "nginx $nver in-range for CVE-2026-42533 map-regex heap overflow (0.9.6–1.31.2; fixed 1.30.4 stable / 1.31.3 mainline). Carries its own info-leak that defeats ASLR from one unauth GET → RCE reachable, but exploitation is config-dependent (needs a vulnerable map/regex-capture construct, not remotely fingerprintable) and the only public scanner is a LOCAL nginx.conf reader — no external unauth PoC." \
+        '{host:$h,program:$p,endpoint:"/",cve:"CVE-2026-42533",vuln_type:"n-day-nginx-map-regex",why:$why,
+          test:("nginx "+$ver+" version-confirmed in-range for CVE-2026-42533. Version-only = LEAD-not-CONFIRMED; config precondition invisible externally and no safe live PoC exists — never trigger. Operator version-reasons + dup-checks."),
+          impact:"high",confidence:0.55,exploit_available:false,at:$t,status:"to-test"}' >> "$WORKLIST" 2>/dev/null
+      leads=$((leads+1))
+      log "   🧩 NGINX-map-regex IN-RANGE · $nh · nginx $nver · CVE-2026-42533 → worklist"
+    fi
   done < <(_es_hosts "nginx")
-  log "🩸 NGINX-Rift n-day pass · $ngx_checked in-range host(s)"
+  log "🩸 NGINX-Rift/map-regex n-day pass · $ngx_checked in-range host(s)"
 
   # --- 3) PHP SOAP UAF RCE — CVE-2026-6722 (unauth when SOAP endpoint public; PHP < 8.2.31/8.3.31/
   # 8.4.21/8.5.6). Endpoint-presence LEAD: a live WSDL/SOAP endpoint on a PHP host → operator
