@@ -135,8 +135,20 @@ async def api_asset_facets():
 
 
 @app.get("/api/leads")
-async def api_leads(pays_only: bool = True):
-    return await es.active_leads(pays_only=pays_only)
+async def api_leads(pays_only: bool = True, include_dismissed: bool = False):
+    data = await es.active_leads(pays_only=pays_only)
+    if not include_dismissed:
+        killed = files.killed_host_set()
+        for b in data.get("buckets", []):
+            hosts = b.get("hosts", [])
+            kept = [h for h in hosts if (h.get("host") or "").lower() not in killed]
+            drop = len(hosts) - len(kept)
+            if drop:
+                b["hosts"] = kept
+                b["suppressed"] = drop
+                if isinstance(b.get("count"), int):
+                    b["count"] = max(0, b["count"] - drop)
+    return data
 
 
 # NOTE: keep this AFTER /api/assets/facets so "facets" isn't captured as a host
@@ -171,6 +183,23 @@ async def api_briefing(name: str):
     if body is None:
         raise HTTPException(404, "briefing not found")
     return {"name": name, "body": body}
+
+
+@app.get("/api/briefings/{name}/parsed")
+async def api_briefing_parsed(name: str):
+    """Structured sections+items (host chips, commands, severity) for the
+    interactive worklist. Falls back to a raw section on parse failure."""
+    p = files.parse_briefing(name)
+    if p is None:
+        raise HTTPException(404, "briefing not found")
+    return p
+
+
+@app.get("/api/tonight")
+async def api_tonight():
+    """The latest tonight_* briefing, parsed — powers the worklist + home widget."""
+    p = files.latest_tonight_parsed()
+    return p or {"error": "no tonight briefing generated yet", "sections": []}
 
 
 @app.get("/api/telemetry/ai-accuracy")
@@ -212,6 +241,14 @@ async def api_note(host: str, body: dict = Depends(safety.require_confirm)):
 @app.post("/api/hosts/{host}/ignore")
 async def api_ignore(host: str, body: dict = Depends(safety.require_confirm)):
     return await actions.ignore(host, (body.get("reason") or "manual").strip())
+
+
+@app.post("/api/hosts/{host}/dismiss")
+async def api_dismiss(host: str, body: dict = Depends(safety.require_confirm)):
+    """Mark a lead/host FP or not-actionable — records a DEAD-verdict note so it
+    stops being re-served in the worklist + nightly briefing (until re-armed)."""
+    return await actions.dismiss(host, (body.get("kind") or "not-actionable").strip(),
+                                 (body.get("reason") or "").strip())
 
 
 @app.post("/api/hosts/{host}/fp")
@@ -319,6 +356,44 @@ async def api_verify(body: dict = Depends(safety.require_confirm)):
     safety.require_vpn_up()
     argv = ["bash", str(config.RECON_CTL), "verify", host]
     t = await manager.spawn(f"verify:{host}", argv)
+    return t.snapshot()
+
+
+# Host-targeted on-demand actions — the operator drives a single host's whole
+# test workflow from its drawer. Server-side whitelist: the client picks an
+# action KEY, never an argv. (sub-args, target-facing?) — target lanes are
+# VPN-gated fail-closed. These map to the same commands the copy-chips show.
+HOST_ACTIONS: dict[str, tuple[list[str], bool, str]] = {
+    "verify":       (["verify"], True, "Claude verify (multimodal + safe probes)"),
+    "crawl":        (["params", "crawl-host"], True, "on-demand param crawl (katana+gau+CDX)"),
+    "confirm-xss":  (["params", "confirm", "xss"], True, "XSS confirm (dalfox — must execute)"),
+    "confirm-sqli": (["params", "confirm", "sqli"], True, "SQLi confirm ('vs'' diff → sqlmap)"),
+    "arjun":        (["params", "arjun"], True, "active hidden-param discovery (arjun)"),
+    "domxss":       (["domxss"], True, "DOM-XSS source→sink miner"),
+    "graphql":      (["graphql", "check"], True, "GraphQL introspection → schema"),
+    "wcd":          (["wcd", "confirm"], True, "web-cache deception confirm (WCVS)"),
+}
+
+
+@app.get("/api/host-actions")
+async def api_host_actions():
+    return [{"action": k, "target": v[1], "desc": v[2]} for k, v in HOST_ACTIONS.items()]
+
+
+@app.post("/api/hosts/{host}/run")
+async def api_host_run(host: str, body: dict = Depends(safety.require_confirm)):
+    action = (body.get("action") or "").strip()
+    spec = HOST_ACTIONS.get(action)
+    if not spec:
+        raise HTTPException(400, f"unknown host action: {action}")
+    sub, target, _ = spec
+    host = host.strip()
+    if not host or any(c in host for c in " ;|&$`\n\t'\"\\"):
+        raise HTTPException(400, "bad host")
+    if target:
+        safety.require_vpn_up()  # fail-closed for target-facing actions
+    argv = ["bash", str(config.RECON_CTL), *sub, host]
+    t = await manager.spawn(f"{action}:{host}", argv)
     return t.snapshot()
 
 

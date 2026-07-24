@@ -41,6 +41,18 @@ discord_post() {
   return 1
 }
 
+# NOTIFICATION POLICY (2026-07-23, operator): Discord is for CRUCIAL /
+# IMMEDIATE-ATTENTION signals ONLY. Everything else (nightly digest, fresh
+# blood, vuln/cve/port/bypass template hits, research digests) is surfaced in
+# the recon-ui worklist instead of pinging. This is enforced HERE, at the single
+# choke point, so no call site needs to change: any channel not on the allowlist
+# resolves to an EMPTY hook and therefore stays silent.
+#   ALLOWED (immediate): review (Claude-confirmed real finding),
+#                        takeovers (confirmed takeover),
+#                        ops (VPN down / burn / halt / killswitch).
+# Override the policy with RECON_DISCORD_ALLOW="review takeovers ops digest ...".
+RECON_DISCORD_ALLOW="${RECON_DISCORD_ALLOW:-review takeovers ops}"
+
 # Resolve the webhook for a named channel from its dedicated file ONLY.
 # Channels: fresh | takeovers | vulns | cve | health
 # Files:    ~/.recon_discord_<channel>
@@ -52,6 +64,11 @@ discord_hook() {
   # per-user file (back-compat) -> $RECON_DISCORD_DIR -> the shared state dir.
   # v3 channels: review | takeovers | ops | digest. Absent file => channel silent.
   local ch="$1" f
+  # Policy gate: a channel off the allowlist is silent regardless of its file.
+  case " ${RECON_DISCORD_ALLOW} " in
+    *" ${ch} "*) : ;;
+    *) return 0 ;;
+  esac
   for f in "$HOME/.recon_discord_${ch}" \
            "${RECON_DISCORD_DIR:-/home/d0k/recon/state/discord}/${ch}"; do
     [[ -s "$f" ]] && { tr -d '[:space:]' < "$f" 2>/dev/null; return 0; }

@@ -1,16 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { api, getToken } from "../api";
+import { useEffect, useState } from "react";
+import { api } from "../api";
 import { useFetch, useLiveStatus } from "../hooks";
 import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
 import { Btn, useToast, ConfirmModal } from "../components/controls";
-import { fmtAgo } from "../format";
+import { TaskConsole, taskColor } from "../components/TaskConsole";
 
 interface Lane { lane: string; sub: string; target: boolean; desc: string }
 interface Task { id: number; label: string; state: string; returncode: number | null; line_count: number }
-
-const taskColor: Record<string, string> = {
-  running: "var(--color-warn)", done: "var(--color-good)", failed: "var(--color-bad)", stopped: "var(--color-ink-faint)",
-};
 
 export default function Hunt() {
   const { data: lanes } = useFetch<Lane[]>("/api/lanes");
@@ -95,53 +91,6 @@ export default function Hunt() {
           </span>
         ) : ""}
         confirmLabel="Launch" onConfirm={launch} onCancel={() => setConfirm(null)} />
-    </div>
-  );
-}
-
-function TaskConsole({ tid, onClose, onChanged }: { tid: number; onClose: () => void; onChanged: () => void }) {
-  const [lines, setLines] = useState<string[]>([]);
-  const [state, setState] = useState("running");
-  const boxRef = useRef<HTMLDivElement>(null);
-  const toast = useToast();
-
-  useEffect(() => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/api/tasks/${tid}/output?token=${encodeURIComponent(getToken())}`);
-    ws.onmessage = (ev) => {
-      try {
-        const m = JSON.parse(ev.data);
-        if (m.type === "line") setLines((l) => [...l, m.data]);
-        else if (m.type === "end") { setState(m.state); onChanged(); }
-      } catch {}
-    };
-    return () => ws.close();
-  }, [tid]);
-
-  useEffect(() => { boxRef.current?.scrollTo(0, boxRef.current.scrollHeight); }, [lines]);
-
-  const stop = async () => {
-    try { await api.action(`/api/tasks/${tid}/stop`); toast("ok", "stop signal sent"); }
-    catch (e: any) { toast("err", e.message); }
-  };
-
-  return (
-    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--color-border-bright)] bg-[var(--color-panel)] shadow-2xl fade-in">
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-        <div className="flex items-center gap-2">
-          <Dot color={taskColor[state]} pulse={state === "running"} />
-          <span className="mono text-xs text-[var(--color-ink)]">task #{tid}</span>
-          <Badge color={taskColor[state]}>{state}</Badge>
-        </div>
-        <div className="flex items-center gap-2">
-          {state === "running" && <Btn size="sm" variant="danger" onClick={stop}>stop</Btn>}
-          <Btn size="sm" onClick={onClose}>close</Btn>
-        </div>
-      </div>
-      <div ref={boxRef} className="mono max-h-[46vh] min-h-[200px] overflow-auto bg-[var(--color-bg)] p-3 text-[11px] leading-relaxed text-[var(--color-ink-dim)]">
-        {lines.length === 0 ? <span className="text-[var(--color-ink-faint)]">waiting for output…</span> :
-          lines.map((l, i) => <div key={i} className="whitespace-pre-wrap">{l}</div>)}
-      </div>
     </div>
   );
 }

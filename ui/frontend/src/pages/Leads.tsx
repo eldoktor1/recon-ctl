@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { Markdown } from "../components/Markdown";
+import { Worklist, type Parsed } from "../components/Worklist";
 import { HostDrawer } from "../components/HostDrawer";
+import { TaskConsole } from "../components/TaskConsole";
 import { priorityColor, fmtAgo } from "../format";
 
 interface Bucket { key: string; label: string; count: number; hosts: any[]; error?: string }
@@ -16,46 +19,109 @@ const bucketColor: Record<string, string> = {
   kev: "var(--color-bad)", fresh: "var(--color-accent)",
 };
 
+// Ordered source switcher — one tab per useful briefing kind (latest wins).
+const SOURCE_ORDER = [
+  "tonight", "2IC_tonight", "hunter", "idor_candidates", "xss_candidates",
+  "sqli_candidates", "graphql_candidates", "fresh", "targets",
+];
+
 export default function Leads() {
   const { data: leads } = useFetch<Leads>("/api/leads");
   const { data: briefs } = useFetch<Brief[]>("/api/briefings");
   const [host, setHost] = useState<string | null>(null);
   const [active, setActive] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [raw, setRaw] = useState(false);
+  const [openTask, setOpenTask] = useState<number | null>(null);
   const toast = useToast();
+  const qc = useQueryClient();
   const [vhost, setVhost] = useState("");
 
-  useEffect(() => {
-    if (!active && briefs?.length) {
-      const t = briefs.find((b) => b.kind.startsWith("tonight")) || briefs[0];
-      setActive(t.name);
-    }
-  }, [briefs, active]);
-
-  const launchVerify = async () => {
-    if (!vhost.trim()) return;
-    try { const t = await api.action<any>("/api/verify", { host: vhost.trim() }); toast("ok", `verify task #${t.id} → Hunt Control`); setVhost(""); }
-    catch (e: any) { toast("err", e.message); }
+  const dismiss = async (h: string) => {
+    try {
+      await api.action(`/api/hosts/${encodeURIComponent(h)}/dismiss`, { kind: "not-actionable" });
+      toast("ok", `${h} marked not-actionable — won't re-serve`);
+      qc.invalidateQueries();
+    } catch (e: any) { toast("err", e.message); }
   };
 
-  // curated candidate worklists (already product-class/tenant filtered by the pipeline)
-  const CANDIDATE_KINDS = ["idor_candidates", "xss_candidates", "sqli_candidates", "graphql_candidates", "hunter", "2IC_tonight", "fresh"];
-  const candidates = (briefs || []).filter((b) => CANDIDATE_KINDS.some((k) => b.kind.startsWith(k)))
-    .sort((a, b) => b.mtime - a.mtime)
-    .filter((b, i, arr) => arr.findIndex((x) => x.kind === b.kind) === i); // latest per kind
+  // latest briefing per kind, ordered by SOURCE_ORDER then recency
+  const sources = useMemo(() => {
+    const latest: Record<string, Brief> = {};
+    for (const b of briefs || []) {
+      const cur = latest[b.kind];
+      if (!cur || b.mtime > cur.mtime) latest[b.kind] = b;
+    }
+    const picked = Object.values(latest);
+    return picked.sort((a, b) => {
+      const ia = SOURCE_ORDER.findIndex((k) => a.kind.startsWith(k));
+      const ib = SOURCE_ORDER.findIndex((k) => b.kind.startsWith(k));
+      const ra = ia === -1 ? 99 : ia, rb = ib === -1 ? 99 : ib;
+      return ra !== rb ? ra - rb : b.mtime - a.mtime;
+    });
+  }, [briefs]);
+
+  useEffect(() => {
+    if (!active && sources.length) {
+      const t = sources.find((b) => b.kind.startsWith("tonight")) || sources[0];
+      setActive(t.name);
+    }
+  }, [sources, active]);
+
+  const launchVerify = async (h?: string) => {
+    const target = (h ?? vhost).trim();
+    if (!target) return;
+    try {
+      const t = await api.action<any>("/api/verify", { host: target });
+      toast("ok", `verify #${t.id} started — streaming below`);
+      setOpenTask(t.id);
+      if (!h) setVhost("");
+    } catch (e: any) { toast("err", e.message); }
+  };
 
   return (
     <div className="fade-in space-y-4">
-      <div className="flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">Leads</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">Tonight · Worklist</h1>
         <div className="flex items-center gap-2">
           <input value={vhost} onChange={(e) => setVhost(e.target.value)} placeholder="verify host…"
             onKeyDown={(e) => e.key === "Enter" && launchVerify()}
-            className="mono w-48 rounded-md border border-[var(--color-border-bright)] bg-[var(--color-panel)] px-3 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
-          <Btn size="sm" variant="primary" onClick={launchVerify}>run verify</Btn>
+            className="mono w-44 rounded-md border border-[var(--color-border-bright)] bg-[var(--color-panel)] px-3 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
+          <Btn size="sm" variant="primary" onClick={() => launchVerify()}>run verify</Btn>
         </div>
       </div>
 
-      {/* active signal leads */}
+      {/* interactive worklist */}
+      <Panel
+        title="worklist · actionable"
+        right={
+          <div className="flex items-center gap-2">
+            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter host/program…"
+              className="mono w-40 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
+            <button onClick={() => setRaw((r) => !r)}
+              className={`rounded border px-2 py-1 text-[10px] transition ${raw ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"}`}>
+              raw md
+            </button>
+          </div>
+        }
+      >
+        {/* source tabs */}
+        {!sources.length ? <Spinner /> : (
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {sources.map((b) => (
+              <button key={b.name} onClick={() => { setActive(b.name); setFilter(""); }}
+                className={`rounded-md border px-2.5 py-1 text-[11px] transition ${active === b.name ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
+                {b.kind} <span className="text-[10px] text-[var(--color-ink-faint)]">· {b.date?.slice(5) || fmtAgo(b.mtime)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {active ? (
+          raw ? <RawBriefing name={active} /> : <ParsedWorklist name={active} filter={filter} onHost={setHost} onVerify={launchVerify} onDismiss={dismiss} />
+        ) : <Empty>no briefing selected</Empty>}
+      </Panel>
+
+      {/* live ES signal buckets */}
       <Panel title="active leads · live signals" right={<span className="text-[10px] text-[var(--color-ink-faint)]">not benched · pays</span>}>
         {!leads ? <Spinner /> : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -69,12 +135,13 @@ export default function Leads() {
                 {b.hosts.length === 0 ? <div className="text-[11px] text-[var(--color-ink-faint)]">none active</div> : (
                   <div className="space-y-0.5">
                     {b.hosts.slice(0, 6).map((h) => (
-                      <button key={h.host} onClick={() => setHost(h.host)}
-                        className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-[var(--color-panel)]">
+                      <div key={h.host} className="group flex items-center gap-2 rounded px-1.5 py-1 hover:bg-[var(--color-panel)]">
                         {h.triage_priority && <Badge color={priorityColor[h.triage_priority]}>{h.triage_priority}</Badge>}
-                        <span className="mono flex-1 truncate text-[11px] text-[var(--color-ink)]">{h.host}</span>
+                        <button onClick={() => setHost(h.host)} className="mono flex-1 truncate text-left text-[11px] text-[var(--color-ink)] hover:text-[var(--color-accent)]">{h.host}</button>
                         <span className="text-[10px] text-[var(--color-ink-faint)]">{h.triage_score}</span>
-                      </button>
+                        <button onClick={() => dismiss(h.host)} title="mark not-actionable — stop re-serving"
+                          className="text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
+                      </div>
                     ))}
                     {b.count > 6 && <div className="pl-1.5 pt-1 text-[10px] text-[var(--color-ink-faint)]">+{b.count - 6} more</div>}
                   </div>
@@ -85,46 +152,23 @@ export default function Leads() {
         )}
       </Panel>
 
-      {/* curated candidate worklists */}
-      <Panel title="candidate worklists · curated & deduped">
-        {!candidates.length ? <Empty>no candidate briefings</Empty> : (
-          <div className="flex flex-wrap gap-2">
-            {candidates.map((b) => (
-              <button key={b.name} onClick={() => setActive(b.name)}
-                className={`rounded-md border px-3 py-1.5 text-xs transition ${active === b.name ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
-                {b.kind} <span className="text-[10px] text-[var(--color-ink-faint)]">· {b.date?.slice(5) || fmtAgo(b.mtime)}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </Panel>
-
-      {/* briefing viewer */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">
-        <Panel title="all briefings" className="!p-2">
-          <div className="max-h-[60vh] space-y-0.5 overflow-auto">
-            {!briefs ? <Spinner /> : briefs.map((b) => (
-              <button key={b.name} onClick={() => setActive(b.name)}
-                className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition ${active === b.name ? "bg-[var(--color-accent)]/12 text-[var(--color-accent)]" : "text-[var(--color-ink-dim)] hover:bg-[var(--color-panel-2)]"}`}>
-                <span className="flex-1 truncate">{b.kind}</span>
-                <span className="text-[10px] text-[var(--color-ink-faint)]">{b.date?.slice(5) || fmtAgo(b.mtime)}</span>
-              </button>
-            ))}
-          </div>
-        </Panel>
-        <Panel title={active || "briefing"} className="min-h-[50vh]">
-          {active ? <BriefingBody name={active} /> : <Empty>pick a briefing</Empty>}
-        </Panel>
-      </div>
-
       {host && <HostDrawer host={host} onClose={() => setHost(null)} />}
+      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
     </div>
   );
 }
 
-function BriefingBody({ name }: { name: string }) {
+function ParsedWorklist({ name, filter, onHost, onVerify, onDismiss }:
+  { name: string; filter: string; onHost: (h: string) => void; onVerify: (h: string) => void; onDismiss: (h: string) => void }) {
+  const { data, loading } = useFetch<Parsed>(`/api/briefings/${encodeURIComponent(name)}/parsed`);
+  if (loading && !data) return <Spinner />;
+  if (!data) return <Empty>could not load</Empty>;
+  return <Worklist parsed={data} filter={filter} onHost={onHost} onVerify={onVerify} onDismiss={onDismiss} />;
+}
+
+function RawBriefing({ name }: { name: string }) {
   const { data, loading } = useFetch<{ body: string }>(`/api/briefings/${encodeURIComponent(name)}`);
   if (loading && !data) return <Spinner />;
   if (!data) return <Empty>could not load</Empty>;
-  return <div className="max-h-[62vh] overflow-auto"><Markdown text={data.body} /></div>;
+  return <div className="max-h-[70vh] overflow-auto"><Markdown text={data.body} /></div>;
 }

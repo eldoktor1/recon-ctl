@@ -26,6 +26,32 @@ async def ignore(host: str, reason: str = "manual") -> dict[str, Any]:
     return {"ok": r.ok, "result": r.stdout.strip(), "error": None if r.ok else r.stderr}
 
 
+# valid dismiss verdicts (each contains a note_verdict STRONG_DEAD marker)
+_DISMISS_KINDS = {
+    "not-actionable": "not actionable / no exploitable impact",
+    "fp": "false positive",
+    "by-design": "by-design / expected behaviour",
+    "dup": "duplicate",
+    "exhausted": "worked to a dead-end / exhausted",
+    "out-of-scope": "out of scope / not eligible",
+}
+
+
+async def dismiss(host: str, kind: str = "not-actionable", reason: str = "") -> dict[str, Any]:
+    """Permanently stop re-serving a host: write a host_note with a DEAD verdict so
+    note_verdict.classify_host == dead (the briefing + UI both suppress it). Reopened
+    only by a later 'resume/armed/…' note — that's the 'unless warranted' path."""
+    kind = (kind or "not-actionable").strip().lower()
+    label = _DISMISS_KINDS.get(kind, _DISMISS_KINDS["not-actionable"])
+    # 'false positive' + 'do not re-serve' both trip note_verdict's dead classifier
+    text = f"ui-dismiss [{kind}]: {label} — false positive / not a finding."
+    if reason:
+        text += f" {reason.strip()}"
+    text += " do not re-serve unless new signal warrants."
+    r = await run_recon("note", host, text)
+    return {"ok": r.ok, "result": r.stdout.strip(), "error": None if r.ok else r.stderr, "verdict": "dead"}
+
+
 async def mark_fp(host: str, template_id: str) -> dict[str, Any]:
     r = await run_recon("fp", host, template_id)
     return {"ok": r.ok, "result": r.stdout.strip(), "error": None if r.ok else r.stderr}

@@ -3,21 +3,47 @@ import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Empty, Spinner, Badge } from "./ui";
 import { Drawer, Btn, useToast, ConfirmModal } from "./controls";
+import { TaskConsole } from "./TaskConsole";
 import { priorityColor, asArr } from "../format";
+
+interface HostAction { action: string; target: boolean; desc: string }
 
 // Shared host detail + actions drawer (used by Assets, Leads, Notes).
 export function HostDrawer({ host, onClose }: { host: string; onClose: () => void }) {
   const { data, loading } = useFetch<any>(`/api/assets/${encodeURIComponent(host)}`);
+  const { data: hostActions } = useFetch<HostAction[]>("/api/host-actions");
   const toast = useToast();
   const [scopeOut, setScopeOut] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<null | { title: string; body: string; run: () => Promise<any> }>(null);
   const [busy, setBusy] = useState(false);
+  const [openTask, setOpenTask] = useState<number | null>(null);
 
   const runScope = async () => {
     setScopeOut("checking…");
     try { const r = await api.get<any>(`/api/scope/${encodeURIComponent(host)}`); setScopeOut(r.result || r.error || "(no output)"); }
     catch (e: any) { setScopeOut(e.message); }
   };
+
+  const runAction = async (action: string) => {
+    try {
+      const t = await api.action<any>(`/api/hosts/${encodeURIComponent(host)}/run`, { action });
+      toast("ok", `${action} #${t.id} — streaming below`);
+      setOpenTask(t.id);
+    } catch (e: any) { toast("err", e.message); }
+  };
+  const testRow = hostActions && hostActions.length > 0 && (
+    <div>
+      <div className="mb-1.5 text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">test / run · target-facing (VPN-gated)</div>
+      <div className="flex flex-wrap gap-1.5">
+        {hostActions.map((a) => (
+          <button key={a.action} onClick={() => runAction(a.action)} title={a.desc}
+            className="mono rounded-md border border-[var(--color-border-bright)] px-2 py-1 text-[11px] text-[var(--color-ink-dim)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">
+            {a.action}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
   const doAction = async () => {
     if (!confirm) return;
     setBusy(true);
@@ -27,6 +53,7 @@ export function HostDrawer({ host, onClose }: { host: string; onClose: () => voi
   };
 
   return (
+   <>
     <Drawer open onClose={onClose} width={600} title={<span className="mono text-sm text-[var(--color-ink)]">{host}</span>}>
       {loading && !data ? <Spinner /> : !data ? (
         <div className="space-y-4">
@@ -35,6 +62,7 @@ export function HostDrawer({ host, onClose }: { host: string; onClose: () => voi
             <Btn size="sm" onClick={runScope}>scope check</Btn>
             <Btn size="sm" onClick={() => { const t = prompt(`Note for ${host}:`); if (t) setConfirm({ title: "Add note?", body: t, run: () => api.action(`/api/hosts/${encodeURIComponent(host)}/note`, { text: t }) }); }}>add note</Btn>
           </div>
+          <div className="border-t border-[var(--color-border)] pt-4">{testRow}</div>
           {scopeOut && <pre className="mono max-h-56 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-bg)] p-3 text-[11px] text-[var(--color-ink-dim)]">{scopeOut}</pre>}
         </div>
       ) : (
@@ -74,12 +102,16 @@ export function HostDrawer({ host, onClose }: { host: string; onClose: () => voi
             <Btn size="sm" onClick={runScope}>scope check</Btn>
             <Btn size="sm" onClick={() => { const t = prompt(`Note for ${host}:`); if (t) setConfirm({ title: "Add note?", body: t, run: () => api.action(`/api/hosts/${encodeURIComponent(host)}/note`, { text: t }) }); }}>add note</Btn>
             <Btn size="sm" onClick={() => setConfirm({ title: `Ignore ${host}?`, body: "Benches for 7 days + records a note.", run: () => api.action(`/api/hosts/${encodeURIComponent(host)}/ignore`, { reason: "ui: manual bench" }) })}>ignore 7d</Btn>
+            <Btn size="sm" variant="danger" onClick={() => { const r = prompt(`Mark ${host} not-actionable / FP.\nOptional reason:`, "") ?? undefined; if (r !== undefined) setConfirm({ title: `Not actionable: ${host}?`, body: "Records a DEAD verdict — stops re-serving this host in the worklist + nightly briefing until a later 'resume' note re-arms it.", run: () => api.action(`/api/hosts/${encodeURIComponent(host)}/dismiss`, { kind: "not-actionable", reason: r }) }); }}>not actionable</Btn>
           </div>
+          {testRow}
           {scopeOut && <pre className="mono max-h-56 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-bg)] p-3 text-[11px] text-[var(--color-ink-dim)]">{scopeOut}</pre>}
         </div>
       )}
       <ConfirmModal open={!!confirm} title={confirm?.title || ""} body={confirm?.body} confirmLabel={busy ? "…" : "Confirm"} onConfirm={doAction} onCancel={() => setConfirm(null)} />
     </Drawer>
+    {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
+   </>
   );
 }
 

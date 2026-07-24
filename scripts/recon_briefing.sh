@@ -382,9 +382,14 @@ md="$BRIEF_DIR/tonight_$today.md"
 
 log "🌙 briefing compiled · 🎯 $nidor host-lead(s) ($nshow pre-collapse) · 🟡 $nheld hold · 🔕 $nsupp dup + $GATE_SUPP render-gated · ✅ $nsub to-submit · 🔍 $nneed needs-human · 🧪 $nvln vuln-leads → $md"
 
-# --- deliver to Discord (#digest — the single nightly card; #review is live-confirmed only) ---
+# --- deliver to Discord (#digest — the single nightly card) ---
+# NOTIFICATION POLICY (2026-07-23): the nightly card is UI-FIRST — it lives in the
+# recon-ui "Tonight" worklist (parsed from the durable .md written above). Discord
+# is reserved for immediate-attention signals only, so #digest is off the allowlist
+# by default and this resolves empty (the block is skipped). No fallback to #review —
+# the big card must NEVER leak into the live-confirmed channel. Re-enable the ping
+# with RECON_DISCORD_ALLOW="review takeovers ops digest".
 rh="$(discord_hook digest 2>/dev/null || true)"
-[[ -n "$rh" ]] || rh="$(discord_hook review 2>/dev/null || true)"   # fallback if #digest unset
 if [[ -n "$rh" ]]; then
   card="$(printf '🌙 **TONIGHT — %s%s**\n\n✅ **Ready to submit (%s):**\n' "$today" "$mode_banner" "$nsub")"
   card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"

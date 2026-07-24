@@ -276,10 +276,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>" 2>/dev/null \
       fi
     fi
   )
-  # Discord card — headline + top findings inline so the card is actually readable
+  # Discord card — headline + top findings inline so the card is actually readable.
+  # NOTIFICATION POLICY (2026-07-23): research digests are UI-first (docs/research/*.md,
+  # surfaced in the recon-ui) — NOT immediate-attention, so #research is off the allowlist
+  # and this resolves empty. No digest/ops fallback: a routine digest must not spam #ops
+  # (the halt/re-auth alert above still goes to #ops — that IS an emergency).
   local hook; hook="$(discord_hook research 2>/dev/null || true)"
-  [[ -n "$hook" ]] || hook="$(discord_hook digest 2>/dev/null || true)"
-  [[ -n "$hook" ]] || hook="$(discord_hook ops 2>/dev/null || true)"
   if [[ -n "$hook" ]]; then
     local card
     card="$(printf '🔬 **Research — %s (%s)**  |  %s new KB · %s proposal(s)\n**%s**\n%s\n_→ docs/research/%s_%s.md_' \

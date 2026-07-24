@@ -52,3 +52,17 @@ export const verdictColor: Record<string, string> = {
   fp: "var(--color-bad)",
   "needs-human": "var(--color-warn)",
 };
+
+// Severity tags parsed out of briefing worklist items ([elite]/[HIGH]/LEAD/…).
+export const severityColor: Record<string, string> = {
+  critical: "var(--color-bad)",
+  elite: "var(--color-accent)",
+  high: "var(--color-p1)",
+  medium: "var(--color-p2)",
+  low: "var(--color-p3)",
+  lead: "var(--color-warn)",
+  p0: "var(--color-p0)",
+  p1: "var(--color-p1)",
+  p2: "var(--color-p2)",
+  p3: "var(--color-p3)",
+};

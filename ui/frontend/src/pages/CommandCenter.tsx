@@ -1,13 +1,21 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api";
 import { useFetch } from "../hooks";
 import type { Overview } from "../api";
 import { Panel, Stat, Badge, Dot, Empty, Spinner } from "../components/ui";
-import { fmtDuration, fmtNum, stateColor, verdictColor, priorityColor } from "../format";
+import { useToast } from "../components/controls";
+import { HostDrawer } from "../components/HostDrawer";
+import { TaskConsole } from "../components/TaskConsole";
+import type { Parsed, WLItem, WLSection } from "../components/Worklist";
+import { fmtDuration, fmtNum, stateColor, verdictColor, priorityColor, severityColor } from "../format";
 
 const STATE_ORDER = ["confirmed", "reported", "submitted", "verifying", "scored", "discovered", "dismissed", "lead_exhausted"];
 
 export default function CommandCenter() {
   const { data, loading, refetch } = useFetch<Overview>("/api/overview");
+  const [host, setHost] = useState<string | null>(null);
+  const [openTask, setOpenTask] = useState<number | null>(null);
 
   useEffect(() => {
     const t = setInterval(refetch, 10000);
@@ -108,25 +116,75 @@ export default function CommandCenter() {
           )}
         </Panel>
 
-        {/* tonight's briefing */}
-        <Panel title="Tonight" right={data.tonight?.date ? <Badge>{data.tonight.date}</Badge> : undefined}>
-          {!data.tonight ? (
-            <Empty>no briefing generated yet</Empty>
-          ) : (
-            <div className="mono max-h-72 space-y-0.5 overflow-auto text-[12px] leading-relaxed text-[var(--color-ink-dim)]">
-              {data.tonight.preview.map((line, i) => (
-                <div key={i} className={line.startsWith("#") ? "font-semibold text-[var(--color-ink)]" : ""}>{line}</div>
-              ))}
-              {data.tonight.line_count > data.tonight.preview.length && (
-                <div className="pt-1 text-[var(--color-ink-faint)]">
-                  … +{data.tonight.line_count - data.tonight.preview.length} more lines
-                </div>
+        {/* tonight's worklist — compact + interactive */}
+        <TonightWidget onHost={setHost} onTask={setOpenTask} />
+      </div>
+
+      {host && <HostDrawer host={host} onClose={() => setHost(null)} />}
+      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
+    </div>
+  );
+}
+
+function TonightWidget({ onHost, onTask }: { onHost: (h: string) => void; onTask: (id: number) => void }) {
+  const { data } = useFetch<Parsed>("/api/tonight");
+  const toast = useToast();
+
+  const verify = async (h: string) => {
+    try { const t = await api.action<any>("/api/verify", { host: h }); toast("ok", `verify #${t.id} started — streaming below`); onTask(t.id); }
+    catch (e: any) { toast("err", e.message); }
+  };
+
+  // flatten the top actionable items across sections into a compact list
+  const rows: { it: WLItem; s: WLSection }[] = [];
+  for (const s of data?.sections || []) {
+    for (const it of s.items) {
+      if (it.hosts.length || it.severity) rows.push({ it, s });
+    }
+  }
+  const shown = rows.slice(0, 8);
+
+  return (
+    <Panel
+      title="Tonight"
+      right={
+        <div className="flex items-center gap-2">
+          {data?.date && <Badge>{data.date}</Badge>}
+          <Link to="/leads" className="text-[10px] text-[var(--color-accent)] hover:underline">full worklist →</Link>
+        </div>
+      }
+    >
+      {!data ? <Spinner /> : !shown.length ? <Empty>no briefing generated yet</Empty> : (
+        <div className="max-h-80 space-y-1 overflow-auto">
+          {shown.map(({ it, s }, i) => (
+            <div key={i} className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-panel-2)]">
+              <span className="shrink-0 text-xs" title={s.title}>{s.emoji}</span>
+              {it.severity && <Badge color={severityColor[it.severity] || "var(--color-ink-dim)"}>{it.severity}</Badge>}
+              {it.hosts[0] ? (
+                <button onClick={() => onHost(it.hosts[0])}
+                  className="mono truncate text-[11px] text-[var(--color-ink)] hover:text-[var(--color-accent)]" title={it.label}>
+                  {it.hosts[0]}
+                </button>
+              ) : (
+                <span className="truncate text-[11px] text-[var(--color-ink-dim)]" title={it.label}>{it.label}</span>
+              )}
+              <span className="hidden flex-1 truncate text-[10px] text-[var(--color-ink-faint)] md:block" title={it.label}>{it.label}</span>
+              {it.hosts[0] && (
+                <button onClick={() => verify(it.hosts[0])}
+                  className="ml-auto shrink-0 rounded border border-[var(--color-accent)]/40 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)] opacity-0 transition hover:bg-[var(--color-accent)]/10 group-hover:opacity-100">
+                  verify
+                </button>
               )}
             </div>
+          ))}
+          {rows.length > shown.length && (
+            <Link to="/leads" className="block px-2 pt-1 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-accent)]">
+              +{rows.length - shown.length} more items · open full worklist →
+            </Link>
           )}
-        </Panel>
-      </div>
-    </div>
+        </div>
+      )}
+    </Panel>
   );
 }
 

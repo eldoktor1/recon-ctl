@@ -36,6 +36,30 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// --- Copy-to-clipboard chip ---------------------------------------------------
+export function CopyChip({ text, label, icon = "⧉" }:
+  { text: string; label?: string; icon?: string }) {
+  const toast = useToast();
+  const [done, setDone] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setDone(true);
+      toast("ok", "copied to clipboard");
+      setTimeout(() => setDone(false), 1200);
+    } catch {
+      toast("err", "clipboard blocked");
+    }
+  };
+  return (
+    <button onClick={copy} title={`copy: ${text}`}
+      className="mono inline-flex max-w-full items-center gap-1 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">
+      <span className="shrink-0">{done ? "✓" : icon}</span>
+      <span className="truncate">{label || text}</span>
+    </button>
+  );
+}
+
 // --- Drawer (right slide-over) ------------------------------------------------
 export function Drawer({ open, onClose, title, children, width = 560 }:
   { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode; width?: number }) {
