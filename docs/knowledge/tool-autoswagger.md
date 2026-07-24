@@ -32,16 +32,19 @@ Related tools from the same digest: **Hadrian** (EVALUATE — role-based BOLA/BF
 mutating → human-in-the-loop only, never autonomous; see `class-graphql.md`); **graphql-scanner**
 (SKIP — subset of `recon_graphql.sh`). Autoswagger is the one wired as an autonomous-safe lane.
 
-## Install (OPERATOR — the lane never installs it)
-The lane (`recon_autoswagger.sh`) DETECTS the binary and NO-OPs gracefully (logs a hint, exits 0) if
-it's absent, so it can ship dormant. To activate:
+## Install (already installed 2026-07-24 at `~/tools/autoswagger`)
+Autoswagger is NOT a pip/pipx package (the repo has no `setup.py`/`pyproject.toml` — `pipx install` fails).
+It's a single-file script run from its own venv. Installed layout:
 ```
-pipx install git+https://github.com/intruder-io/autoswagger.git
-# or:
-git clone https://github.com/intruder-io/autoswagger && cd autoswagger && pip install -r requirements.txt
+git clone https://github.com/intruder-io/autoswagger.git ~/tools/autoswagger
+cd ~/tools/autoswagger && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+# requirements pull presidio-analyzer + spaCy en_core_web_lg (~400MB) for PII recognition — auto-downloaded.
 ```
-(Python — under WSL: `wsl.exe -d kali-linux -- pipx install …`; the engine runs on WSL python3.)
-Then put `autoswagger` on PATH or set `AS_BIN=/path/to/autoswagger`. Verify: `recon_autoswagger.sh check <host>`.
+The lane (`recon_autoswagger.sh`) invokes `$AS_PY $AS_SCRIPT <url> -json -rate 5` (GET-only; NEVER `-risk`),
+detecting `AS_PY=~/tools/autoswagger/venv/bin/python` + `AS_SCRIPT=~/tools/autoswagger/autoswagger.py`
+(override via `AS_HOME`/`AS_PY`/`AS_SCRIPT`). It NO-OPs gracefully (logs the install hint, exits 0) if absent.
+`-json` output shape: `{"results":[{url,status_code,method,pii_detected,interesting_response,content_length,…}]}`
+— default mode already filters to unauth 200s (a 200 where 401/403 was expected = the broken-authz signal).
 
 ## How the lane uses it (`recon_autoswagger.sh`)
 - **Discover candidates** — jsintel endpoints referencing `swagger|openapi|api-docs` + ES `recon_alive`

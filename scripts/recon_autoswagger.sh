@@ -53,7 +53,12 @@ LOCK_FILE="$STATE_DIR/autoswagger.lock"
 # ---- killswitch: `touch state/kill/v2_autoswagger` pauses the lane (matches the other v2_* lanes) ----
 KILLSWITCH="${KILLSWITCH:-$STATE_DIR/kill/v2_autoswagger}"
 
-AS_BIN="${AS_BIN:-$(command -v autoswagger 2>/dev/null || echo "$HOME/.local/bin/autoswagger")}"
+# Autoswagger is a cloned repo run via its own venv python (NOT a pip/pipx binary — the repo has
+# no setup.py/pyproject). Invoked as: <venv-python> autoswagger.py <url> -json -rate N.
+AS_HOME="${AS_HOME:-$HOME/tools/autoswagger}"
+AS_PY="${AS_PY:-$AS_HOME/venv/bin/python}"
+AS_SCRIPT="${AS_SCRIPT:-$AS_HOME/autoswagger.py}"
+AS_RATE="${AS_RATE:-5}"                 # requests/sec — polite (tool default 30 is too hot for a BB exit)
 AS_BATCH="${AS_BATCH:-40}"              # candidate hosts probed per cycle
 AS_COOLDOWN_DAYS="${AS_COOLDOWN_DAYS:-7}"
 AS_TIMEOUT="${AS_TIMEOUT:-90}"          # per-host wall-clock cap
@@ -71,16 +76,17 @@ es_curl()   { curl -sS -m30 "${ES_AUTH[@]}" -H 'Content-Type: application/json' 
 
 # ---- tool presence: no-op gracefully if Autoswagger is not installed (operator installs it) ----
 have_autoswagger() {
-  [[ -x "$AS_BIN" ]] && return 0
-  command -v autoswagger >/dev/null 2>&1 && { AS_BIN="$(command -v autoswagger)"; return 0; }
+  [[ -x "$AS_PY" && -f "$AS_SCRIPT" ]] && return 0
+  # fallback: a packaged binary on PATH (if a future release ships one)
+  command -v autoswagger >/dev/null 2>&1 && { AS_PY="$(command -v autoswagger)"; AS_SCRIPT=""; return 0; }
   return 1
 }
 require_autoswagger() {
   have_autoswagger && return 0
   log "autoswagger not installed — lane is a NO-OP. Install (operator):"
-  log "    pipx install git+https://github.com/intruder-io/autoswagger.git"
-  log "    (or: git clone https://github.com/intruder-io/autoswagger && pip install -r requirements.txt)"
-  log "  then set AS_BIN or put 'autoswagger' on PATH. See docs/knowledge/tool-autoswagger.md."
+  log "    git clone https://github.com/intruder-io/autoswagger.git ~/tools/autoswagger"
+  log "    cd ~/tools/autoswagger && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
+  log "  (override paths via AS_HOME / AS_PY / AS_SCRIPT). See docs/knowledge/tool-autoswagger.md."
   return 1
 }
 
@@ -114,20 +120,24 @@ discover_hosts() {
 autoswagger_host() {   # $1=host $2=program
   local host="$1"
   local base="https://${host}"
-  # GET-only, no creds, no mutating -risk flag. -o json requested; tolerate plain output.
+  # GET-only (NO -risk = no non-GET methods), unauth, rate-limited, JSON out. Positional URL arg.
   local out
-  out="$(timeout "$AS_TIMEOUT" "$AS_BIN" -u "$base" --format json 2>/dev/null)" || out=""
+  if [[ -n "$AS_SCRIPT" ]]; then
+    out="$(timeout "$AS_TIMEOUT" "$AS_PY" "$AS_SCRIPT" "$base" -json -rate "$AS_RATE" 2>/dev/null)" || out=""
+  else
+    out="$(timeout "$AS_TIMEOUT" "$AS_PY" "$base" -json -rate "$AS_RATE" 2>/dev/null)" || out=""
+  fi
   [[ -z "$out" ]] && return 0
-  # Best-effort: pull an array of endpoint results if the tool emits JSON; otherwise skip (LEAD-only,
-  # never fabricate). We look for objects carrying a path/url + status + any pii/secret/interesting flag.
+  # Autoswagger -json emits {"results":[{url,status_code,method,pii_detected,interesting_response,...}]}.
+  # Default mode already filters to 200s (an unauth 200 where 401/403 was expected = the broken-authz
+  # signal). LEAD-only — never fabricate; if the shape ever changes this yields nothing rather than junk.
   printf '%s' "$out" | jq -c '
-      ( if type=="array" then . elif (.results?|type=="array") then .results elif (.findings?|type=="array") then .findings else [] end )
-      | .[]? | select((.status//.status_code//0) >= 200 and (.status//.status_code//0) < 400)
-      | {endpoint:(.url // .path // .endpoint // ""),
-         status:(.status // .status_code // 0),
-         flags:([ (if (.pii//false) then "pii" else empty end),
-                  (if (.secrets//.secret//false) then "secrets" else empty end),
-                  (if (.interesting//.oversized//false) then "interesting" else empty end) ])}
+      (.results? // []) | .[]?
+      | select((.status_code // 0) >= 200 and (.status_code // 0) < 400)
+      | {endpoint:(.url // .path_template // ""),
+         status:(.status_code // 0),
+         flags:([ (if (.pii_detected//false) then "pii" else empty end),
+                  (if (.interesting_response//false) then "interesting" else empty end) ])}
       | select(.endpoint != "")' 2>/dev/null || true
 }
 
