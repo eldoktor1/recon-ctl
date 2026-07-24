@@ -86,11 +86,19 @@ if [[ -x "$BRAVE_NODE" && -x "$_PSB" ]] && timeout 6 "$_PSB" -NoProfile -Command
   MCP_CONFIG=( --mcp-config "$BRAVE_CFG" )
 fi
 
+# The pipeline's DATA dir (~/recon: findings.db, state, notes, briefings, logs)
+# lives OUTSIDE the repo cwd. Declare it a workspace dir so the co-pilot's file
+# tools read/write it without friction and it survives any future FS sandbox —
+# reads/writes to it are the co-pilot's whole job (e.g. `recon ai real` opens
+# ~/recon/v3/findings.db). d0k already has ACL access at the OS level.
+RECON_DATA_DIR="${RECON_DATA_DIR:-$HOME/recon}"
+
 # No --allowedTools: bypassPermissions grants the full built-in + MCP toolset.
 # --disallowedTools still applies (deny rules win) — closes the config-dump self-leak.
 ARGS=( -p "$MESSAGE"
        --output-format stream-json --verbose
        --permission-mode "$PERM"
+       --add-dir "$RECON_DATA_DIR"
        --disallowedTools $DISALLOWED
        "${MCP_CONFIG[@]}"
        --append-system-prompt "$APPEND_SYS" )
