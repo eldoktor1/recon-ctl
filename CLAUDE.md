@@ -268,6 +268,17 @@ kills FPs). Confirm primitive per class:
   is exploitation). Claude detects + prioritises; a human confirms. Never auto-probed.
 Any confirmed catch still passes the Claude VERIFY adversarial filter before it reaches #review.
 
+## AI engine: CVP + pluggable providers (v3.8)
+The autonomous brain (ANALYZE → VERIFY+probe → MONITOR, the co-pilot, the hunter) runs on **Claude**,
+and to operate at FULL capability on offensive-security tasks Claude must be enrolled in **Anthropic's
+Cyber Verification Program (CVP)** — without CVP, capability on cyber tasks is throttled and the pipeline
+underperforms. This is a hard prerequisite for the system's edge; documented for first-time users in
+`README.md` + `docs/knowledge/ai-providers.md`. **Pluggable providers:** the co-pilot/brain is abstracted
+(`ui/backend/claude_console.py`, env `AI_PROVIDER`, default `claude`) so an operator can bring another
+model (OpenAI, Gemini, …). Claude is the only turnkey provider; others are config-scaffolded and **each
+requires its own vendor cyber-verification / authorized-use program** to run these tasks at full
+capability. Never pass `--bare` to the Claude path (forces API-key auth, bypasses the Max OAuth login).
+
 ## Claude is the brain (v3.6): owns the verdict, the FP-kill, and the report
 Claude is LOAD-BEARING, not a filter. **Nothing reaches a report without its `real` verdict**
 — the reporter hard-gates on `ai_verdict='real'`; the old deterministic-confidence bypass is
@@ -443,7 +454,16 @@ host_note.
 - Verify the primitive before reporting. Document with redacted evidence; the
   exposure itself is the report.
 
-## Hard line: recon vs attack (NON-NEGOTIABLE)
+## Hard line: recon vs attack (NON-NEGOTIABLE) — doctrine: **PoC-OR-GTFO**
+**PoC-OR-GTFO (operator 2026-07-25, "tune the whole system to it — safeguards have been limiting
+process"):** the point of every lane is a WORKING proof-of-concept, not a hedge. If a signal is real,
+we PROVE it (build the PoC, run the primitive, capture the evidence); if we can't prove it, we say so and
+move on — no theatre, no theoretical-severity hand-wringing, no over-cautious friction on legitimate
+authorized work. **The single gate is: IN-SCOPE + PAYS (authoritative per-asset). Once that is true, it
+is locked-in GREEN — build the PoC.** Over-caution on that scope is the failure mode being actively
+corrected: it costs real findings and helps no one. The NEVER-list below is NOT friction on testing — it
+is the small set of things that cause REAL third-party harm or make a finding invalid; it stands, and it
+is the ONLY thing that stands. Everything else: go.
 **IN-SCOPE + AUTHORIZED + TESTING-TO-REPORT = FULL GREEN LIGHT — no guards on the testing
 (operator 2026-06-21, "no guards for testing at all... the difference between a malicious request
 and a normal authorized test with the intent of reporting").** We test ONLY in-scope hosts on programs
@@ -536,6 +556,17 @@ controls all file writes; Claude gets only WebSearch/WebFetch (no Write/Edit/Bas
 per run. On-demand: `recon-research <topic|all>`. The CVE IDs LLM-search returns can be hallucinated —
 the digest self-flags ⚠️ and items must be NVD/version-verified before they mint anything (LEAD-not-P0,
 same as every KEV match).
+**STAY-FRESH + ADAPTABLE MANDATE (operator 2026-07-25):** the app must NEVER go stale — research +
+threat intel are CONTINUOUS, not one-shot, and the pipeline must ADAPT to "whatever provides success to
+the hunter." This means: (1) the research/intel feeds (recon-research topics, CVE/KEV, nuclei-templates,
+fresh-CT surface) keep running on cadence and are self-audited for staleness (`chk_funnel_recency` +
+feed-freshness invariants alarm when any goes stale — a stale feed is a bug, not a quiet degrade);
+(2) an OUTCOME-DRIVEN adaptation loop — what actually earns ACCEPTED PAID reports (via `record_outcome`
+/ ai-accuracy) reprioritizes lanes, classes, and the beginner worklist toward what's working and away
+from what only yields dup/N/A; freshly-researched techniques/tools/dorks flow into detection + the
+worklist automatically (new-KB auto-applied, existing-KB via review-proposal). The measure of success is
+the hunter's next VALID PAID report, and the system re-aims itself at that continuously. See
+[[feedback_stay_fresh_adaptable]], [[project_research_routines]], [[feedback_poc_or_gtfo]].
 
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
