@@ -9,10 +9,20 @@
 # SURFACE the best human-testable IDOR candidates, ranked by value, from the dump.
 #
 # WHAT: scores each endpoint for IDOR-likelihood (object-reference resource +
-# ID type: numeric=enumerable, uuid=harvestable, id-param), boosts sensitive/
-# financial resources + API versioning + upload/download, cross-refs ES for
-# payout tier / scope, excludes benched hosts, dedups, ranks (tier x score), and
-# writes a ranked worklist. ADDITIVE + read-only: touches no daemon state.
+# ID type: numeric=enumerable, uuid=harvestable, id-param), boosts STATE-CHANGING
+# / mutating endpoints (Action-Level BOLA — HTTP POST/PUT/PATCH/DELETE where the
+# source resolved the verb, or a write verb in the path/param) so mutating BOLA
+# outranks read-only ID substitution (research beginner-first-report 2026-07-25:
+# state-changing BOLA ~41.7% is co-dominant with read IDOR ~36.9%), boosts
+# sensitive/financial resources + API versioning + upload/download, cross-refs ES
+# for payout tier / scope, excludes benched hosts, dedups, ranks (tier x score),
+# and writes a ranked worklist. ADDITIVE + read-only: touches no daemon state.
+#
+# ROADMAP (same digest, larger effort — NOT done here): clone/staging dedup —
+# SimHash of the crawled body + perceptual hash of the VERIFY-agent screenshot in
+# the ES asset layer, to group near-duplicate hosts and hunt one representative
+# (XBOW's dedup mechanism). Tracked in CLAUDE.md "smart targeting + clone/staging
+# dedup"; belongs in the ES asset store + VERIFY pipeline, not this ranker.
 #
 # Usage: recon_idor_candidates.py [--min-score N] [--top N] [--out FILE]
 #        Human runs the 2-account test; this only surfaces & ranks (hard line).
@@ -43,12 +53,17 @@ OBJRES=re.compile(r'/(users?|accounts?|orders?|invoices?|documents?|profiles?|me
 SENS=re.compile(r'(payment|card|invoice|transaction|balance|wallet|clabe|bank|account|kyc|ssn|salary|salaries|tax|statement|withdraw|deposit|transfer|loan|credit|billing|payout)',re.I)
 UPDL=re.compile(r'(upload|download|export|attachment|/file|/files|/blob|/media/|presigned)',re.I)
 APIV=re.compile(r'/(api|v\d|graphql|rest|service)',re.I)
-# modern-BOLA signals (audit #10, arXiv 2605.25865 taxonomy):
-# action-level/state-change BOLA = 41.7% of confirmed cases + highest severity (the largest family,
-# missed by read-only/GET-only testing); object-rebinding (owner/account/tenant id as a writable
-# param); tenant-isolation (cross-tenant /org/{id}). GraphQL global IDs (base64) are decoded→
-# incremented→re-encoded systematically.
-ACTION=re.compile(r'/(delete|remove|update|edit|modify|approve|reject|cancel|transfer|invite|revoke|disable|enable|deactivate|activate|grant|assign|reset|promote|merge|publish|unpublish|archive|restore|impersonate|switch|change)(/|$|\b)',re.I)
+# modern-BOLA signals (audit #10, arXiv 2605.25865 taxonomy; beginner-first-report 2026-07-25):
+# action-level/STATE-CHANGE BOLA = ~41.7% of confirmed cases + highest severity — co-dominant with
+# read-only Direct-Object IDOR (~36.9%) and MISSED by read-only/GET-only testing. So a mutating
+# endpoint (HTTP POST/PUT/PATCH/DELETE where the source knows the verb, OR a write verb in the
+# path/param) that carries an object reference must rank ABOVE a plain read-only ID substitution.
+# Also: object-rebinding (owner/account/tenant id as a writable param); tenant-isolation
+# (cross-tenant /org/{id}); GraphQL global IDs (base64) decoded→incremented→re-encoded systematically.
+MUT_METHODS={"POST","PUT","PATCH","DELETE"}  # HTTP verbs that imply a state change (BOLA-with-write)
+# path/param write verbs (the "where the method is unknown" fallback — jsluice often can't resolve the
+# fetch() method, so the verb in the route/param is the signal). Anchored after '/' so it's a path seg.
+ACTION=re.compile(r'/(delete|remove|update|edit|modify|approve|reject|cancel|transfer|invite|revoke|disable|enable|deactivate|activate|grant|assign|reset|set|promote|merge|publish|unpublish|archive|restore|impersonate|switch|change)(/|$|\b)',re.I)
 REBIND=re.compile(r'[?&](owner_id|account_id|tenant_id|user_id|org_id|organization_id|customer_id|company_id|member_id|group_id|workspace_id)=',re.I)
 TENANT=re.compile(r'/(orgs?|organizations?|tenants?|workspaces?|companies|company|teams?)/:?\{?[\w-]+\}?',re.I)
 GQLID=re.compile(r'(node\(\s*id\s*:|[?&]id=[A-Za-z0-9+/_-]{16,}={0,2})')  # base64-ish GraphQL global id
@@ -96,27 +111,39 @@ def _relay_global_id(ep):
             return dec
     return None
 
-def score_ep(host, ep):
+def score_ep(host, ep, method=""):
     p=ep
     if NOISE.search(p): return 0,"noise"
     s=0; idt=[]
-    if TEMPLATE.search(p): s+=4; idt.append("templated-id(:id/{id})")
-    if NUMID.search(p): s+=4; idt.append("numeric-ID(enumerable)")
-    if UUID.search(p): s+=4; idt.append("uuid")            # 39% of BOLA; exploitable once leaked (was +3)
+    has_ref=False        # endpoint carries an object reference (the thing you'd swap in an IDOR test)
+    state_change=False   # endpoint MUTATES state (Action-Level BOLA, ~41.7% of confirmed cases)
+    if TEMPLATE.search(p): s+=4; idt.append("templated-id(:id/{id})"); has_ref=True
+    if NUMID.search(p): s+=4; idt.append("numeric-ID(enumerable)"); has_ref=True
+    if UUID.search(p): s+=4; idt.append("uuid"); has_ref=True   # 39% of BOLA; exploitable once leaked (was +3)
     _relay=_relay_global_id(p)
-    if _relay: s+=6; idt.append("RELAY-GLOBAL-ID("+_relay+" — decode/increment/re-encode)")  # > UUID: decodable=enumerable
-    if IDPARAM.search(p): s+=3; idt.append("id-param")
+    if _relay: s+=6; idt.append("RELAY-GLOBAL-ID("+_relay+" — decode/increment/re-encode)"); has_ref=True  # > UUID: decodable=enumerable
+    if IDPARAM.search(p): s+=3; idt.append("id-param"); has_ref=True
     m=OBJRES.search(p)
-    if m: s+=2; idt.append("obj:"+m.group(1).lower())
-    if ACTION.search(p): s+=3; idt.append("ACTION-LEVEL(state-change)")  # 41.7% of BOLA + highest sev
-    if REBIND.search(p): s+=2; idt.append("rebind(owner/tenant-id)")
-    if TENANT.search(p): s+=2; idt.append("tenant-isolation")
+    if m: s+=2; idt.append("obj:"+m.group(1).lower()); has_ref=True
+    # --- state-change signal: HTTP method (where jsluice resolved it) OR a write verb in the path ---
+    mth=(method or "").strip().upper()
+    if mth in MUT_METHODS:
+        s+=4; idt.append("HTTP-"+mth+"(state-change)"); state_change=True  # method is KNOWN → strong
+    if ACTION.search(p):
+        s+=3; idt.append("ACTION-LEVEL(state-change)"); state_change=True  # write verb in route/param
+    if REBIND.search(p): s+=2; idt.append("rebind(owner/tenant-id)"); has_ref=True
+    if TENANT.search(p): s+=2; idt.append("tenant-isolation"); has_ref=True
     if APIV.search(p) or host.startswith("api.") or ".api." in host: s+=2; idt.append("api")
     if "graphql" in p.lower():
         s+=2; idt.append("graphql")
-        if GQLID.search(p): s+=1; idt.append("graphql-global-id(decode/increment)")
+        if GQLID.search(p): s+=1; idt.append("graphql-global-id(decode/increment)"); has_ref=True
     if UPDL.search(p): s+=2; idt.append("file")
     if SENS.search(p): s+=3; idt.append("SENSITIVE")
+    # MUTATING-BOLA combo (research 2026-07-25): a state change ON an object reference is Action-Level
+    # BOLA with write impact — the co-dominant, highest-severity family. Boost it so mutating candidates
+    # rank ABOVE read-only ID substitution. A bare write verb with no object ref is not BOLA → no bonus.
+    if state_change and has_ref:
+        s+=3; idt.append("MUTATING-BOLA(state-change+object-ref)")
     return s, ",".join(idt) if idt else "-"
 
 def es(body):
@@ -219,7 +246,7 @@ def main():
             # Bitdefender's OEM JS), else the JS host. Scope is checked against this.
             murl=re.match(r'^https?://([^/:]+)', ep)
             eff_host=murl.group(1) if murl else host
-            sc,idt=score_ep(host,ep)
+            sc,idt=score_ep(host,ep,j.get("method",""))  # method="" today (producer keeps .url only); wired for when it's captured
             if sc>=args.min_score: rows.append({"host":host,"eff_host":eff_host,"endpoint":ep,"program":prog,"score":sc,"idtype":idt})
     if not rows: print("no candidates >= min-score"); return 0
     # product-class-dup suppression: the same templated endpoint on > FANOUT_MAX
@@ -267,6 +294,7 @@ def main():
     lines=[f"# IDOR/BOLA candidate worklist (ranked) — {stamp}",
            f"From {len(seen)} jsintel endpoints -> {len(out)} scoped paying candidates (>= score {args.min_score}). Top {args.top} shown.",
            "Human 2-account test only (hard line: do NOT enumerate third-party IDs). Numeric-ID = enumerable; UUID = harvest from API list/JS.",
+           "MUTATING-BOLA (write verb/method on an object ref) = Action-Level BOLA (~41.7%, highest sev) — test the WRITE, not just the read.",
            "[API] = likely backend (JSON/401) = test directly. [route?] = likely an SPA client route (returns app",
            "shell) -- it REVEALS which resources are id-accessed; test the matching backend /api/<resource>/<id>",
            "with auth (2-account, swap the id). Verify backend-vs-route by probing for JSON/401 vs index.html.",""]
