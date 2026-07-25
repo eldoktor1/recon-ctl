@@ -170,6 +170,81 @@ const LANE_LOG = {
   ],
 };
 
+// --- Program Workspace -------------------------------------------------------
+const WORKSPACES = {
+  workspaces: [
+    { key: "glassdoor-demo", name: "Glassdoor (demo)", platform: "h1", status: "active", current: true, added_at: ago(4320),
+      counts: { wstg_total: 108, wstg_done: 34, wstg_inprogress: 9, findings: 3, hosts: 14, classes_done: 4 } },
+    { key: "acme-demo", name: "Acme (demo)", platform: "bc", status: "paused", current: false, added_at: ago(11000),
+      counts: { wstg_total: 108, wstg_done: 71, wstg_inprogress: 4, findings: 5, hosts: 22, classes_done: 8 } },
+    { key: "initech-demo", name: "Initech (demo)", platform: "ywh", status: "done", current: false, added_at: ago(28000),
+      counts: { wstg_total: 108, wstg_done: 102, wstg_inprogress: 0, findings: 2, hosts: 9, classes_done: 11 } },
+  ],
+  candidates: [
+    { key: "globex-demo", name: "Globex (demo)", platform: "h1", score: 88 },
+    { key: "hooli-demo", name: "Hooli (demo)", platform: "intigriti", score: 74 },
+    { key: "umbrella-demo", name: "Umbrella (demo)", platform: "bc", score: 61 },
+  ],
+};
+
+const WS_HOSTS = ASSETS.slice(0, 14).map((a, i) => ({
+  ...a, host: `host${i + 1}.glassdoor-demo.example.com`, triage_program: "Glassdoor (demo)",
+}));
+
+const WSTG = [
+  { id: "WSTG-INFO-02", category: "INFO", cat_name: "Information Gathering", name: "Fingerprint Web Server", status: "done", note: "nginx 1.24 confirmed via headers", updated_at: ago(300) },
+  { id: "WSTG-INFO-08", category: "INFO", cat_name: "Information Gathering", name: "Map Application Architecture", status: "done", note: "", updated_at: ago(280) },
+  { id: "WSTG-INFO-10", category: "INFO", cat_name: "Information Gathering", name: "Map Execution Paths", status: "in-progress", note: "jsintel endpoints pulled, reviewing", updated_at: ago(120) },
+  { id: "WSTG-CONF-05", category: "CONF", cat_name: "Configuration & Deployment", name: "Enumerate Admin Interfaces", status: "todo", note: "", updated_at: ago(4000) },
+  { id: "WSTG-CONF-07", category: "CONF", cat_name: "Configuration & Deployment", name: "Test HTTP Strict Transport Security", status: "na", note: "out of scope per policy", updated_at: ago(3000) },
+  { id: "WSTG-ATHN-01", category: "ATHN", cat_name: "Authentication", name: "Credentials Transported over Encrypted Channel", status: "done", note: "", updated_at: ago(900) },
+  { id: "WSTG-ATHN-03", category: "ATHN", cat_name: "Authentication", name: "Weak Lockout Mechanism", status: "in-progress", note: "no lockout after 20 tries — needs impact", updated_at: ago(60) },
+  { id: "WSTG-ATHZ-02", category: "ATHZ", cat_name: "Authorization", name: "Bypassing Authorization Schema (IDOR)", status: "finding", note: "/v2/orders/{id} numeric IDOR — 2-account swap confirmed", updated_at: ago(40) },
+  { id: "WSTG-ATHZ-04", category: "ATHZ", cat_name: "Authorization", name: "Insecure Direct Object References", status: "in-progress", note: "", updated_at: ago(50) },
+  { id: "WSTG-INPV-01", category: "INPV", cat_name: "Input Validation", name: "Reflected Cross Site Scripting", status: "todo", note: "", updated_at: ago(5000) },
+  { id: "WSTG-INPV-05", category: "INPV", cat_name: "Input Validation", name: "SQL Injection", status: "todo", note: "", updated_at: ago(5000) },
+  { id: "WSTG-BUSL-01", category: "BUSL", cat_name: "Business Logic", name: "Test Business Logic Data Validation", status: "todo", note: "", updated_at: ago(6000) },
+  { id: "WSTG-APIT-01", category: "APIT", cat_name: "API Testing", name: "API Reconnaissance", status: "done", note: "GraphQL introspection on, schema harvested", updated_at: ago(700) },
+];
+
+const STRIDE = {
+  S: [{ id: "s1", threat: "Session token predictable / reusable across users", note: "check JWT alg=none", status: "todo", hosts: ["app.glassdoor-demo.example.com"] }],
+  T: [{ id: "t1", threat: "Client-side price param tampering at checkout", note: "?amount= trusted server-side?", status: "in-progress", hosts: [] }],
+  R: [],
+  I: [{ id: "i1", threat: "GraphQL introspection exposes internal schema", note: "info-only unless sensitive mutation reachable", status: "done", hosts: ["gql.glassdoor-demo.example.com"] }],
+  D: [],
+  E: [{ id: "e1", threat: "IDOR on /v2/orders → horizontal privilege escalation", note: "CONFIRMED — see WSTG-ATHZ-02", status: "finding", hosts: ["api.glassdoor-demo.example.com"] }],
+};
+
+const WS_CLASSES = [
+  { cls: "idor", status: "finding" }, { cls: "bac", status: "in-progress" }, { cls: "xss", status: "todo" },
+  { cls: "sqli", status: "todo" }, { cls: "ssrf", status: "todo" }, { cls: "graphql", status: "done" },
+  { cls: "takeover", status: "done" }, { cls: "secret", status: "done" }, { cls: "bucket", status: "in-progress" },
+  { cls: "cache", status: "todo" }, { cls: "nday", status: "done" }, { cls: "csrf", status: "todo" },
+];
+
+const WS_FINDINGS = FINDINGS.slice(0, 3).map((f) => ({ ...f, program: "Glassdoor (demo)" }));
+
+function workspaceDetail(key: string) {
+  const s = WORKSPACES.workspaces.find((w) => w.key === key) || WORKSPACES.workspaces[0];
+  return {
+    key: s.key, name: s.name, platform: s.platform, status: s.status, current: s.current, added_at: s.added_at,
+    wstg: WSTG, stride: STRIDE, classes: WS_CLASSES,
+    notes: [
+      { ts: ago(40), text: "IDOR on /v2/orders/{id} confirmed with 2 owned accounts — drafting report." },
+      { ts: ago(320), text: "GraphQL introspection ON but no sensitive unauth mutation reachable — info-only, not reporting." },
+      { ts: ago(1200), text: "Deep recon done: 14 in-scope+paying hosts, jsintel + params crawled." },
+    ],
+    history: [
+      { ts: ago(30), event: "WSTG-ATHZ-02 → finding" },
+      { ts: ago(45), event: "finding #6001 confirmed (idor)" },
+      { ts: ago(700), event: "WSTG-APIT-01 → done" },
+      { ts: ago(4320), event: "workspace created" },
+    ],
+    hosts: WS_HOSTS, findings: WS_FINDINGS,
+  };
+}
+
 // --- resolver ----------------------------------------------------------------
 // Return a fixture for a GET path, or undefined to fall through to real fetch.
 export function demoGet(path: string): unknown | undefined {
@@ -193,6 +268,8 @@ export function demoGet(path: string): unknown | undefined {
   if (p === "/api/lanes/activity") return LANES;
   if (p.startsWith("/api/lanes/") && p.endsWith("/log")) return LANE_LOG;
   if (p === "/api/lanes") return LANES.filter((l) => l.target).map((l) => ({ lane: l.lane, sub: l.lane, target: l.target, desc: l.desc }));
+  if (p === "/api/workspaces") return WORKSPACES;
+  if (p.startsWith("/api/workspaces/")) return workspaceDetail(decodeURIComponent(p.slice("/api/workspaces/".length)));
   if (p === "/api/host-actions") return HOST_ACTIONS;
   if (p === "/api/claude/config") return CLAUDE_CONFIG;
   if (p === "/api/tasks") return [];

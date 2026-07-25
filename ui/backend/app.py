@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import actions, claude_console, config, daemon, es, files, findings, safety
+from . import actions, claude_console, config, daemon, es, files, findings, safety, workspace
 from .runner import run_observability, run_recon, run_state
 from .tasks import LANES, manager
 
@@ -512,6 +512,122 @@ async def api_targets_onboard(body: dict = Depends(safety.require_confirm)):
 async def api_digest():
     r = await run_observability("json")
     return r.json() or {"error": r.stderr or "unavailable"}
+
+
+# --------------------------------------------------------------------------- program workspace
+@app.get("/api/workspaces")
+async def api_workspaces():
+    """All engagement workspaces (with offline + live-joined counts) + seed candidates."""
+    workspace.ensure_seeded()
+    out = []
+    for ws in workspace.list_all():
+        name = ws.get("name") or ws.get("key")
+        counts = workspace.summarize(ws)
+        try:
+            counts["findings"] = findings.list_findings(program=name, limit=0)["total"]
+        except Exception:
+            pass
+        try:
+            counts["hosts"] = (await es.search(program=name, limit=0)).get("total") or 0
+        except Exception:
+            pass
+        out.append({
+            "key": ws["key"], "name": name, "platform": ws.get("platform"),
+            "status": ws.get("status"), "current": ws.get("current", False),
+            "added_at": ws.get("added_at"), "counts": counts,
+        })
+    return {"workspaces": out, "candidates": workspace.candidates()}
+
+
+@app.post("/api/workspaces")
+async def api_workspace_create(body: dict = Depends(safety.require_confirm)):
+    """Create/activate a workspace (idempotent). Seeds WSTG+STRIDE+class templates."""
+    key = (body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(400, "workspace key required")
+    try:
+        return workspace.create(key, (body.get("name") or "").strip() or None,
+                                (body.get("platform") or "").strip() or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/workspaces/{key}")
+async def api_workspace(key: str):
+    """Full workspace + LIVE joins: in-scope+paying ES hosts and findings.db rows."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    name = ws.get("name") or ws.get("key")
+    try:
+        hosts = (await es.search(program=name, limit=200)).get("items", [])
+    except Exception:
+        hosts = []
+    try:
+        fnd = findings.list_findings(program=name, limit=200)["items"]
+    except Exception:
+        fnd = []
+    return {**ws, "hosts": hosts, "findings": fnd}
+
+
+@app.post("/api/workspaces/{key}/wstg")
+async def api_workspace_wstg(key: str, body: dict = Depends(safety.require_confirm)):
+    wid = (body.get("id") or "").strip()
+    status = (body.get("status") or "").strip()
+    if not wid or not status:
+        raise HTTPException(400, "id and status required")
+    try:
+        return workspace.update_wstg(key, wid, status, body.get("note"))
+    except KeyError:
+        raise HTTPException(404, "workspace or WSTG item not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/stride")
+async def api_workspace_stride(key: str, body: dict = Depends(safety.require_confirm)):
+    hosts = body.get("hosts")
+    try:
+        return workspace.update_stride(
+            key, (body.get("cat") or "").strip(), (body.get("threat") or "").strip(),
+            sid=(body.get("id") or "").strip() or None, note=body.get("note"),
+            status=body.get("status"),
+            hosts=hosts if isinstance(hosts, list) else None)
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/class")
+async def api_workspace_class(key: str, body: dict = Depends(safety.require_confirm)):
+    try:
+        return workspace.set_class(key, (body.get("cls") or "").strip(),
+                                   (body.get("status") or "").strip())
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/note")
+async def api_workspace_note(key: str, body: dict = Depends(safety.require_confirm)):
+    try:
+        return workspace.add_note(key, (body.get("text") or "").strip())
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/status")
+async def api_workspace_status(key: str, body: dict = Depends(safety.require_confirm)):
+    try:
+        return workspace.set_status(key, body.get("status"), body.get("current"))
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # --------------------------------------------------------------------------- global search

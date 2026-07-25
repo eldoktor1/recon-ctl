@@ -107,3 +107,43 @@ export interface ClaudeConfig {
   provider?: string; providers?: string[]; wired?: boolean;
   model?: string; auth?: string;
 }
+
+// --- Program Workspace (GET /api/workspaces + /api/workspaces/{key}) ----------
+export interface WsCounts {
+  wstg_total: number; wstg_done: number; wstg_inprogress: number;
+  findings: number; hosts: number; classes_done: number;
+}
+export interface WorkspaceSummary {
+  key: string; name: string; platform?: string; status: string;
+  current: boolean; added_at?: string; counts: WsCounts;
+}
+export interface WorkspaceCandidate { key: string; name: string; platform?: string; score?: number }
+export interface WorkspacesResp { workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] }
+
+// status ∈ todo | in-progress | done | na | finding
+export interface WstgItem {
+  id: string; category: string; cat_name: string; name: string;
+  status: string; note?: string; updated_at?: string;
+}
+export interface StrideThreat {
+  id?: string; threat: string; note?: string; status?: string; hosts?: string[];
+}
+export interface StrideBoard {
+  S: StrideThreat[]; T: StrideThreat[]; R: StrideThreat[];
+  I: StrideThreat[]; D: StrideThreat[]; E: StrideThreat[];
+}
+export interface ClassProgress { cls: string; status: string }
+export interface WsNote { ts: string; text: string }
+export interface WsEvent { ts: string; event: string }
+// ES asset row scoped to the program (partial — only what the table renders).
+export interface WsHost {
+  host: string; triage_program?: string; triage_priority?: string; triage_score?: number;
+  triage_classes?: string[]; triage_pays?: boolean; triage_in_scope?: boolean;
+  triage_kev_match?: boolean; triage_true_fresh?: boolean; js_secret_hit?: boolean;
+  takeover_confirmed?: boolean; tech?: string[]; host_notes_count?: number;
+}
+export interface WorkspaceDetail {
+  key: string; name: string; platform?: string; status: string; current: boolean; added_at?: string;
+  wstg: WstgItem[]; stride: StrideBoard; classes: ClassProgress[];
+  notes: WsNote[]; history: WsEvent[]; hosts: WsHost[]; findings: Finding[];
+}

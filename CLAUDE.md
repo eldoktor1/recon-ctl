@@ -568,6 +568,19 @@ worklist automatically (new-KB auto-applied, existing-KB via review-proposal). T
 the hunter's next VALID PAID report, and the system re-aims itself at that continuously. See
 [[feedback_stay_fresh_adaptable]], [[project_research_routines]], [[feedback_poc_or_gtfo]].
 
+## Program workspace: systematic STRIDE + WSTG (operator 2026-07-25)
+The recon-ui **Program Workspace** (pick a high-scored program → a per-program cockpit; history of all
+worked programs + the current one, **Glassdoor**) is where committed programs are worked — and they are
+worked SYSTEMATICALLY, never ad-hoc/messy. Per program, in order: (1) **THREAT-MODEL with STRIDE first**
+— enumerate threats per Spoofing / Tampering / Repudiation / Information-disclosure / DoS / Elevation over
+the app's assets, roles, and data flows; (2) then **walk the WSTG** (OWASP Web Security Testing Guide)
+checklist **category by category** (INFO→CONF→IDNT→ATHN→ATHZ→SESS→INPV→ERRH→CRYP→BUSL→CLNT→APIT), marking
+every test `todo→in-progress→done/na/finding` until coverage is complete across ALL bug classes. The
+checklist IS the plan and the worked-vs-left record — nothing is tested off-book, and the STRIDE model
+aims the WSTG effort. All tools (per-host verify/confirm/crawl/etc.) run from inside the workspace.
+Complements [[feedback_per_program_workflow_doctrine]] (Burp + deep recon/research FIRST) and the hunt
+flow; the PoC-OR-GTFO + scope/pays gates still apply to every WSTG test. See [[feedback_systematic_stride_wstg]].
+
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a
   WSL shell). NEVER invoke bare `python`/`python3`/`py`/`pip` on the Windows/MINGW side — Windows

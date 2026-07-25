@@ -59,7 +59,7 @@ web-cache deception, active param discovery (arjun), and GitHub-leak hunting. Fu
 
 | Assets | Findings |
 |---|---|
-| ![assets](docs/img/assets.png) | ![findings](docs/img/findings.png) |
+| ![assets](docs/img/assets.png) | ![findings](docs/img/findings.png) | ![programs](docs/img/programs.png) |
 
 ## Prerequisites
 

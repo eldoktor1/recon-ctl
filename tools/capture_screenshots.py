@@ -26,6 +26,7 @@ PAGES = [
     ("lanes", "/lanes"),
     ("assets", "/assets"),
     ("findings", "/findings"),
+    ("programs", "/programs"),
 ]
 
 

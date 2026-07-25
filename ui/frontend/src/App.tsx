@@ -1,8 +1,10 @@
+import type { ReactNode } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useLiveStatus, StatusProvider } from "./hooks";
 import { Pill } from "./components/ui";
 import { fmtNum } from "./format";
 import CommandCenter from "./pages/CommandCenter";
+import Programs, { CrosshairIcon } from "./pages/Programs";
 import Console from "./pages/Console";
 import TokenGate from "./pages/TokenGate";
 import Findings from "./pages/Findings";
@@ -23,11 +25,12 @@ import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
 import { isDemo } from "./demo";
 
-interface NavItem { to: string; label: string; icon: string; phase?: string }
+interface NavItem { to: string; label: string; icon: ReactNode; phase?: string }
 
 const NAV: NavItem[] = [
   { to: "/", label: "Command Center", icon: "◎" },
   { to: "/console", label: "Co-Pilot", icon: "✧" },
+  { to: "/programs", label: "Programs", icon: <CrosshairIcon size={15} /> },
   { to: "/findings", label: "Findings", icon: "◆" },
   { to: "/assets", label: "Asset Explorer", icon: "❑" },
   { to: "/leads", label: "Leads", icon: "✦" },
@@ -101,7 +104,7 @@ function Sidebar() {
               }`
             }
           >
-            <span className="w-4 text-center text-base">{n.icon}</span>
+            <span className="inline-flex w-4 justify-center text-center text-base">{n.icon}</span>
             <span className="flex-1">{n.label}</span>
             {n.phase && (
               <span className="mono text-[10px] text-[var(--color-ink-faint)] opacity-0 group-hover:opacity-100">{n.phase}</span>
@@ -148,6 +151,7 @@ function AppShell() {
           <Routes>
             <Route path="/" element={<CommandCenter />} />
             <Route path="/console" element={<Console />} />
+            <Route path="/programs" element={<Programs />} />
             <Route path="/findings" element={<Findings />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/leads" element={<Leads />} />
