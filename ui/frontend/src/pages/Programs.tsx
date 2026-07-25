@@ -641,7 +641,8 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
   );
 }
 
-const GUIDE_STATUSES = ["done", "finding", "na", "in-progress"];
+// alternate outcomes; the primary "done · next" CTA handles the common finish path
+const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
 function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, onNext }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
@@ -715,7 +716,7 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
             {s === "in-progress" ? "wip" : s}
           </button>
         ))}
-        <Btn size="sm" variant="primary" onClick={onNext}>next test →</Btn>
+        <Btn size="sm" variant="primary" onClick={() => mark("done")}>✓ done · next →</Btn>
       </div>
     </Panel>
   );
