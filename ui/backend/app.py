@@ -139,6 +139,16 @@ async def api_asset_facets():
     return await es.facets()
 
 
+# Each live-signal lead bucket maps to the vuln CLASS a class-scoped FP note would refute
+# (matching tools/note_verdict.CLASS_PATTERNS keys). A host FP'd for that class drops from the
+# bucket even without a host-wide kill. `fresh` is multi-class (newly-surfaced surface, no single
+# class) → only a host-wide kill removes it.
+_BUCKET_CLASS: dict[str, str | None] = {
+    "takeover": "takeover", "takeover_lead": "takeover",
+    "secrets": "secret", "kev": "nday", "fresh": None,
+}
+
+
 @app.get("/api/leads")
 async def api_leads(pays_only: bool = True, include_dismissed: bool = False,
                     include_oos: bool = False, include_nopay: bool = False):
@@ -146,10 +156,20 @@ async def api_leads(pays_only: bool = True, include_dismissed: bool = False,
     data = await es.active_leads(include_oos=include_oos,
                                  include_nopay=(include_nopay or not pays_only))
     if not include_dismissed:
-        killed = files.killed_host_set()
+        killed = files.killed_host_set()          # host-wide DEAD
+        killed_cls = files.killed_host_classes()  # {host -> {class,…}} class-scoped FP
         for b in data.get("buckets", []):
+            bcls = _BUCKET_CLASS.get(b.get("key"))
             hosts = b.get("hosts", [])
-            kept = [h for h in hosts if (h.get("host") or "").lower() not in killed]
+
+            def _dropped(h: dict) -> bool:
+                hn = (h.get("host") or "").lower()
+                if hn in killed:
+                    return True  # host-wide kill
+                # class-scoped FP on THIS bucket's class → drop (a just-FP'd host must not reappear)
+                return bool(bcls) and bcls in killed_cls.get(hn, set())
+
+            kept = [h for h in hosts if not _dropped(h)]
             drop = len(hosts) - len(kept)
             if drop:
                 b["hosts"] = kept

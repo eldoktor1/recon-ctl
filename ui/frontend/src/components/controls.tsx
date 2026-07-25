@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { useResizable } from "./useResizable";
 
 // --- Toast --------------------------------------------------------------------
 interface Toast { id: number; kind: "ok" | "err" | "info"; msg: string }
@@ -61,16 +62,30 @@ export function CopyChip({ text, label, icon = "⧉" }:
 }
 
 // --- Drawer (right slide-over) ------------------------------------------------
-export function Drawer({ open, onClose, title, children, width = 560 }:
-  { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode; width?: number }) {
+// `resizeKey` (optional) makes the WIDTH drag-resizable via a left-edge grip, persisted
+// under that localStorage key. Without it the drawer keeps its fixed `width`.
+export function Drawer({ open, onClose, title, children, width = 560, resizeKey }:
+  { open: boolean; onClose: () => void; title?: ReactNode; children: ReactNode;
+    width?: number; resizeKey?: string }) {
+  const { size, onGripDown } = useResizable({
+    axis: "x", storageKey: resizeKey || "recon.drawer.__unused", initial: width,
+    min: 360, max: () => Math.round(window.innerWidth * 0.94),
+  });
   if (!open) return null;
+  const w = resizeKey ? `${size}px` : `min(94vw, ${width}px)`;
   return (
     <div className="fixed inset-0 z-40">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div
         className="absolute right-0 top-0 flex h-full flex-col border-l border-[var(--color-border)] bg-[var(--color-panel)] shadow-2xl fade-in"
-        style={{ width: `min(94vw, ${width}px)` }}
+        style={{ width: w, maxWidth: "94vw" }}
       >
+        {resizeKey && (
+          <div onPointerDown={onGripDown} title="drag to resize"
+            className="group absolute left-0 top-0 z-10 flex h-full w-2 -translate-x-1/2 cursor-ew-resize items-center justify-center">
+            <span className="h-10 w-0.5 rounded-full bg-[var(--color-border-bright)] transition group-hover:bg-[var(--color-accent)]" />
+          </div>
+        )}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-3">
           <div className="min-w-0 flex-1 truncate">{title}</div>
           <button onClick={onClose} className="ml-3 rounded px-2 py-1 text-[var(--color-ink-dim)] hover:bg-[var(--color-panel-2)] hover:text-[var(--color-ink)]">✕</button>

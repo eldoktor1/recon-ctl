@@ -43,6 +43,21 @@ def killed_host_set() -> set[str]:
         return set()
 
 
+def killed_host_classes() -> dict[str, set[str]]:
+    """{host -> set(vuln_classes)} for hosts killed only for SPECIFIC classes (class-scoped FP).
+
+    Distinct from killed_host_set (which is host-wide dead). A class-scoped FP note should only
+    suppress a lead whose bucket represents that same class — the host stays servable elsewhere.
+    """
+    nv = _note_verdict()
+    if not nv:
+        return {}
+    try:
+        return {h.lower(): set(c) for h, c in nv.killed_host_classes(str(config.HOST_NOTES)).items()}
+    except Exception:
+        return {}
+
+
 def benched_host_set() -> set[str]:
     """Hosts currently benched (active 7-day ignore) — hide until the TTL lapses."""
     return {(r.get("host") or "").lower() for r in active_ignores() if r.get("host")}

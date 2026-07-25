@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Empty, Spinner, Badge } from "./ui";
@@ -9,9 +10,13 @@ import { priorityColor, asArr } from "../format";
 interface HostAction { action: string; target: boolean; desc: string }
 
 // Shared host detail + actions drawer (used by Assets, Leads, Notes).
-export function HostDrawer({ host, onClose }: { host: string; onClose: () => void }) {
+// `onChanged` fires after a mutating action (dismiss/ignore/note) so the opener's lists refetch —
+// e.g. a just-FP'd host drops out of the Leads worklist without waiting for the poll.
+export function HostDrawer({ host, onClose, onChanged }:
+  { host: string; onClose: () => void; onChanged?: () => void }) {
   const { data, loading } = useFetch<any>(`/api/assets/${encodeURIComponent(host)}`);
   const { data: hostActions } = useFetch<HostAction[]>("/api/host-actions");
+  const qc = useQueryClient();
   const toast = useToast();
   const [scopeOut, setScopeOut] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<null | { title: string; body: string; run: () => Promise<any> }>(null);
@@ -47,14 +52,19 @@ export function HostDrawer({ host, onClose }: { host: string; onClose: () => voi
   const doAction = async () => {
     if (!confirm) return;
     setBusy(true);
-    try { const r = await confirm.run(); toast(r?.ok === false ? "err" : "ok", r?.ok === false ? r.error : "done"); }
+    try {
+      const r = await confirm.run();
+      const failed = r?.ok === false;
+      toast(failed ? "err" : "ok", failed ? r.error : "done");
+      if (!failed) { qc.invalidateQueries(); onChanged?.(); }  // lists refetch after a mutating action
+    }
     catch (e: any) { toast("err", e.message); }
     finally { setBusy(false); setConfirm(null); }
   };
 
   return (
    <>
-    <Drawer open onClose={onClose} width={600} title={<span className="mono text-sm text-[var(--color-ink)]">{host}</span>}>
+    <Drawer open onClose={onClose} width={600} resizeKey="recon.hostdrawer.w" title={<span className="mono text-sm text-[var(--color-ink)]">{host}</span>}>
       {loading && !data ? <Spinner /> : !data ? (
         <div className="space-y-4">
           <Empty>not in ES asset index</Empty>

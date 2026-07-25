@@ -274,7 +274,7 @@ export default function Leads() {
         )}
       </Panel>
 
-      {host && <HostDrawer host={host} onClose={() => setHost(null)} />}
+      {host && <HostDrawer host={host} onClose={() => setHost(null)} onChanged={refresh} />}
       {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
     </div>
   );

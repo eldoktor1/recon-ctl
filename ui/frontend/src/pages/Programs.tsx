@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFetch } from "../hooks";
@@ -377,7 +377,7 @@ function OverviewTab({ ws, onChanged, onTask }:
         </Panel>
       </div>
 
-      {drawer && <HostDrawer host={drawer} onClose={() => setDrawer(null)} />}
+      {drawer && <HostDrawer host={drawer} onClose={() => setDrawer(null)} onChanged={onChanged} />}
     </div>
   );
 }
@@ -439,8 +439,10 @@ function parseStepResult(raw: string): { status: "done" | "finding" | "na" | "ma
 }
 
 // Poll a spawned guide task until it leaves `running` (or auto-drive is cancelled / times out).
+// `timedOut` distinguishes a genuine stall (still running past maxMs) from a clean finish, so the
+// auto-driver can pause GRACEFULLY on a timeout instead of silently marking a half-done step.
 async function pollGuideTask(tid: number, alive: () => boolean, maxMs = 6 * 60 * 1000):
-  Promise<{ state: string; text: string }> {
+  Promise<{ state: string; text: string; timedOut: boolean }> {
   const t0 = Date.now();
   const read = async () => {
     try {
@@ -452,9 +454,10 @@ async function pollGuideTask(tid: number, alive: () => boolean, maxMs = 6 * 60 *
     await sleep(2500);
     if (!alive()) break;
     const r = await read();
-    if (r && r.state !== "running") return r;
+    if (r && r.state !== "running") return { ...r, timedOut: false };
   }
-  return (await read()) || { state: "unknown", text: "" };
+  const last = (await read()) || { state: "unknown", text: "" };
+  return { ...last, timedOut: alive() && last.state === "running" };
 }
 
 function GuidedTab({ ws, onChanged, onTask }:
@@ -468,7 +471,11 @@ function GuidedTab({ ws, onChanged, onTask }:
   const [canned, setCanned] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [auto, setAuto] = useState(false);
-  const [driveInfo, setDriveInfo] = useState<{ n: number; total: number; label: string } | null>(null);
+  // legible auto-drive status: which step + which stage of the pick→guide→mark→advance cycle
+  type DriveStage = "spawning" | "in-progress" | "streaming" | "marked" | "error";
+  const [driveInfo, setDriveInfo] = useState<{ n: number; total: number; label: string; stage: DriveStage } | null>(null);
+  // "phase:key" of the step currently being worked (manual guide or auto-drive) — drives the pulse.
+  const [working, setWorking] = useState<string | null>(null);
 
   // ordered walkthrough: 6 STRIDE categories, then all WSTG tests in canonical order
   const steps = useMemo<GuideStep[]>(() => [
@@ -484,11 +491,25 @@ function GuidedTab({ ws, onChanged, onTask }:
   const strideCovered = STRIDE_COLS.filter((c) => (ws.stride[c.cat] || []).length > 0).length;
   const wstgCovered = ws.wstg.filter((w) => w.status !== "todo").length;
 
-  // reset per-step scratch when the focus changes
-  useEffect(() => { setHost(""); setCanned(null); }, [idx]);
+  // reset per-step scratch when the focus changes (auto-drive re-arms `working` after the
+  // guide task spawns, so clearing here doesn't fight it)
+  useEffect(() => { setHost(""); setCanned(null); setWorking(null); }, [idx]);
 
   const clamped = Math.min(idx, Math.max(0, steps.length - 1));
   const step = steps[clamped];
+
+  const wsRef = useRef(ws); wsRef.current = ws;
+
+  // FIX 1: the moment a WSTG step's guide task is spawned, flip it to in-progress so the UI shows
+  // it's being worked. Only when currently `todo` — never regress a done/finding/na step on re-guide.
+  const markWstgInProgress = useCallback(async (id: string) => {
+    const cur = wsRef.current.wstg.find((x) => x.id === id)?.status;
+    if (cur && cur !== "todo") return;
+    try {
+      await api.action(`/api/workspaces/${enc}/wstg`, { id, status: "in-progress", note: "[auto-drive] working…" });
+      onChanged();
+    } catch { /* non-fatal — the guide still streams */ }
+  }, [enc, onChanged]);
 
   const jumpNextUncovered = () => {
     for (let i = 1; i <= steps.length; i++) {
@@ -506,6 +527,8 @@ function GuidedTab({ ws, onChanged, onTask }:
         { phase, id, host: h || undefined });
       toast("ok", `Claude guidance #${t.id} — streaming below`);
       onTask(t.id);
+      setWorking(`${phase}:${id}`);              // pulse this step while its guidance streams
+      if (phase === "wstg") markWstgInProgress(id);  // FIX 1: show it as in-progress immediately
     } catch (e: any) { toast("err", e.message); }
   };
 
@@ -515,7 +538,6 @@ function GuidedTab({ ws, onChanged, onTask }:
   // naturally on a finding, a step needing manual action (account signup / operator-run tool), or
   // a failure — and whenever the operator toggles it off. Refs keep the async loop off stale state.
   const autoRef = useRef(false); autoRef.current = auto;
-  const wsRef = useRef(ws); wsRef.current = ws;
   const hostRef = useRef(host); hostRef.current = host;
   const clampedRef = useRef(clamped); clampedRef.current = clamped;
   const stepsRef = useRef(steps); stepsRef.current = steps;
@@ -544,7 +566,11 @@ function GuidedTab({ ws, onChanged, onTask }:
 
     const driveStep = async (s: GuideStep, j: number):
       Promise<{ pause: boolean; reason?: string; err?: boolean }> => {
-      setDriveInfo({ n: j + 1, total: stepsL.length, label: s.phase === "stride" ? `STRIDE ${s.key}` : s.key });
+      const label = s.phase === "stride" ? `STRIDE ${s.key}` : s.key;
+      const stage = (st: DriveStage) => setDriveInfo({ n: j + 1, total: stepsL.length, label, stage: st });
+
+      // 1. spawn the guide task and stream it into the console
+      stage("spawning");
       let tid: number;
       try {
         const b: any = { phase: s.phase, id: s.key };
@@ -552,11 +578,20 @@ function GuidedTab({ ws, onChanged, onTask }:
         const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`, b);
         tid = t.id; onTask(t.id);
       } catch (e: any) { return { pause: true, reason: `guide spawn failed: ${e.message}`, err: true }; }
+      if (!alive()) return { pause: false };
 
+      // 2. FIX 1: mark in-progress the moment the task is spawned, and pulse this step
+      setWorking(s.phase + ":" + s.key);
+      if (s.phase === "wstg") { stage("in-progress"); await markWstgInProgress(s.key); }
+
+      // 3. poll to completion
+      stage("streaming");
       const res = await pollGuideTask(tid, alive);
       if (!alive()) return { pause: false };
-      if (res.state === "failed") return { pause: true, reason: `guide task #${tid} failed`, err: true };
+      if (res.timedOut) return { pause: true, reason: `guide task #${tid} timed out — paused (left in-progress)`, err: true };
+      if (res.state === "failed") return { pause: true, reason: `guide task #${tid} failed — paused`, err: true };
 
+      // 4. apply the final verdict from STEP-RESULT + write the outcome note
       const { status, summary } = parseStepResult(res.text);
       const note = `[auto-drive #${tid}] ${summary || "Claude drove this step — see task output."}`.slice(0, 1900);
       try {
@@ -571,6 +606,7 @@ function GuidedTab({ ws, onChanged, onTask }:
         onChanged();
       } catch (e: any) { return { pause: true, reason: `auto-mark failed: ${e.message}`, err: true }; }
 
+      stage("marked");
       localDone.add(s.phase + s.key);
       if (status === "manual")
         return { pause: true, reason: `${s.key} needs a manual action (account signup / operator-run tool) — paused` };
@@ -586,15 +622,31 @@ function GuidedTab({ ws, onChanged, onTask }:
         setIdx(j);
         const out = await driveStep(stepsL[j], j);
         if (!alive()) break;
-        if (out.pause) { toast(out.err ? "err" : "info", out.reason || "auto-drive paused"); setAuto(false); break; }
+        if (out.pause) {
+          if (out.err) setDriveInfo((d) => (d ? { ...d, stage: "error" } : d));
+          toast(out.err ? "err" : "info", out.reason || "auto-drive paused");
+          setAuto(false);
+          break;
+        }
         j = findNext(j);
       }
-      setDriveInfo(null);
+      setWorking(null);
+      // leave the last driveInfo visible on error so the operator sees where it stopped;
+      // on a clean finish the banner disappears with `auto`.
     })();
 
-    return () => { cancelled = true; setDriveInfo(null); };
+    return () => { cancelled = true; setDriveInfo(null); setWorking(null); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto]);
+
+  const workingIdx = useMemo(
+    () => (working ? steps.findIndex((s) => `${s.phase}:${s.key}` === working) : -1),
+    [working, steps]);
+  const focusActive = working === `${step?.phase}:${step?.key}`;
+  const STAGE_LABEL: Record<DriveStage, string> = {
+    spawning: "spawning guide", "in-progress": "marked in-progress",
+    streaming: "streaming", marked: "marked", error: "error — paused",
+  };
 
   if (!steps.length) return <Panel><Empty>walkthrough not initialized</Empty></Panel>;
 
@@ -632,16 +684,18 @@ function GuidedTab({ ws, onChanged, onTask }:
         </div>
         {auto && (
           <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--color-accent)]/20 pt-2">
-            <Dot color="var(--color-accent)" pulse />
-            <span className="mono text-[10px] text-[var(--color-accent)]">
-              {driveInfo ? `auto-driving · step ${driveInfo.n}/${driveInfo.total} · ${driveInfo.label}` : "auto-drive armed — starting…"}
+            <Dot color={driveInfo?.stage === "error" ? "var(--color-bad)" : "var(--color-accent)"} pulse={driveInfo?.stage !== "error"} />
+            <span className="mono text-[10px]" style={{ color: driveInfo?.stage === "error" ? "var(--color-bad)" : "var(--color-accent)" }}>
+              {driveInfo
+                ? `auto-driving · step ${driveInfo.n}/${driveInfo.total} · ${driveInfo.label} · ${STAGE_LABEL[driveInfo.stage]}`
+                : "auto-drive armed — starting…"}
             </span>
             <span className="text-[10px] text-[var(--color-ink-faint)]">
-              Claude guides → marks (done/finding/na) + notes → advances. Pauses on a finding or a step needing accounts/tools. Burp/Brave driving needs those services running.
+              Claude guides → marks in-progress → marks (done/finding/na) + notes → advances. Pauses on a finding, a step needing accounts/tools, a timeout, or a failure. Burp/Brave driving needs those services running.
             </span>
           </div>
         )}
-        {showMap && <StepMap ws={ws} steps={steps} focus={clamped} isCovered={isCovered} onPick={setIdx} />}
+        {showMap && <StepMap ws={ws} steps={steps} focus={clamped} working={workingIdx} isCovered={isCovered} onPick={setIdx} />}
       </Panel>
 
       {/* step nav */}
@@ -661,17 +715,18 @@ function GuidedTab({ ws, onChanged, onTask }:
 
       {step.phase === "stride"
         ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
-            onGuide={() => guide("stride", step.key)} canned={canned} onNext={jumpNextUncovered} />
+            onGuide={() => guide("stride", step.key)} canned={canned} onNext={jumpNextUncovered} active={focusActive} />
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
-            onGuide={() => guide("wstg", step.key, host)} canned={canned} onNext={jumpNextUncovered} />}
+            onGuide={() => guide("wstg", step.key, host)} canned={canned} onNext={jumpNextUncovered} active={focusActive} />}
     </div>
   );
 }
 
-// compact "all steps" map — comprehensiveness made visible, nothing silently skipped
-function StepMap({ ws, steps, focus, isCovered, onPick }:
-  { ws: WorkspaceDetail; steps: GuideStep[]; focus: number;
+// compact "all steps" map — comprehensiveness made visible, nothing silently skipped.
+// `working` is the index of the step actively being driven (pulsing accent ring).
+function StepMap({ ws, steps, focus, working, isCovered, onPick }:
+  { ws: WorkspaceDetail; steps: GuideStep[]; focus: number; working: number;
     isCovered: (s: GuideStep) => boolean; onPick: (i: number) => void }) {
   const wstgGroups = useMemo(() => {
     const m = new Map<string, { cat: string; cat_name: string; items: { i: number; it: WstgItem }[] }>();
@@ -689,8 +744,8 @@ function StepMap({ ws, steps, focus, isCovered, onPick }:
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mono w-16 shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">STRIDE</span>
         {steps.map((s, i) => s.phase === "stride" && (
-          <button key={s.key} onClick={() => onPick(i)} title={s.key}
-            className={`mono rounded border px-1.5 py-0.5 text-[10px] ${i === focus ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)]"}`}
+          <button key={s.key} onClick={() => onPick(i)} title={i === working ? `${s.key} — working…` : s.key}
+            className={`mono rounded border px-1.5 py-0.5 text-[10px] ${i === working ? "working-ring" : ""} ${i === focus ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)]"}`}
             style={{ color: i === focus ? undefined : wsc(isCovered(s) ? "done" : "todo") }}>
             {s.key}
           </button>
@@ -700,8 +755,9 @@ function StepMap({ ws, steps, focus, isCovered, onPick }:
         <div key={g.cat} className="flex flex-wrap items-center gap-1">
           <span className="mono w-16 shrink-0 truncate text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]" title={g.cat_name}>{g.cat}</span>
           {g.items.map(({ i, it }) => (
-            <button key={it.id} onClick={() => onPick(i)} title={`${it.id} · ${it.name} — ${it.status}`}
-              className={`mono h-5 w-6 rounded border text-[9px] ${i === focus ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"}`}
+            <button key={it.id} onClick={() => onPick(i)}
+              title={`${it.id} · ${it.name} — ${i === working ? "working…" : it.status}`}
+              className={`mono h-5 w-6 rounded border text-[9px] ${i === working ? "working-ring" : ""} ${i === focus ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"}`}
               style={{ color: wsc(it.status), background: `${wsc(it.status)}18` }}>
               {it.id.split("-")[2]}
             </button>
@@ -724,9 +780,9 @@ function GuideBox({ canned }: { canned: string | null }) {
   );
 }
 
-function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext }:
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext, active }:
   { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
-    onChanged: () => void; onGuide: () => void; canned: string | null; onNext: () => void }) {
+    onChanged: () => void; onGuide: () => void; canned: string | null; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [val, setVal] = useState("");
   const threats = ws.stride[cat as keyof StrideBoardT] || [];
@@ -737,7 +793,8 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
   };
   const label = STRIDE_COLS.find((c) => c.cat === cat)?.label || guideCat?.name || cat;
   return (
-    <Panel title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-accent)]">{cat}</span>{label}<Badge>STRIDE</Badge></span>}
+    <Panel className={active ? "working-ring" : ""}
+      title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-accent)]">{cat}</span>{label}<Badge>STRIDE</Badge>{active && <span className="mono text-[10px] text-[var(--color-accent)]">● working…</span>}</span>}
       right={<Badge>{threats.length} threats</Badge>}>
       {guideCat && (
         <>
@@ -781,10 +838,10 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
 // alternate outcomes; the primary "done · next" CTA handles the common finish path
 const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
-function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, onNext }:
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, onNext, active }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
     actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
-    onGuide: () => void; canned: string | null; onNext: () => void }) {
+    onGuide: () => void; canned: string | null; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [note, setNote] = useState(item.note || "");
   useEffect(() => { setNote(item.note || ""); }, [item.id]);
@@ -795,8 +852,8 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
   const mark = async (status: string) => { await post(status); onNext(); };
 
   return (
-    <Panel
-      title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-ink-faint)]">{item.id}</span>{item.name}</span>}
+    <Panel className={active ? "working-ring" : ""}
+      title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-ink-faint)]">{item.id}</span>{item.name}{active && <span className="mono text-[10px] text-[var(--color-accent)]">● working…</span>}</span>}
       right={<div className="flex items-center gap-2"><Badge>{item.cat_name}</Badge><Badge color={wsc(item.status)} filled>{item.status}</Badge></div>}>
       {/* static reference — always shown so nothing is glossed over */}
       <div className="space-y-2">
