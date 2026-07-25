@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/logo.png" alt="recon · ctl" width="120"/>
+<img src="docs/img/logo.svg" alt="recon · ctl" width="120"/>
 
 # recon · ctl
 
@@ -51,7 +51,7 @@ web-cache deception, active param discovery (arjun), and GitHub-leak hunting. Fu
 
 ## Screenshots
 
-> Placeholder references — PNGs live under `docs/img/`.
+> Live UI in demo mode (synthetic data). Regenerate with `python tools/capture_screenshots.py`.
 
 | Dashboard | Leads | Lanes |
 |---|---|---|
