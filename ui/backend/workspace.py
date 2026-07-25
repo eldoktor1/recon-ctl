@@ -948,7 +948,46 @@ _DOCTRINE = (
     "DOCTRINE (hard lines): only in-scope + paying hosts; IDOR/BAC uses TWO accounts the "
     "researcher OWNS (never guessed/third-party IDs); reflection is NOT XSS (execution must be "
     "proven); PoC-or-GTFO — prove it or move on; never harvest third-party data, move money, or "
-    "run destructive/RCE-for-harm. Recommend the SAFE confirm primitive per class."
+    "run destructive/RCE-for-harm; authenticated testing stays operator-overseen. Recommend the "
+    "SAFE confirm primitive per class."
+)
+
+# The co-pilot runs at cwd = the repo root, so the `burp` and `brave` MCP servers in the repo
+# .mcp.json auto-load — its tools are available to DRIVE the test, not just describe it. If a
+# backing service is down the tool call fails; degrade to exact manual steps rather than retrying.
+_DRIVE_TOOLS = (
+    "TOOLS YOU CAN DRIVE (auto-loaded from the repo .mcp.json):\n"
+    "  - `burp` MCP → Burp Pro (proxy on 127.0.0.1:9876). Use Repeater to replay/modify the actual "
+    "requests, Intruder for controlled fuzzing, and Autorize for cross-role / cross-tenant IDOR/BOLA "
+    "diffing. Default to read-only (GET/HEAD/OPTIONS); in-scope + paying only; confirm-then-stop.\n"
+    "  - `brave` MCP → the operator's logged-in debug Brave over CDP (chrome-devtools, :9222). Use it "
+    "to NAVIGATE to pages, read the live DOM / JS / network requests, and run browser-driven / "
+    "client-side checks in the authed session.\n"
+    "If a `burp` call fails, Burp Pro isn't up with its MCP server on :9876; if a `brave` call fails, "
+    "debug-Brave isn't running on :9222 (launch: scripts/launch_brave_debug.ps1). In that case say so "
+    "plainly and hand the operator the exact manual steps/commands instead of retrying blindly."
+)
+
+# When a test needs authentication / owned accounts, drive the signup rather than stopping dead.
+_ACCOUNTS = (
+    "IF THIS TEST NEEDS AUTH OR TWO ACCOUNTS (IDOR/BOLA, authz, session, most business-logic): STOP "
+    "and tell the operator up front that owned accounts are required, then DRIVE the signup — navigate "
+    "Brave to the target's registration/signup page, and/or run the provisioner "
+    "`python3 scripts/recon_account.py create <name> --url <signup_url> --platform <bugcrowd|hackerone|"
+    "yeswehack|gmail> --label <a|b>` (alias `recon-account`; the operator solves the CAPTCHA + final "
+    "submit; creds are local-only). Provision TWO accounts the operator OWNS, then confirm with the "
+    "2-account swap using ONLY your own object IDs — never a guessed/enumerated third-party ID."
+)
+
+# Machine-readable trailer the Auto-drive UI parses to auto-mark the step + write its outcome note.
+_STEP_RESULT = (
+    "FINALLY, end your reply with EXACTLY ONE machine-readable status line, on its own line, no markdown "
+    "or backticks:\n"
+    "STEP-RESULT: <done|finding|na|manual> — <one concise sentence: what you drove + the outcome>\n"
+    "Use `finding` ONLY if you directly observed/confirmed a real exploitable primitive this step; `na` "
+    "if the test does not apply to these assets; `manual` if it needs an action you cannot safely "
+    "complete now (owned-account signup, an operator-run target tool, or authed confirmation); otherwise "
+    "`done`."
 )
 
 
@@ -978,28 +1017,40 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
     focus_host = f"\nOperator has selected host to focus on: {host}" if host else ""
     if phase == "wstg":
         ref = wstg_reference().get(ident, {})
-        head = (f"You are guiding a bug-bounty operator through OWASP WSTG test {ident} — "
-                f"\"{ref.get('name', ident)}\" ({ref.get('cat_name', '')}).")
+        head = (f"You are the operator's co-pilot DRIVING OWASP WSTG test {ident} — "
+                f"\"{ref.get('name', ident)}\" ({ref.get('cat_name', '')}) — on THIS engagement. "
+                f"Actively work the test end-to-end with the tools below; do not merely describe it.")
         body = (
             f"Test objective: {ref.get('objective', '')}\n"
             f"General approach: {ref.get('how_to', '')}\n"
             f"Reference tools: {ref.get('tools', '')}\n\n"
-            "Give COMPREHENSIVE, program-specific guidance for THIS engagement. Cover, as a tight "
-            "numbered list:\n"
-            "1. Exactly what to check on THESE hosts/endpoints for this test (name real hosts/paths).\n"
-            "2. Concrete steps and payloads to try.\n"
-            "3. Which recon-ctl lane/tool to run and the exact command.\n"
-            "4. What a VALID finding looks like here + the minimal PoC to capture.\n"
-            "5. Common false-positive / N-A pitfalls to avoid for this class.\n"
-            "Be specific to the program context above — do not give generic WSTG boilerplate.")
+            "DRIVE this test on THIS engagement, as a tight sequence — narrate each move briefly:\n"
+            "1. Pin the exact surface: name the real in-scope+paying hosts/endpoints/params above this "
+            "test applies to. If you need to see the live app, DRIVE Brave to navigate and read the "
+            "DOM/JS/network.\n"
+            "2. Execute it with the right primitive: use the `burp` MCP (Repeater to replay/modify the "
+            "actual request, Intruder for controlled fuzzing, Autorize for cross-role/cross-tenant "
+            "IDOR/BOLA) and/or the `brave` MCP for browser-driven & client-side checks; or hand the "
+            "exact recon-ctl command (e.g. `recon-params confirm xss <host>`) when a pipeline lane is "
+            "the right SAFE confirm primitive. Read-only by default.\n"
+            "3. If it needs auth/accounts, follow the ACCOUNTS rule below (prompt + drive signup), then "
+            "resume with the 2-owned-account swap.\n"
+            "4. Adjudicate: CONFIRMED primitive (state the minimal reproducible PoC), LEAD (name the "
+            "operator's authed step to close it), N-A, or clean pass.\n"
+            "5. Call out this class's common false-positive / N-A pitfalls so nothing is overclaimed.\n"
+            "Be specific to the program context above — no generic WSTG boilerplate.\n\n"
+            f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
     else:
         g = STRIDE_GUIDE.get((ident or "").upper()[:1], {})
-        head = (f"You are guiding a bug-bounty operator through STRIDE threat modelling — "
-                f"category {ident.upper()[:1]} ({g.get('name', '')}) — for THIS engagement.")
+        head = (f"You are the operator's co-pilot DRIVING STRIDE threat modelling — category "
+                f"{ident.upper()[:1]} ({g.get('name', '')}) — for THIS engagement.")
         body = (
             f"Category focus: {g.get('prompt', '')}\n\n"
             "Enumerate CONCRETE threats in this category over the app's actual assets, roles and "
             "data-flows above. For each threat: name the specific host/endpoint/flow, map it to the "
             "WSTG test(s) that confirm it, and state whether it's unauth-testable or needs two owned "
-            "accounts. Rank by likely payout/impact and end with the 2-3 to test first.")
-    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_DOCTRINE}"
+            "accounts. Where a threat is quickly checkable UNAUTH, DRIVE Brave/`burp` to sanity-check "
+            "it now (read-only, in-scope+paying). Rank by likely payout/impact and end with the 2-3 to "
+            "test first.\n\n"
+            f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
+    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_DOCTRINE}\n\n{_STEP_RESULT}"

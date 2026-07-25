@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFetch } from "../hooks";
-import { Panel, Badge, Empty, Spinner, SortTh } from "../components/ui";
+import { Panel, Badge, Empty, Spinner, SortTh, Dot } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { TaskConsole } from "../components/TaskConsole";
 import { LeadActions, useHostActions } from "../components/LeadActions";
@@ -426,6 +426,37 @@ function HostRow({ h, expanded, onToggle, onDrawer, actions, onTask, onChanged }
 // --- Guided walkthrough: STRIDE → WSTG, one step at a time, AI-driven --------
 type GuideStep = { phase: "stride" | "wstg"; key: string };
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The guide prompt asks Claude to end with `STEP-RESULT: <done|finding|na|manual> — <summary>`.
+// The output is raw stream-json, so the sentinel lives inside a JSON string; scan the joined
+// text and stop the summary at the first quote / escape / real newline. Last match wins.
+function parseStepResult(raw: string): { status: "done" | "finding" | "na" | "manual"; summary: string } {
+  const ms = [...raw.matchAll(/STEP-RESULT:\s*(done|finding|na|manual)\b[ \t]*[—:-]*[ \t]*([^\r\n"\\]*)/gi)];
+  const m = ms[ms.length - 1];
+  if (!m) return { status: "done", summary: "" };
+  return { status: m[1].toLowerCase() as any, summary: (m[2] || "").replace(/\s+/g, " ").trim().slice(0, 400) };
+}
+
+// Poll a spawned guide task until it leaves `running` (or auto-drive is cancelled / times out).
+async function pollGuideTask(tid: number, alive: () => boolean, maxMs = 6 * 60 * 1000):
+  Promise<{ state: string; text: string }> {
+  const t0 = Date.now();
+  const read = async () => {
+    try {
+      const r = await api.get<{ state: string; lines: string[] }>(`/api/tasks/${tid}`);
+      return { state: r.state, text: (r.lines || []).join("\n") };
+    } catch { return null; }
+  };
+  while (alive() && Date.now() - t0 < maxMs) {
+    await sleep(2500);
+    if (!alive()) break;
+    const r = await read();
+    if (r && r.state !== "running") return r;
+  }
+  return (await read()) || { state: "unknown", text: "" };
+}
+
 function GuidedTab({ ws, onChanged, onTask }:
   { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void }) {
   const toast = useToast();
@@ -436,6 +467,8 @@ function GuidedTab({ ws, onChanged, onTask }:
   const [host, setHost] = useState("");
   const [canned, setCanned] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
+  const [auto, setAuto] = useState(false);
+  const [driveInfo, setDriveInfo] = useState<{ n: number; total: number; label: string } | null>(null);
 
   // ordered walkthrough: 6 STRIDE categories, then all WSTG tests in canonical order
   const steps = useMemo<GuideStep[]>(() => [
@@ -476,6 +509,93 @@ function GuidedTab({ ws, onChanged, onTask }:
     } catch (e: any) { toast("err", e.message); }
   };
 
+  // --- Auto-drive: walk uncovered steps semi-autonomously ---------------------
+  // Guide the current uncovered step with Claude, stream it into the TaskConsole, auto-mark it
+  // (done / finding / na) + write an outcome note when the task finishes, then advance. Pauses
+  // naturally on a finding, a step needing manual action (account signup / operator-run tool), or
+  // a failure — and whenever the operator toggles it off. Refs keep the async loop off stale state.
+  const autoRef = useRef(false); autoRef.current = auto;
+  const wsRef = useRef(ws); wsRef.current = ws;
+  const hostRef = useRef(host); hostRef.current = host;
+  const clampedRef = useRef(clamped); clampedRef.current = clamped;
+  const stepsRef = useRef(steps); stepsRef.current = steps;
+
+  const coveredNow = (s: GuideStep): boolean => {
+    const w = wsRef.current;
+    return s.phase === "stride"
+      ? (w.stride[s.key as keyof StrideBoardT] || []).length > 0
+      : (w.wstg.find((x) => x.id === s.key)?.status || "todo") !== "todo";
+  };
+
+  useEffect(() => {
+    if (!auto || isDemo()) return;
+    let cancelled = false;
+    const alive = () => !cancelled && autoRef.current;
+    const localDone = new Set<string>();
+    const stepsL = stepsRef.current;
+    const covered = (s: GuideStep) => localDone.has(s.phase + s.key) || coveredNow(s);
+    const findNext = (from: number) => {
+      for (let i = 1; i <= stepsL.length; i++) {
+        const j = (from + i) % stepsL.length;
+        if (!covered(stepsL[j])) return j;
+      }
+      return -1;
+    };
+
+    const driveStep = async (s: GuideStep, j: number):
+      Promise<{ pause: boolean; reason?: string; err?: boolean }> => {
+      setDriveInfo({ n: j + 1, total: stepsL.length, label: s.phase === "stride" ? `STRIDE ${s.key}` : s.key });
+      let tid: number;
+      try {
+        const b: any = { phase: s.phase, id: s.key };
+        if (s.phase === "wstg" && hostRef.current) b.host = hostRef.current;
+        const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`, b);
+        tid = t.id; onTask(t.id);
+      } catch (e: any) { return { pause: true, reason: `guide spawn failed: ${e.message}`, err: true }; }
+
+      const res = await pollGuideTask(tid, alive);
+      if (!alive()) return { pause: false };
+      if (res.state === "failed") return { pause: true, reason: `guide task #${tid} failed`, err: true };
+
+      const { status, summary } = parseStepResult(res.text);
+      const note = `[auto-drive #${tid}] ${summary || "Claude drove this step — see task output."}`.slice(0, 1900);
+      try {
+        if (s.phase === "wstg") {
+          const st = status === "finding" ? "finding" : status === "na" ? "na"
+            : status === "manual" ? "in-progress" : "done";
+          await api.action(`/api/workspaces/${enc}/wstg`, { id: s.key, status: st, note });
+        } else {
+          await api.action(`/api/workspaces/${enc}/stride`,
+            { cat: s.key, threat: `[auto-drive] ${summary || `threat-modeled via Claude — task #${tid}`}` });
+        }
+        onChanged();
+      } catch (e: any) { return { pause: true, reason: `auto-mark failed: ${e.message}`, err: true }; }
+
+      localDone.add(s.phase + s.key);
+      if (status === "manual")
+        return { pause: true, reason: `${s.key} needs a manual action (account signup / operator-run tool) — paused` };
+      if (status === "finding")
+        return { pause: true, reason: `${s.key} → FINDING flagged — paused for you to review` };
+      return { pause: false };
+    };
+
+    (async () => {
+      let j = coveredNow(stepsL[clampedRef.current]) ? findNext(clampedRef.current) : clampedRef.current;
+      while (alive()) {
+        if (j < 0) { toast("ok", "auto-drive complete — every step is covered"); setAuto(false); break; }
+        setIdx(j);
+        const out = await driveStep(stepsL[j], j);
+        if (!alive()) break;
+        if (out.pause) { toast(out.err ? "err" : "info", out.reason || "auto-drive paused"); setAuto(false); break; }
+        j = findNext(j);
+      }
+      setDriveInfo(null);
+    })();
+
+    return () => { cancelled = true; setDriveInfo(null); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto]);
+
   if (!steps.length) return <Panel><Empty>walkthrough not initialized</Empty></Panel>;
 
   return (
@@ -499,11 +619,28 @@ function GuidedTab({ ws, onChanged, onTask }:
             <CoverageBar done={wstgCovered} total={ws.wstg.length} height={6} />
           </div>
           <Btn size="sm" variant="primary" onClick={jumpNextUncovered}>next uncovered →</Btn>
+          <button onClick={() => setAuto((v) => !v)} disabled={isDemo()} title="let Claude drive each uncovered step, mark it, and advance"
+            className={`mono rounded border px-2 py-1 text-[11px] transition disabled:opacity-40 ${auto
+              ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+              : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
+            {auto ? "⏸ pause auto-drive" : "▶ auto-drive"}
+          </button>
           <button onClick={() => setShowMap((v) => !v)}
             className="mono rounded border border-[var(--color-border-bright)] px-2 py-1 text-[11px] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]">
             {showMap ? "hide map" : "all steps"}
           </button>
         </div>
+        {auto && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--color-accent)]/20 pt-2">
+            <Dot color="var(--color-accent)" pulse />
+            <span className="mono text-[10px] text-[var(--color-accent)]">
+              {driveInfo ? `auto-driving · step ${driveInfo.n}/${driveInfo.total} · ${driveInfo.label}` : "auto-drive armed — starting…"}
+            </span>
+            <span className="text-[10px] text-[var(--color-ink-faint)]">
+              Claude guides → marks (done/finding/na) + notes → advances. Pauses on a finding or a step needing accounts/tools. Burp/Brave driving needs those services running.
+            </span>
+          </div>
+        )}
         {showMap && <StepMap ws={ws} steps={steps} focus={clamped} isCovered={isCovered} onPick={setIdx} />}
       </Panel>
 
