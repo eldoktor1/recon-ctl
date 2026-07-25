@@ -44,6 +44,10 @@ SEEN="${HUNTER_SEEN:-$STATE_DIR/hunter_seen.txt}"        # sliding window of hun
 KILL_FILE="$STATE_DIR/kill/v2_ai_hunter"
 BRIEF_DIR="${BRIEF_DIR:-$BASE_DIR/briefings}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
+# AI failover wrapper — Claude, falling over to the local Ollama model on a usage limit
+# (bidirectional; scripts/ai_invoke.sh). Falls back to the raw claude binary if absent.
+AI_INVOKE="${AI_INVOKE:-$SCRIPT_DIR/ai_invoke.sh}"; [[ -x "$AI_INVOKE" ]] || AI_INVOKE="$CLAUDE_BIN"
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 HUNTER_MODEL="${HUNTER_MODEL:-opus}"            # the creative hunt = frontier model (XBOW model-alloying)
 # Adjudication (judging real probe responses vs expected) is discriminative, not creative — a cheaper
 # model does it well. Defaults to HUNTER_MODEL (no behaviour change); set HUNTER_ADJ_MODEL=sonnet in
@@ -57,7 +61,8 @@ HUNTER_BODY_CAP="${HUNTER_BODY_CAP:-1200}"      # probe-body chars fed back to a
 es() { curl -fsS -m 25 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 
 mkdir -p "$STATE_DIR" "$BRIEF_DIR" "$(dirname "$KILL_FILE")"; touch "$SEEN"
-[[ -n "$CLAUDE_BIN" && -x "$CLAUDE_BIN" ]] || { warn "claude CLI not found (need Max OAuth as d0k)"; exit 0; }
+[[ -n "$CLAUDE_BIN" && -x "$CLAUDE_BIN" ]] || curl -s --max-time 5 "$OLLAMA_URL/api/tags" >/dev/null 2>&1 \
+  || { warn "claude CLI not found (need Max OAuth as d0k) and no local fallback — skipping"; exit 0; }
 command -v jq >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 [[ -f "$KILL_FILE" ]] && { warn "killed by $KILL_FILE"; exit 0; }
 [[ -f "$STATE_DIR/vpn_down" ]] && { warn "vpn_down — probes would fail-closed; skip"; exit 0; }
@@ -83,7 +88,7 @@ ADJ_SCHEMA='{"type":"object","properties":{
 
 claude_json() {  # claude_json <model> <schema> <prompt>  -> .structured_output on stdout (or empty)
   local model="$1" schema="$2" prompt="$3" out
-  out="$(timeout "$HUNTER_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$model" \
+  out="$(timeout "$HUNTER_TIMEOUT" "$AI_INVOKE" -p "$prompt" --model "$model" \
         --permission-mode dontAsk --json-schema "$schema" --output-format json \
         --no-session-persistence </dev/null 2>/dev/null)" || return 1
   printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null

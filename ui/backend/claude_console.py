@@ -292,11 +292,38 @@ def delete_session(sid: str) -> dict:
     return {"ok": True, "session_id": sid, "removed": removed}
 
 
+def _fallback_state() -> dict:
+    """Runtime AI-failover state written by scripts/ai_invoke.sh.
+
+    Reflects whether the pipeline is currently running on Claude or has failed over to the
+    local Ollama model (WhiteRabbitNeo) because Claude hit a usage limit. Returns safe
+    defaults (claude active, no fallback) if the state file is absent/unreadable.
+    """
+    default = {"active_provider": "claude", "fallback_active": False,
+               "fallback_reason": "", "claude_reset_at": None}
+    try:
+        f = config.STATE_DIR / "ai_fallback.json"
+        if not f.exists():
+            return default
+        d = json.loads(f.read_text())
+        active = (d.get("active") or "claude").lower()
+        return {
+            "active_provider": active,
+            "fallback_active": active != "claude",
+            "fallback_reason": d.get("reason") or "",
+            "claude_reset_at": d.get("claude_reset_at"),
+        }
+    except Exception:
+        return default
+
+
 def available() -> dict:
     """Frontend gate: is the console wired up, and which AI provider is active?
 
     `provider`/`providers` let the Settings UI show + (future) switch the model vendor. Claude
     stays the turnkey default; other providers report `wired:false` until their launcher exists.
+    `active_provider`/`fallback_active` reflect the RUNTIME failover state (claude vs local
+    Ollama) driven by scripts/ai_invoke.sh — distinct from the configured `provider`.
     """
     bin_ok = False
     try:
@@ -327,4 +354,5 @@ def available() -> dict:
         "provider_label": active["label"],
         "provider_wired": active_wired,
         "providers": list(listed.values()),
+        **_fallback_state(),
     }

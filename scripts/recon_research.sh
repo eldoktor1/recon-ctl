@@ -50,6 +50,11 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
+# AI failover wrapper (scripts/ai_invoke.sh): Claude → local Ollama on a usage limit.
+# NOTE: the local fallback has NO WebSearch/WebFetch (deferred capability), so a fallback
+# digest is NOT web-grounded — the downstream junk-GUARD + ⚠️/version-verify discipline and
+# review-only-for-existing-KB still apply. Falls back to raw claude if the wrapper is absent.
+AI_INVOKE="${AI_INVOKE:-$SCRIPT_DIR/ai_invoke.sh}"; [[ -x "$AI_INVOKE" ]] || AI_INVOKE="$CLAUDE_BIN"
 RESEARCH_MODEL="${RESEARCH_MODEL:-sonnet}"
 RESEARCH_TIMEOUT="${RESEARCH_TIMEOUT:-900}"
 RESEARCH_GIT_PUSH="${RESEARCH_GIT_PUSH:-1}"
@@ -226,7 +231,7 @@ run_topic() {
   [[ -n "$(topic_task "$topic")" ]] || { warn "unknown topic: $topic"; return 1; }
 
   log "$topic — researching (model=$RESEARCH_MODEL, WebSearch/WebFetch)…"
-  timeout "$RESEARCH_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" --model "$RESEARCH_MODEL" \
+  timeout "$RESEARCH_TIMEOUT" "$AI_INVOKE" -p "$prompt" --model "$RESEARCH_MODEL" \
     --permission-mode dontAsk --allowedTools "WebSearch WebFetch" > "$raw" 2>/dev/null || true
   if [[ ! -s "$raw" ]]; then warn "$topic — no research output (auth/timeout?)"; return 0; fi
 

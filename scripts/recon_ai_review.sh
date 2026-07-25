@@ -44,6 +44,11 @@ V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
 STATE_PY="${STATE_PY:-$SCRIPT_DIR/../engine/state.py}"
 # absolute path — claude is a native install in ~/.local/bin (not always on PATH)
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
+# AI failover wrapper — routes generation through Claude, falling over to the local Ollama
+# model when Claude hits a usage limit (bidirectional; see scripts/ai_invoke.sh). Falls back
+# to the raw claude binary if the wrapper is missing (reversible/no-op).
+AI_INVOKE="${AI_INVOKE:-$SCRIPT_DIR/ai_invoke.sh}"; [[ -x "$AI_INVOKE" ]] || AI_INVOKE="$CLAUDE_BIN"
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"           # verification model (match-to-task: sonnet)
 CLAUDE_ESCALATE="${CLAUDE_ESCALATE:-1}"          # 1 = re-judge the hard calls with the big model
 CLAUDE_ESCALATE_MODEL="${CLAUDE_ESCALATE_MODEL:-opus}"  # the "hard call" model
@@ -94,9 +99,15 @@ command -v python3 >/dev/null 2>&1 || { warn "python3 missing"; exit 0; }
 command -v jq      >/dev/null 2>&1 || { warn "jq missing"; exit 0; }
 [[ -f "$STATE_PY" ]] || { warn "state.py missing"; exit 0; }
 
-# one-time headless sanity (cheap) — bail quietly if auth/headless is broken
-timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK" \
-  || { warn "claude headless not responding (auth?) — skipping"; exit 0; }
+# one-time headless sanity (cheap) — prefer Claude; if it's limit-blocked/unresponsive but
+# the local Ollama fallback is reachable, route via ai_invoke.sh instead of skipping.
+if ! timeout 60 "$CLAUDE_BIN" -p "Reply with exactly: OK" 2>/dev/null | grep -q "OK"; then
+  if curl -s --max-time 5 "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
+    warn "claude headless not responding — routing via ai_invoke.sh fallback (local model)"
+  else
+    warn "claude headless not responding (auth?) and no local fallback — skipping"; exit 0
+  fi
+fi
 
 pending="$(V3_DB="$V3_DB" python3 "$STATE_PY" ai-pending "$AI_REVIEW_BATCH" 2>/dev/null)"
 n="$(printf '%s' "$pending" | jq 'length' 2>/dev/null || echo 0)"
@@ -185,7 +196,7 @@ judge() {
   fi
   local ledger="$EV_DIR/probes.log"; : > "$ledger"
   while : ; do
-    out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_prompt "$f" "$kb" "$pr_results")" \
+    out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$AI_INVOKE" -p "$(_prompt "$f" "$kb" "$pr_results")" \
             --model "$model" "${targs[@]}" --no-session-persistence \
             --json-schema "$VERDICT_SCHEMA" --output-format json </dev/null 2>/dev/null )"
     so="$(printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null)"
@@ -280,7 +291,7 @@ lens_vote() {
   pr="$(cat "$EV_DIR/pr.txt" 2>/dev/null || true)"
   local -a targs
   if [[ "$HAS_SHOT" == "1" ]]; then targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk); else targs=(--tools ""); fi
-  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(_lens_prompt "$lens" "$f" "$kb" "$pr")" \
+  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$AI_INVOKE" -p "$(_lens_prompt "$lens" "$f" "$kb" "$pr")" \
           --model "$model" "${targs[@]}" --no-session-persistence --json-schema "$LENS_SCHEMA" --output-format json </dev/null 2>/dev/null )"
   so="$(printf '%s' "$out" | jq -c '.structured_output // empty' 2>/dev/null)"
   v="$(printf '%s' "$so" | jq -r '.vote // "unsure"' 2>/dev/null)"
@@ -363,7 +374,7 @@ author_report() {
   pr="$(cat "$EV_DIR/pr.txt" 2>/dev/null || true)"
   local -a targs
   if [[ "$HAS_SHOT" == "1" ]]; then targs=(--tools Read --add-dir "$EV_DIR" --permission-mode dontAsk); shotline="A screenshot ./screenshot.jpg is in your working dir — view it as evidence."; else targs=(--tools ""); fi
-  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$CLAUDE_BIN" -p "$(cat <<EOF
+  out="$( cd "${EV_DIR:-/tmp}" && timeout "$CLAUDE_TIMEOUT" "$AI_INVOKE" -p "$(cat <<EOF
 You are writing a bug-bounty report for a CONFIRMED, panel-validated finding. Produce a
 high-quality, HONEST report packet. CRITICAL: do NOT overclaim severity — an overclaimed
 report gets closed N/A and damages researcher signal. Rate severity to what a triager would
