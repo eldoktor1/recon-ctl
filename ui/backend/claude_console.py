@@ -35,13 +35,70 @@ def resolve_model(name: str | None) -> str:
     return config.CONSOLE_MODELS.get(key, config.CONSOLE_MODELS[config.CONSOLE_DEFAULT_MODEL])
 
 
-def build_argv(session_id: str, message: str, model: str | None = None) -> list[str]:
-    argv = ["bash", str(config.CONSOLE_SH), session_id, message]
-    resolved = resolve_model(model)
+# --------------------------------------------------------------------------- providers
+# Pluggable AI-provider registry. Claude is the ONLY turnkey (fully-wired) entry; other
+# vendors are config-scaffolded — the operator brings a launcher via AI_PROVIDER_CMD that
+# honours the same positional contract (`<session_id> <message> [model] [perm]`) and streams
+# to the spool log. To add a provider WITHOUT touching this file: set AI_PROVIDER=<key>,
+# AI_PROVIDER_CMD=<launcher>, AI_PROVIDER_MODELS=<m1,m2>. To add one WITH a first-class entry,
+# append a dict of this shape to PROVIDERS:
+#   {"key","label","wired"(bool),"models"(list[str]),"build"(fn(sid,msg,model)->argv),
+#    "available"(fn()->bool)}
+# HARD NOTE: any non-Claude provider must run under its vendor's own cyber-verification /
+# authorization program to perform offensive recon at full capability. Claude ships wired;
+# everything else is scaffolding until its launcher is supplied + verified.
+
+
+def _claude_argv(session_id: str, message: str, model: str | None) -> list[str]:
     # positional: <session> <message> [model] [perm]
-    argv.append(resolved)            # may be "" (default model)
-    argv.append(config.CONSOLE_PERM)
-    return argv
+    return ["bash", str(config.CONSOLE_SH), session_id, message,
+            resolve_model(model), config.CONSOLE_PERM]
+
+
+def _claude_available() -> bool:
+    return config.CONSOLE_SH.exists()
+
+
+def _custom_argv(session_id: str, message: str, model: str | None) -> list[str]:
+    """Generic launcher for a config-supplied provider (AI_PROVIDER_CMD). Same positional
+    contract as the Claude console script; `model` passes through verbatim (vendor-defined)."""
+    return ["bash", config.AI_PROVIDER_CMD, session_id, message, (model or ""), config.CONSOLE_PERM]
+
+
+def _custom_available() -> bool:
+    return bool(config.AI_PROVIDER_CMD)
+
+
+# Registry — Claude populated + wired; a config-scaffolded provider is synthesised on demand.
+PROVIDERS: dict[str, dict] = {
+    "claude": {
+        "key": "claude", "label": "Claude (Anthropic)", "wired": True,
+        "models": list(config.CONSOLE_MODELS.keys()),
+        "build": _claude_argv, "available": _claude_available,
+    },
+}
+
+
+def _provider(key: str | None = None) -> dict:
+    """Resolve the active provider spec. Falls back to the turnkey Claude entry so the console
+    NEVER breaks on a mis-set AI_PROVIDER. A configured non-Claude key becomes a scaffolded,
+    not-wired entry driven by AI_PROVIDER_CMD."""
+    k = (key or config.AI_PROVIDER or "claude").lower()
+    if k in PROVIDERS:
+        return PROVIDERS[k]
+    if config.AI_PROVIDER_CMD:
+        return {"key": k, "label": k.title(), "wired": True,
+                "models": config.AI_PROVIDER_MODELS or ["default"],
+                "build": _custom_argv, "available": _custom_available}
+    # unknown key, no launcher configured -> report it (not wired) but drive Claude.
+    return {**PROVIDERS["claude"], "key": k, "label": k.title(), "wired": False}
+
+
+def build_argv(session_id: str, message: str, model: str | None = None) -> list[str]:
+    """Build the launch argv for the ACTIVE provider (Claude by default)."""
+    p = _provider()
+    builder = p.get("build") or _claude_argv
+    return builder(session_id, message, model)
 
 
 # --------------------------------------------------------------------------- sessions
@@ -236,7 +293,11 @@ def delete_session(sid: str) -> dict:
 
 
 def available() -> dict:
-    """Frontend gate: is the console wired up on this box?"""
+    """Frontend gate: is the console wired up, and which AI provider is active?
+
+    `provider`/`providers` let the Settings UI show + (future) switch the model vendor. Claude
+    stays the turnkey default; other providers report `wired:false` until their launcher exists.
+    """
     bin_ok = False
     try:
         from pathlib import Path
@@ -246,9 +307,24 @@ def available() -> dict:
         bin_ok = cb.exists()
     except Exception:
         pass
+    active = _provider()
+    try:
+        active_wired = bool(active.get("wired")) and bool((active.get("available") or (lambda: False))())
+    except Exception:
+        active_wired = False
+    # advertised list = the first-class registry + (if configured) the active custom provider
+    listed = {k: {"key": v["key"], "label": v["label"], "wired": bool(v["wired"]),
+                  "models": v.get("models", [])} for k, v in PROVIDERS.items()}
+    if active["key"] not in listed:
+        listed[active["key"]] = {"key": active["key"], "label": active["label"],
+                                 "wired": bool(active.get("wired")), "models": active.get("models", [])}
     return {
         "available": config.CONSOLE_SH.exists(),
         "claude_bin": bin_ok,
-        "models": list(config.CONSOLE_MODELS.keys()),
+        "models": active.get("models", list(config.CONSOLE_MODELS.keys())),
         "perm": config.CONSOLE_PERM,
+        "provider": active["key"],
+        "provider_label": active["label"],
+        "provider_wired": active_wired,
+        "providers": list(listed.values()),
     }

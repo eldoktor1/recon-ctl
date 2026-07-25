@@ -100,9 +100,11 @@ async def api_overview():
 @app.get("/api/findings")
 async def api_findings(state: str | None = None, program: str | None = None,
                        vuln_class: str | None = None, verdict: str | None = None,
-                       q: str | None = None, limit: int = 100, offset: int = 0):
+                       q: str | None = None, sort: str = "recent", order: str = "desc",
+                       limit: int = 100, offset: int = 0):
     return findings.list_findings(state=state, program=program, vuln_class=vuln_class,
-                                  verdict=verdict, q=q, limit=min(limit, 500), offset=offset)
+                                  verdict=verdict, q=q, sort=sort, order=order,
+                                  limit=min(limit, 500), offset=offset)
 
 
 @app.get("/api/findings/facets")
@@ -123,10 +125,13 @@ async def api_finding(fid: int):
 async def api_assets(q: str | None = None, program: str | None = None, priority: str | None = None,
                      cls: str | None = None, tech: str | None = None, kev: bool = False,
                      fresh: bool = False, pays: bool = False, include_benched: bool = False,
+                     include_oos: bool = False, include_nopay: bool = False,
+                     sort: str = "triage_score", order: str = "desc",
                      limit: int = 100, offset: int = 0):
     return await es.search(q=q, program=program, priority=priority, cls=cls, tech=tech, kev=kev,
                            fresh=fresh, pays=pays, include_benched=include_benched,
-                           limit=limit, offset=offset)
+                           include_oos=include_oos, include_nopay=include_nopay,
+                           sort=sort, order=order, limit=limit, offset=offset)
 
 
 @app.get("/api/assets/facets")
@@ -135,8 +140,11 @@ async def api_asset_facets():
 
 
 @app.get("/api/leads")
-async def api_leads(pays_only: bool = True, include_dismissed: bool = False):
-    data = await es.active_leads(pays_only=pays_only)
+async def api_leads(pays_only: bool = True, include_dismissed: bool = False,
+                    include_oos: bool = False, include_nopay: bool = False):
+    # `pays_only` stays for back-compat: pays_only=False is the same as include_nopay=True.
+    data = await es.active_leads(include_oos=include_oos,
+                                 include_nopay=(include_nopay or not pays_only))
     if not include_dismissed:
         killed = files.killed_host_set()
         for b in data.get("buckets", []):
@@ -248,7 +256,8 @@ async def api_dismiss(host: str, body: dict = Depends(safety.require_confirm)):
     """Mark a lead/host FP or not-actionable — records a DEAD-verdict note so it
     stops being re-served in the worklist + nightly briefing (until re-armed)."""
     return await actions.dismiss(host, (body.get("kind") or "not-actionable").strip(),
-                                 (body.get("reason") or "").strip())
+                                 (body.get("reason") or "").strip(),
+                                 (body.get("vuln_class") or "").strip())
 
 
 @app.post("/api/hosts/{host}/fp")
@@ -268,6 +277,27 @@ async def api_scope(host: str):
 @app.get("/api/lanes")
 async def api_lanes():
     return [{"lane": k, **v} for k, v in LANES.items()]
+
+
+@app.get("/api/lanes/activity")
+async def api_lanes_activity():
+    """Full daemon-lane view (~50 lanes): killswitch state + yield + liveness for EVERY
+    supervised lane, not just the on-demand LANES. Read-only (token-gated by the middleware)."""
+    yl = None
+    try:
+        r = await run_observability("json")
+        j = r.json()
+        if isinstance(j, dict):
+            yl = (j.get("yield_audit") or {}).get("lanes")
+    except Exception:
+        yl = None
+    return daemon.lane_activity(yl)
+
+
+@app.get("/api/lanes/{lane}/log")
+async def api_lane_log(lane: str, tail: int = 200):
+    """Tail one lane's log (its own file if present, else the daemon log filtered to the lane)."""
+    return {"lane": lane, "lines": daemon.lane_log(lane, min(max(tail, 1), 1000))}
 
 
 @app.get("/api/tasks")
@@ -493,7 +523,9 @@ async def api_search(q: str):
     import asyncio as _a
 
     async def hosts():
-        r = await es.search(q=q, limit=8, include_benched=True)
+        # global search casts wide — include OOS + non-paying so nothing is hidden
+        r = await es.search(q=q, limit=8, include_benched=True,
+                            include_oos=True, include_nopay=True)
         return r.get("items", [])
 
     hosts_r, = await _a.gather(hosts())

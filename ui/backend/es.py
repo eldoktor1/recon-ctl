@@ -16,12 +16,25 @@ from . import config
 SOURCE_FIELDS = [
     "host", "triage_priority", "triage_score", "triage_payout_tier", "triage_program",
     "triage_classes", "triage_kev_match", "triage_kev_cves", "triage_true_fresh",
-    "triage_pays", "triage_ignored", "takeover_confirmed", "takeover_service",
+    "triage_pays", "triage_in_scope", "triage_ignored", "takeover_confirmed", "takeover_service",
     "takeover_cname", "takeover_confidence", "takeover_payout", "js_secret_hit", "js_endpoint_hit",
     "host_notes", "host_notes_count", "host_notes_text", "ignore_active",
     "ignore_reason", "ignore_expires_at", "title", "tech", "portscan_critical",
     "first_seen", "last_seen",
 ]
+
+# sortable columns (whitelist — anything else falls back to triage_score)
+SORT_FIELDS = {
+    "triage_score", "triage_priority", "last_seen", "first_seen",
+    "portscan_critical", "host", "triage_payout_tier",
+}
+
+
+def _sort_clause(sort: str, order: str) -> list:
+    """Build an ES sort clause from a whitelisted field + direction."""
+    field = sort if sort in SORT_FIELDS else "triage_score"
+    direction = "asc" if str(order).lower() == "asc" else "desc"
+    return [{field: {"order": direction, "unmapped_type": "long"}}, "_score"]
 
 
 def _client() -> httpx.AsyncClient:
@@ -56,6 +69,7 @@ async def cluster_health() -> dict[str, Any]:
 def _build_query(
     q: str | None, program: str | None, priority: str | None, cls: str | None,
     tech: str | None, kev: bool, fresh: bool, pays: bool, include_benched: bool,
+    include_oos: bool = False, include_nopay: bool = False,
 ) -> dict[str, Any]:
     must: list[dict] = []
     must_not: list[dict] = []
@@ -75,8 +89,12 @@ def _build_query(
         must.append({"term": {"triage_kev_match": True}})
     if fresh:
         must.append({"term": {"triage_true_fresh": True}})
-    if pays:
+    # DEFAULT-GATE the actionable surface: in-scope + paying, unless the caller opts
+    # to include out-of-scope / non-paying assets. (`pays` stays for back-compat.)
+    if not include_nopay or pays:
         must.append({"term": {"triage_pays": True}})
+    if not include_oos:
+        must.append({"term": {"triage_in_scope": True}})
     if not include_benched:
         must_not.append({"range": {"ignore_expires_at": {"gt": "now"}}})
     if not must and not must_not:
@@ -86,15 +104,17 @@ def _build_query(
 
 async def search(
     *, q=None, program=None, priority=None, cls=None, tech=None, kev=False, fresh=False,
-    pays=False, include_benched=False, limit=100, offset=0, sort="triage_score",
+    pays=False, include_benched=False, include_oos=False, include_nopay=False,
+    limit=100, offset=0, sort="triage_score", order="desc",
 ) -> dict[str, Any]:
     body = {
-        "query": _build_query(q, program, priority, cls, tech, kev, fresh, pays, include_benched),
+        "query": _build_query(q, program, priority, cls, tech, kev, fresh, pays,
+                              include_benched, include_oos, include_nopay),
         "_source": SOURCE_FIELDS,
         # ES max_result_window is 10000 — clamp from+size so a deep page never errors
         "from": max(0, min(offset, 10000)),
         "size": max(0, min(limit, 500, 10000 - min(offset, 10000))),
-        "sort": [{sort: {"order": "desc", "unmapped_type": "long"}}, "_score"],
+        "sort": _sort_clause(sort, order),
     }
     try:
         async with _client() as cl:
@@ -124,11 +144,18 @@ _LEAD_BUCKETS = [
 ]
 
 
-async def active_leads(pays_only: bool = True, per_bucket: int = 10) -> dict[str, Any]:
-    """Active (non-benched) actionable leads, bucketed by signal type."""
+async def active_leads(
+    include_oos: bool = False, include_nopay: bool = False, per_bucket: int = 10,
+) -> dict[str, Any]:
+    """Active (non-benched) actionable leads, bucketed by signal type.
+
+    Default surface is in-scope + paying; `include_oos`/`include_nopay` widen it.
+    """
     base_must: list[dict] = []
-    if pays_only:
+    if not include_nopay:
         base_must.append({"term": {"triage_pays": True}})
+    if not include_oos:
+        base_must.append({"term": {"triage_in_scope": True}})
     base_must_not = [{"range": {"ignore_expires_at": {"gt": "now"}}}]
 
     async def one(key, label, sig, exclude):
@@ -157,7 +184,7 @@ async def active_leads(pays_only: bool = True, per_bucket: int = 10) -> dict[str
 
     import asyncio
     results = await asyncio.gather(*[one(k, l, s, e) for k, l, s, e in _LEAD_BUCKETS])
-    return {"buckets": results, "pays_only": pays_only}
+    return {"buckets": results, "pays_only": not include_nopay, "in_scope_only": not include_oos}
 
 
 async def facets() -> dict[str, Any]:

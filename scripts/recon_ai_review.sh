@@ -37,6 +37,7 @@ warn() { printf '[%s AI-REVIEW WARN] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/recon_net.sh" 2>/dev/null || true   # discord_hook / discord_post (#review)
+source "$SCRIPT_DIR/recon_notes.sh" 2>/dev/null || true # note_add -> host_notes.jsonl + ES writeback
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 STATE_DIR="${STATE_DIR:-$BASE_DIR/state}"
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
@@ -69,6 +70,11 @@ AI_REVIEW_BATCH="${AI_REVIEW_BATCH:-15}"         # findings per cycle (quota-bou
 # source of truth. Reversible: INTAKE_PRESCREEN=0.
 INTAKE_PRESCREEN="${INTAKE_PRESCREEN:-1}"
 BRIEF_FILTER="${BRIEF_FILTER:-$SCRIPT_DIR/../tools/brief_filter.py}"
+# AUTO-NOTE-ON-FP (2026-07-25): when the reviewer rules a finding `fp`, drop a CLASS-SCOPED
+# host_note (names the vuln_class + a fp/not-a-finding marker) so note_verdict suppresses only
+# THAT class on the host (never the whole host) and the briefing/UI stop re-serving it. Requires
+# a known vuln_class; dedupe-safe (note_add dedupes on host+note). Reversible: AUTO_NOTE_FP=0.
+AUTO_NOTE_FP="${AUTO_NOTE_FP:-1}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-180}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 INDEX_NAME="${INDEX_NAME:-recon_alive}"
@@ -96,6 +102,9 @@ pending="$(V3_DB="$V3_DB" python3 "$STATE_PY" ai-pending "$AI_REVIEW_BATCH" 2>/d
 n="$(printf '%s' "$pending" | jq 'length' 2>/dev/null || echo 0)"
 [[ "${n:-0}" -gt 0 ]] || { log "no confirmed findings pending validation"; exit 0; }
 log "🧠 ─── CLAUDE VERIFY ─── $n confirmed finding(s) · model=$CLAUDE_MODEL · vision=$VERIFY_VISION · probe=$SAFE_PROBE_ENABLED (Max, no API) ───"
+[[ "$AUTO_NOTE_FP" == "1" ]] && declare -F note_add >/dev/null 2>&1 \
+  && log "   ⚙ auto-note-on-fp ENABLED — fp verdicts drop a class-scoped host_note" \
+  || { [[ "$AUTO_NOTE_FP" == "1" ]] && log "   ⚙ auto-note-on-fp requested but note_add unavailable (recon_notes.sh not sourced)"; }
 
 # ---- prompt (globals: HAS_SHOT, SHOT_AT) -----------------------------------
 _prompt() {
@@ -467,6 +476,16 @@ while IFS= read -r fjson; do
   rm -rf "$EV_DIR" 2>/dev/null || true
 
   V3_DB="$V3_DB" python3 "$STATE_PY" ai-verdict "$fid" "$v" "$c" "$r" >/dev/null 2>&1 || true
+  # AUTO-NOTE-ON-FP: a class-scoped dead note so the briefing/UI stop re-serving this class on the
+  # host. Class-scoped (names $vclass) so it kills ONLY that class, never the whole host. Needs a
+  # known vuln_class + host; note_add dedupes on (host,note) and mirrors to ES (best-effort).
+  if [[ "$AUTO_NOTE_FP" == "1" && "$v" == "fp" && -n "$host" && "$host" != "null" \
+        && -n "$vclass" && "$vclass" != "null" ]] && declare -F note_add >/dev/null 2>&1; then
+    _fpreason="$(printf '%s' "$r" | tr '\n' ' ' | cut -c1-200)"
+    NOTES_NO_SCOPE=1 note_add "$host" \
+      "auto-fp [$vclass]: Claude verify ruled this $vclass a false positive — not a finding. ${_fpreason}" \
+      "ai-fp" >/dev/null 2>&1 || true
+  fi
   # learn: append the outcome to the knowledge base (the RAG-lite corpus the agents query)
   V3_DB="$V3_DB" python3 "$STATE_PY" kb-record "$host" "$program" "$tech" "$sclass" "$vclass" "$v" "$c" "ai-verify" "$r" >/dev/null 2>&1 || true
   # mirror Claude's verdict into ES (asset truth) so dashboards/queries/dedup see it

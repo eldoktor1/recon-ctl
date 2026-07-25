@@ -37,13 +37,28 @@ _DISMISS_KINDS = {
 }
 
 
-async def dismiss(host: str, kind: str = "not-actionable", reason: str = "") -> dict[str, Any]:
-    """Permanently stop re-serving a host: write a host_note with a DEAD verdict so
-    note_verdict.classify_host == dead (the briefing + UI both suppress it). Reopened
-    only by a later 'resume/armed/…' note — that's the 'unless warranted' path."""
+async def dismiss(host: str, kind: str = "not-actionable", reason: str = "",
+                  vuln_class: str = "") -> dict[str, Any]:
+    """Stop re-serving a host — CLASS-SCOPED when a vuln_class is given, WHOLE-HOST otherwise.
+
+    * vuln_class given -> a note that names the class + a fp/not-a-finding marker, WITHOUT any
+      whole-host ('do not re-serve' / 'exhausted') phrasing. note_verdict scopes the kill to that
+      single class (`dead-class`) so every other class on the host stays servable — this avoids
+      the over-suppression bug where dismissing one class killed the whole host.
+    * no vuln_class -> the legacy whole-host DEAD note (exhausted / by-design over the entire host).
+    """
     kind = (kind or "not-actionable").strip().lower()
+    vuln_class = (vuln_class or "").strip()
+    if vuln_class:
+        # class-scoped: name the class + fp marker; NO whole-host/do-not-re words on purpose.
+        text = f"ui-dismiss [class-fp] {vuln_class}: {vuln_class} false positive / not a finding here."
+        if reason:
+            text += f" {reason.strip()}"
+        r = await run_recon("note", host, text)
+        return {"ok": r.ok, "result": r.stdout.strip(),
+                "error": None if r.ok else r.stderr, "verdict": "dead-class", "vuln_class": vuln_class}
     label = _DISMISS_KINDS.get(kind, _DISMISS_KINDS["not-actionable"])
-    # 'false positive' + 'do not re-serve' both trip note_verdict's dead classifier
+    # 'false positive' + 'do not re-serve' both trip note_verdict's whole-host dead classifier
     text = f"ui-dismiss [{kind}]: {label} — false positive / not a finding."
     if reason:
         text += f" {reason.strip()}"
@@ -53,8 +68,16 @@ async def dismiss(host: str, kind: str = "not-actionable", reason: str = "") -> 
 
 
 async def mark_fp(host: str, template_id: str) -> dict[str, Any]:
+    """Add the nuclei template to known_fp.txt AND drop a class-scoped dead note.
+
+    template_id typically encodes the vuln class (e.g. `spring-actuator`, `graphql-*`), so naming
+    it in the note lets note_verdict scope the kill to that class (a template_id with no recognised
+    class stays `dead-ambiguous` = it does NOT kill the host — the safe fallback)."""
     r = await run_recon("fp", host, template_id)
-    return {"ok": r.ok, "result": r.stdout.strip(), "error": None if r.ok else r.stderr}
+    note_text = f"ui-fp [{template_id}]: {template_id} false positive / not a finding here."
+    nr = await run_recon("note", host, note_text)
+    return {"ok": r.ok, "result": r.stdout.strip(), "error": None if r.ok else r.stderr,
+            "note_ok": nr.ok, "verdict": "dead-class"}
 
 
 async def scope(host: str) -> dict[str, Any]:

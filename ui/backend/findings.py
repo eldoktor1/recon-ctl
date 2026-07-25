@@ -19,6 +19,16 @@ LIST_COLS = (
     "bounty, created_at, updated_at, state_changed_at"
 )
 
+# sort key -> SQL column expression (whitelist — never interpolate raw user input)
+SORT_COLUMNS = {
+    "recent": "COALESCE(state_changed_at, updated_at, created_at)",
+    "score": "score",
+    "host": "host",
+    "program": "program",
+    "updated": "updated_at",
+    "created": "created_at",
+}
+
 
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(f"file:{config.FINDINGS_DB}?mode=ro", uri=True, timeout=5)
@@ -52,6 +62,8 @@ def list_findings(
     vuln_class: str | None = None,
     verdict: str | None = None,
     q: str | None = None,
+    sort: str = "recent",
+    order: str = "desc",
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -68,11 +80,14 @@ def list_findings(
         where.append("(host LIKE ? OR url LIKE ? OR program LIKE ?)")
         params += [f"%{q}%"] * 3
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    # safe mapping: user input only selects a fixed column expression + direction
+    col = SORT_COLUMNS.get(sort, SORT_COLUMNS["recent"])
+    direction = "ASC" if str(order).lower() == "asc" else "DESC"
     with closing(_conn()) as c:
         total = c.execute(f"SELECT COUNT(*) n FROM findings{clause}", params).fetchone()["n"]
         rows = c.execute(
             f"SELECT {LIST_COLS} FROM findings{clause} "
-            "ORDER BY COALESCE(state_changed_at, updated_at, created_at) DESC "
+            f"ORDER BY {col} {direction} "
             "LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()

@@ -50,6 +50,20 @@ CONSOLE_MODELS = {
     "haiku": "claude-haiku-4-5-20251001",
 }
 CONSOLE_DEFAULT_MODEL = os.environ.get("RECON_CONSOLE_MODEL", "opus")
+
+# --- Pluggable AI provider (operator: "let anybody bring another model with their
+# Cyber Verification Program") ----------------------------------------------------
+# Claude is the TURNKEY default (fully wired above). Another vendor can be plugged in by
+# config alone: set AI_PROVIDER to its key + AI_PROVIDER_CMD to a launcher that accepts the
+# same positional contract as recon_claude_console.sh — `<session_id> <message> [model] [perm]`
+# — writing stream output to the hunt-spool log the task manager tails. Optionally list its
+# models in AI_PROVIDER_MODELS (comma-separated).
+# IMPORTANT: any non-Claude provider must run under ITS OWN vendor cyber-verification /
+# authorization program to perform offensive recon at full capability. Only Claude ships wired
+# here; other providers are config-scaffolded (the operator supplies the launcher + models).
+AI_PROVIDER = (os.environ.get("AI_PROVIDER", "claude").strip().lower() or "claude")
+AI_PROVIDER_CMD = os.environ.get("AI_PROVIDER_CMD", "").strip()
+AI_PROVIDER_MODELS = [m.strip() for m in os.environ.get("AI_PROVIDER_MODELS", "").split(",") if m.strip()]
 # claude slugifies the cwd to name the project transcript dir:
 # /home/d0k/recon-pipeline -> ~/.claude/projects/-home-d0k-recon-pipeline/
 _PROJ_SLUG = "-" + str(REPO_DIR).strip("/").replace("/", "-")
