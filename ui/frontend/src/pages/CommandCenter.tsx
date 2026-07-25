@@ -7,8 +7,9 @@ import { Panel, Stat, Badge, Dot, Empty, Spinner } from "../components/ui";
 import { useToast } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
 import { TaskConsole } from "../components/TaskConsole";
+import { CompactLeadRow } from "../components/CompactLeadRow";
 import type { Parsed, WLItem, WLSection } from "../components/Worklist";
-import { fmtDuration, fmtNum, stateColor, verdictColor, priorityColor, severityColor } from "../format";
+import { fmtDuration, fmtNum, stateColor, verdictColor, priorityColor, classFromSection } from "../format";
 
 const STATE_ORDER = ["confirmed", "reported", "submitted", "verifying", "scored", "discovered", "dismissed", "lead_exhausted"];
 
@@ -154,28 +155,21 @@ function TonightWidget({ onHost, onTask }: { onHost: (h: string) => void; onTask
         </div>
       }
     >
-      {!data ? <Spinner /> : !shown.length ? <Empty>no briefing generated yet</Empty> : (
-        <div className="max-h-80 space-y-1 overflow-auto">
+      {!data ? <Spinner /> : !shown.length ? (
+        <Empty hint="the 6:30pm briefing hasn't run yet — open the full worklist">no briefing generated yet</Empty>
+      ) : (
+        <div className="max-h-80 space-y-1.5 overflow-auto">
           {shown.map(({ it, s }, i) => (
-            <div key={i} className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-panel-2)]">
-              <span className="shrink-0 text-xs" title={s.title}>{s.emoji}</span>
-              {it.severity && <Badge color={severityColor[it.severity] || "var(--color-ink-dim)"}>{it.severity}</Badge>}
-              {it.hosts[0] ? (
-                <button onClick={() => onHost(it.hosts[0])}
-                  className="mono truncate text-[11px] text-[var(--color-ink)] hover:text-[var(--color-accent)]" title={it.label}>
-                  {it.hosts[0]}
+            <CompactLeadRow key={i} emoji={s.emoji} severity={it.severity} host={it.hosts[0] || null}
+              vulnClass={classFromSection(s.title)} summary={it.label}
+              onHost={onHost}
+              right={it.hosts[0] ? (
+                <button onClick={() => verify(it.hosts[0])} title="run Claude verify"
+                  className="shrink-0 rounded border border-[var(--color-accent)]/40 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/10">
+                  ⚡ verify
                 </button>
-              ) : (
-                <span className="truncate text-[11px] text-[var(--color-ink-dim)]" title={it.label}>{it.label}</span>
-              )}
-              <span className="hidden flex-1 truncate text-[10px] text-[var(--color-ink-faint)] md:block" title={it.label}>{it.label}</span>
-              {it.hosts[0] && (
-                <button onClick={() => verify(it.hosts[0])}
-                  className="ml-auto shrink-0 rounded border border-[var(--color-accent)]/40 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)] opacity-0 transition hover:bg-[var(--color-accent)]/10 group-hover:opacity-100">
-                  verify
-                </button>
-              )}
-            </div>
+              ) : undefined}
+            />
           ))}
           {rows.length > shown.length && (
             <Link to="/leads" className="block px-2 pt-1 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-accent)]">

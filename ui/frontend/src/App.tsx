@@ -10,6 +10,7 @@ import Assets from "./pages/Assets";
 import Leads from "./pages/Leads";
 import Notes from "./pages/Notes";
 import Hunt from "./pages/Hunt";
+import Lanes from "./pages/Lanes";
 import Ops from "./pages/Ops";
 import Telemetry from "./pages/Telemetry";
 import Reports from "./pages/Reports";
@@ -20,6 +21,7 @@ import { ToastProvider } from "./components/controls";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Logo } from "./components/Logo";
 import { CommandPalette } from "./components/CommandPalette";
+import { isDemo } from "./demo";
 
 interface NavItem { to: string; label: string; icon: string; phase?: string }
 
@@ -32,6 +34,7 @@ const NAV: NavItem[] = [
   { to: "/notes", label: "Notes", icon: "✎" },
   { to: "/targets", label: "Target Board", icon: "◈" },
   { to: "/hunt", label: "Hunt Control", icon: "➤" },
+  { to: "/lanes", label: "Lanes", icon: "≣" },
   { to: "/ops", label: "Daemon / Ops", icon: "⚙" },
   { to: "/digest", label: "Digest", icon: "▦" },
   { to: "/telemetry", label: "Telemetry", icon: "▤" },
@@ -60,6 +63,9 @@ function TopBar() {
         />
       </div>
       <div className="flex flex-wrap items-center gap-2">
+        {isDemo() && (
+          <span className="mono rounded border border-[var(--color-accent)] bg-[var(--color-accent)]/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-accent)]" title="synthetic fixtures — no live backend">demo</span>
+        )}
         <Pill label="daemon" value={d?.alive ? `up · ${d.lane_procs} lanes` : "down"}
           color={d?.alive ? "var(--color-good)" : "var(--color-bad)"} pulse={d?.alive} />
         <Pill label="vpn" value={vpn?.up ? "mullvad" : "DOWN"}
@@ -111,6 +117,14 @@ function Sidebar() {
 }
 
 export default function App() {
+  // Demo mode renders the fully-populated UI without a backend or token.
+  if (isDemo()) {
+    return (
+      <ToastProvider>
+        <AppShell />
+      </ToastProvider>
+    );
+  }
   return (
     <ToastProvider>
       <TokenGate>
@@ -140,6 +154,7 @@ function AppShell() {
             <Route path="/notes" element={<Notes />} />
             <Route path="/targets" element={<TargetBoard />} />
             <Route path="/hunt" element={<Hunt />} />
+            <Route path="/lanes" element={<Lanes />} />
             <Route path="/ops" element={<Ops />} />
             <Route path="/digest" element={<Digest />} />
             <Route path="/telemetry" element={<Telemetry />} />

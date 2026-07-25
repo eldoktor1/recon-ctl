@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useFetch } from "../hooks";
-import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
+import { Panel, Badge, Empty, Spinner, Dot, SortTh } from "../components/ui";
 import { Btn } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
 import { priorityColor, asArr } from "../format";
@@ -9,7 +9,7 @@ import { priorityColor, asArr } from "../format";
 interface Asset {
   host: string; triage_program?: string; triage_priority?: string; triage_score?: number;
   triage_classes?: string[]; triage_kev_match?: boolean; triage_true_fresh?: boolean;
-  triage_pays?: boolean; triage_ignored?: boolean; takeover_confirmed?: boolean;
+  triage_pays?: boolean; triage_in_scope?: boolean; triage_ignored?: boolean; takeover_confirmed?: boolean;
   js_secret_hit?: boolean; tech?: string[]; host_notes_count?: number;
 }
 interface AssetList { total: number; items: Asset[]; error?: string }
@@ -26,25 +26,35 @@ export default function Assets() {
   const [toggles, setToggles] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
+  const [sort, setSort] = useState("triage_score");
+  const [order, setOrder] = useState<"asc" | "desc">("desc");
   const { data: facets } = useFetch<Facets>("/api/assets/facets");
 
-  const qs = new URLSearchParams({ limit: "60", offset: String(offset) });
+  const qs = new URLSearchParams({ limit: "60", offset: String(offset), sort, order });
   if (q) qs.set("q", q);
   if (tech) qs.set("tech", tech);
   Object.entries(filters).forEach(([k, v]) => v && qs.set(k, v));
   Object.entries(toggles).forEach(([k, v]) => v && qs.set(k, "true"));
-  const { data, loading } = useFetch<AssetList>(`/api/assets?${qs}`, [q, tech, JSON.stringify(filters), JSON.stringify(toggles), offset]);
+  const { data, loading } = useFetch<AssetList>(`/api/assets?${qs}`, [q, tech, JSON.stringify(filters), JSON.stringify(toggles), offset, sort, order]);
 
   const tog = (k: string) => { setOffset(0); setToggles((t) => ({ ...t, [k]: !t[k] })); };
   const setF = (k: string, v: string) => { setOffset(0); setFilters((f) => ({ ...f, [k]: v })); };
   const setTechF = (t: string) => { setOffset(0); setTech(t); };
+  // click a header: toggle asc/desc if same column, else new column (default desc)
+  const onSort = (col: string) => {
+    setOffset(0);
+    if (sort === col) setOrder((o) => (o === "asc" ? "desc" : "asc"));
+    else { setSort(col); setOrder("desc"); }
+  };
   const anyFilter = q || tech || Object.values(filters).some(Boolean) || Object.values(toggles).some(Boolean);
 
   return (
     <div className="fade-in space-y-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-lg font-semibold">Asset Explorer</h1>
-        <span className="text-xs text-[var(--color-ink-faint)]">{data?.total?.toLocaleString() ?? "—"} match · {(2790000).toLocaleString()}+ hosts</span>
+        <span className="text-xs text-[var(--color-ink-faint)]">
+          {data?.total?.toLocaleString() ?? "—"} match · in-scope + paying by default
+        </span>
       </div>
 
       <div className="space-y-2">
@@ -58,6 +68,8 @@ export default function Assets() {
           <Select label="priority" value={filters.priority} opts={facets?.priorities} onChange={(v) => setF("priority", v)} />
           {["pays", "fresh", "kev"].map((k) => <Toggle key={k} label={k} on={!!toggles[k]} onClick={() => tog(k)} />)}
           <Toggle label="incl. benched" on={!!toggles.include_benched} onClick={() => tog("include_benched")} />
+          <Toggle label="incl. out-of-scope" on={!!toggles.include_oos} onClick={() => tog("include_oos")} />
+          <Toggle label="incl. non-paying" on={!!toggles.include_nopay} onClick={() => tog("include_nopay")} />
           {anyFilter && <Btn size="sm" onClick={() => { setQ(""); setTech(""); setFilters({}); setToggles({}); setOffset(0); }}>clear</Btn>}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -72,16 +84,16 @@ export default function Assets() {
 
       <Panel className="!p-0">
         {loading && !data ? <Spinner /> : data?.error ? <Empty>ES error: {data.error.slice(0, 120)}</Empty> :
-          !data?.items.length ? <Empty>no assets match</Empty> : (
+          !data?.items.length ? <Empty hint={anyFilter ? "loosen a filter or enable the out-of-scope / non-paying toggles" : "the index is scope+pays filtered by default"}>no assets match</Empty> : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">
-                <th className="px-4 py-2 font-medium">pri</th>
-                <th className="px-2 py-2 font-medium">host</th>
-                <th className="px-2 py-2 font-medium">tech</th>
-                <th className="px-2 py-2 font-medium">program</th>
-                <th className="px-2 py-2 font-medium">score</th>
-                <th className="px-4 py-2 text-right font-medium">flags</th>
+              <tr className="border-b border-[var(--color-border)] text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+                <SortTh label="pri" col="triage_priority" active={sort} order={order} onSort={onSort} className="!px-4" />
+                <SortTh label="host" col="host" active={sort} order={order} onSort={onSort} />
+                <SortTh label="tech" />
+                <SortTh label="program" />
+                <SortTh label="score" col="triage_score" active={sort} order={order} onSort={onSort} />
+                <SortTh label="flags" align="right" className="!px-4" />
               </tr>
             </thead>
             <tbody>
@@ -95,7 +107,8 @@ export default function Assets() {
                   <td className="mono px-2 py-2 text-xs">{a.triage_score ?? "—"}</td>
                   <td className="px-4 py-2 text-right">
                     <div className="flex justify-end gap-1">
-                      {a.triage_pays && <Badge color="var(--color-good)">$</Badge>}
+                      <Badge color={a.triage_in_scope === false ? "var(--color-bad)" : "var(--color-good)"} title={a.triage_in_scope === false ? "out of scope" : "in scope"}>{a.triage_in_scope === false ? "oos" : "scope"}</Badge>
+                      <Badge color={a.triage_pays ? "var(--color-good)" : "var(--color-ink-faint)"} title={a.triage_pays ? "pays" : "no payout"}>{a.triage_pays ? "$" : "×$"}</Badge>
                       {a.triage_true_fresh && <Badge color="var(--color-accent)">fresh</Badge>}
                       {a.triage_kev_match && <Badge color="var(--color-bad)">kev</Badge>}
                       {a.takeover_confirmed && <Badge color="var(--color-bad)">takeover</Badge>}

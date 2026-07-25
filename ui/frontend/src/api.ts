@@ -1,5 +1,7 @@
 // Thin API client. Token is kept in localStorage and sent on mutating routes.
 
+import { isDemo, demoGet, demoAction } from "./demo";
+
 const TOKEN_KEY = "recon_ui_token";
 
 export function getToken(): string {
@@ -22,6 +24,16 @@ export async function verifyToken(t: string): Promise<boolean> {
 }
 
 async function req<T>(path: string, opts: RequestInit = {}, _auth = false): Promise<T> {
+  // Demo mode: serve synthetic fixtures without touching the backend.
+  if (isDemo()) {
+    const method = (opts.method || "GET").toUpperCase();
+    if (method === "GET") {
+      const fix = demoGet(path);
+      if (fix !== undefined) return fix as T;
+    } else {
+      return demoAction() as unknown as T;
+    }
+  }
   const headers: Record<string, string> = { ...(opts.headers as any) };
   if (opts.body) headers["Content-Type"] = "application/json";
   // token is required on every /api route (reads included)
@@ -82,4 +94,16 @@ export interface Finding {
   priority?: string | null; confidence?: number; ai_verdict?: string;
   ai_confidence?: number; resolution?: string | null; bounty?: number;
   created_at?: string; updated_at?: string; state_changed_at?: string;
+}
+
+// Live per-lane activity row (GET /api/lanes/activity).
+export interface LaneActivity {
+  lane: string; desc: string; target: boolean; killed: boolean;
+  yield_count: number; last_yield_at: string | number | null; running: boolean;
+}
+
+// AI provider config (GET /api/claude/config).
+export interface ClaudeConfig {
+  provider?: string; providers?: string[]; wired?: boolean;
+  model?: string; auth?: string;
 }

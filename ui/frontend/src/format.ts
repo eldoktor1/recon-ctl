@@ -66,3 +66,49 @@ export const severityColor: Record<string, string> = {
   p2: "var(--color-p2)",
   p3: "var(--color-p3)",
 };
+
+// Rough ordering so a merged (deduped) lead can keep the strongest severity tag.
+const SEVERITY_RANK: Record<string, number> = {
+  critical: 6, p0: 6, elite: 5, high: 5, p1: 5, medium: 3, p2: 3,
+  lead: 2, low: 1, p3: 1,
+};
+export function severityRank(s?: string | null): number {
+  return s ? SEVERITY_RANK[s.toLowerCase()] ?? 0 : 0;
+}
+
+// Vuln-class → accent color for the compact lead tag.
+export const classColor: Record<string, string> = {
+  xss: "var(--color-p1)",
+  sqli: "var(--color-bad)",
+  idor: "var(--color-accent)",
+  bola: "var(--color-accent)",
+  bac: "var(--color-accent)",
+  graphql: "var(--color-info)",
+  ssrf: "var(--color-bad)",
+  takeover: "var(--color-bad)",
+  secret: "var(--color-warn)",
+  cache: "var(--color-info)",
+  wcd: "var(--color-info)",
+  kev: "var(--color-bad)",
+  nday: "var(--color-p1)",
+  bucket: "var(--color-warn)",
+};
+
+// Derive a vuln-class token from a briefing section title (for the compact tag
+// + the class-scoped Mark-FP dead note).
+export function classFromSection(title?: string | null): string | null {
+  if (!title) return null;
+  const t = title.toLowerCase();
+  if (t.includes("xss")) return "xss";
+  if (t.includes("sqli") || t.includes("sql injection")) return "sqli";
+  if (t.includes("graphql")) return "graphql";
+  if (t.includes("idor") || t.includes("bola")) return "idor";
+  if (t.includes("bac") || t.includes("access control") || t.includes("privesc")) return "bac";
+  if (t.includes("ssrf")) return "ssrf";
+  if (t.includes("takeover")) return "takeover";
+  if (t.includes("secret") || t.includes("leak")) return "secret";
+  if (t.includes("cache") || t.includes("wcd")) return "cache";
+  if (t.includes("bucket") || t.includes("s3")) return "bucket";
+  if (t.includes("kev") || t.includes("cve") || t.includes("n-day") || t.includes("nday")) return "nday";
+  return null;
+}

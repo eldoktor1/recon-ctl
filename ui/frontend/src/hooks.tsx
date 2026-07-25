@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, getToken, clearToken, type Status } from "./api";
+import { isDemo, demoGet } from "./demo";
 
 // Generic fetch on TanStack Query — cached, deduped, race-safe, keeps previous
 // data while refetching. Backward-compatible shape: {data, error, loading, refetch}.
@@ -8,6 +9,10 @@ export function useFetch<T>(path: string | null, deps: any[] = []) {
   const q = useQuery<T>({
     queryKey: [path, ...deps],
     queryFn: async ({ signal }) => {
+      if (isDemo()) {
+        const fix = demoGet(path as string);
+        return (fix !== undefined ? fix : null) as T;
+      }
       const r = await fetch(path as string, {
         headers: { "X-Recon-Token": getToken() },
         signal,

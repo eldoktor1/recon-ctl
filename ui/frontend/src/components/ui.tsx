@@ -35,10 +35,11 @@ export function Dot({ color, pulse = false }: { color: string; pulse?: boolean }
   );
 }
 
-export function Badge({ children, color = "var(--color-ink-dim)", filled = false }:
-  { children: ReactNode; color?: string; filled?: boolean }) {
+export function Badge({ children, color = "var(--color-ink-dim)", filled = false, title }:
+  { children: ReactNode; color?: string; filled?: boolean; title?: string }) {
   return (
     <span
+      title={title}
       className="mono inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
       style={
         filled
@@ -62,8 +63,30 @@ export function Pill({ label, value, color, pulse }:
   );
 }
 
-export function Empty({ children }: { children: ReactNode }) {
-  return <div className="py-8 text-center text-sm text-[var(--color-ink-faint)]">{children}</div>;
+export function Empty({ children, hint }: { children: ReactNode; hint?: ReactNode }) {
+  return (
+    <div className="py-10 text-center">
+      <div className="text-sm text-[var(--color-ink-faint)]">{children}</div>
+      {hint && <div className="mt-1.5 text-xs text-[var(--color-ink-faint)] opacity-70">{hint}</div>}
+    </div>
+  );
+}
+
+// Clickable sortable table header. `sortKey` set => active-column arrow + toggle.
+// Columns whose key isn't in the backend's allowed set pass no `col` (static).
+export function SortTh({ label, col, active, order, onSort, align = "left", className = "" }:
+  { label: string; col?: string; active?: string; order?: "asc" | "desc";
+    onSort?: (col: string) => void; align?: "left" | "right"; className?: string }) {
+  const isActive = !!col && col === active;
+  const arrow = isActive ? (order === "asc" ? "▲" : "▼") : "";
+  const clickable = !!col && !!onSort;
+  return (
+    <th className={`px-2 py-2 font-medium ${align === "right" ? "text-right" : "text-left"} ${clickable ? "cursor-pointer select-none hover:text-[var(--color-ink-dim)]" : ""} ${isActive ? "text-[var(--color-accent)]" : ""} ${className}`}
+      onClick={clickable ? () => onSort!(col!) : undefined}
+      title={clickable ? `sort by ${label}` : undefined}>
+      <span className="inline-flex items-center gap-1">{label}{arrow && <span className="text-[9px]">{arrow}</span>}</span>
+    </th>
+  );
 }
 
 export function Spinner() {

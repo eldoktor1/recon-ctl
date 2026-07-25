@@ -1,17 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { Markdown } from "../components/Markdown";
-import { Worklist, type Parsed } from "../components/Worklist";
+import type { Parsed } from "../components/Worklist";
 import { HostDrawer } from "../components/HostDrawer";
 import { TaskConsole } from "../components/TaskConsole";
-import { priorityColor, fmtAgo } from "../format";
+import { CompactLeadRow } from "../components/CompactLeadRow";
+import { LeadActions, useHostActions } from "../components/LeadActions";
+import { api } from "../api";
+import { priorityColor, fmtAgo, classFromSection, severityRank } from "../format";
 
-interface Bucket { key: string; label: string; count: number; hosts: any[]; error?: string }
-interface Leads { buckets: Bucket[] }
+interface BucketHost { host: string; triage_priority?: string; triage_score?: number; triage_pays?: boolean; triage_in_scope?: boolean }
+interface Bucket { key: string; label: string; count: number; hosts: BucketHost[]; error?: string }
+interface Leads { buckets: Bucket[]; suppressed?: number }
 interface Brief { name: string; kind: string; date: string | null; mtime: number }
 
 const bucketColor: Record<string, string> = {
@@ -19,41 +22,63 @@ const bucketColor: Record<string, string> = {
   kev: "var(--color-bad)", fresh: "var(--color-accent)",
 };
 
-// Ordered source switcher — one tab per useful briefing kind (latest wins).
 const SOURCE_ORDER = [
   "tonight", "2IC_tonight", "hunter", "idor_candidates", "xss_candidates",
   "sqli_candidates", "graphql_candidates", "fresh", "targets",
 ];
 
+// A single deduped lead, merged across every briefing source it appears in.
+interface ULead {
+  key: string;
+  host: string | null;
+  vulnClass: string | null;
+  severity: string | null;
+  score: number | null;
+  program: string | null;
+  summary: string;
+  sources: string[];
+  suppressed: boolean;
+  raws: { source: string; raw: string }[];
+}
+
+// Invisible fetcher: one per source, streams its parsed briefing up to the parent
+// so the worklist can merge + dedupe across ALL sources at once.
+function SourceFetcher({ name, kind, onData }:
+  { name: string; kind: string; onData: (kind: string, p: Parsed | null) => void }) {
+  const { data } = useFetch<Parsed>(`/api/briefings/${encodeURIComponent(name)}/parsed`);
+  useEffect(() => { onData(kind, data ?? null); }, [kind, data, onData]);
+  return null;
+}
+
 export default function Leads() {
-  const { data: leads } = useFetch<Leads>("/api/leads");
+  const [inclOos, setInclOos] = useState(false);
+  const [inclNopay, setInclNopay] = useState(false);
+  const qsLeads = new URLSearchParams();
+  if (inclOos) qsLeads.set("include_oos", "true");
+  if (inclNopay) qsLeads.set("include_nopay", "true");
+  const { data: leads } = useFetch<Leads>(`/api/leads?${qsLeads}`, [inclOos, inclNopay]);
   const { data: briefs } = useFetch<Brief[]>("/api/briefings");
+  const hostActions = useHostActions();
+
   const [host, setHost] = useState<string | null>(null);
-  const [active, setActive] = useState<string | null>(null);
+  const [source, setSource] = useState<string>("all");
   const [filter, setFilter] = useState("");
-  const [raw, setRaw] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const [openTask, setOpenTask] = useState<number | null>(null);
+  const [vhost, setVhost] = useState("");
   const toast = useToast();
   const qc = useQueryClient();
-  const [vhost, setVhost] = useState("");
 
-  const dismiss = async (h: string) => {
-    try {
-      await api.action(`/api/hosts/${encodeURIComponent(h)}/dismiss`, { kind: "not-actionable" });
-      toast("ok", `${h} marked not-actionable — won't re-serve`);
-      qc.invalidateQueries();
-    } catch (e: any) { toast("err", e.message); }
-  };
+  const refresh = useCallback(() => qc.invalidateQueries(), [qc]);
 
-  // latest briefing per kind, ordered by SOURCE_ORDER then recency
+  // latest briefing per kind
   const sources = useMemo(() => {
     const latest: Record<string, Brief> = {};
     for (const b of briefs || []) {
       const cur = latest[b.kind];
       if (!cur || b.mtime > cur.mtime) latest[b.kind] = b;
     }
-    const picked = Object.values(latest);
-    return picked.sort((a, b) => {
+    return Object.values(latest).sort((a, b) => {
       const ia = SOURCE_ORDER.findIndex((k) => a.kind.startsWith(k));
       const ib = SOURCE_ORDER.findIndex((k) => b.kind.startsWith(k));
       const ra = ia === -1 ? 99 : ia, rb = ib === -1 ? 99 : ib;
@@ -61,26 +86,85 @@ export default function Leads() {
     });
   }, [briefs]);
 
-  useEffect(() => {
-    if (!active && sources.length) {
-      const t = sources.find((b) => b.kind.startsWith("tonight")) || sources[0];
-      setActive(t.name);
+  // collect parsed briefings from the SourceFetcher children
+  const [parsedByKind, setParsedByKind] = useState<Record<string, Parsed | null>>({});
+  const onData = useCallback((kind: string, p: Parsed | null) => {
+    setParsedByKind((prev) => (prev[kind] === p ? prev : { ...prev, [kind]: p }));
+  }, []);
+
+  // score-by-host from the live ES buckets, to enrich briefing rows
+  const scoreByHost = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const b of leads?.buckets || [])
+      for (const h of b.hosts) if (h.triage_score != null) m[h.host.toLowerCase()] = h.triage_score;
+    return m;
+  }, [leads]);
+
+  // MERGE + DEDUPE across sources by host
+  const merged = useMemo(() => {
+    const map = new Map<string, ULead>();
+    for (const [kind, parsed] of Object.entries(parsedByKind)) {
+      if (!parsed || (source !== "all" && kind !== source)) continue;
+      for (const sec of parsed.sections || []) {
+        const cls = classFromSection(sec.title);
+        for (const it of sec.items) {
+          const h = it.hosts[0] || null;
+          const key = h ? h.toLowerCase() : `∅:${it.label}`;
+          const summary = (it.label || it.raw.split("\n")[0] || "").replace(/[*_`]/g, "").trim();
+          const ex = map.get(key);
+          if (!ex) {
+            map.set(key, {
+              key, host: h, vulnClass: cls, severity: it.severity || null,
+              score: h ? scoreByHost[h.toLowerCase()] ?? null : null,
+              program: it.program || null, summary,
+              sources: [kind.replace(/_candidates$/, "")], suppressed: !!it.suppressed,
+              raws: [{ source: kind, raw: it.raw }],
+            });
+          } else {
+            if (!ex.sources.includes(kind.replace(/_candidates$/, ""))) ex.sources.push(kind.replace(/_candidates$/, ""));
+            if (severityRank(it.severity) > severityRank(ex.severity)) ex.severity = it.severity || ex.severity;
+            if (!ex.vulnClass && cls) ex.vulnClass = cls;
+            if (!ex.program && it.program) ex.program = it.program;
+            ex.suppressed = ex.suppressed && !!it.suppressed; // shown if actionable in ANY source
+            ex.raws.push({ source: kind, raw: it.raw });
+          }
+        }
+      }
     }
-  }, [sources, active]);
+    const f = filter.trim().toLowerCase();
+    return Array.from(map.values())
+      .filter((l) => showHidden || !l.suppressed)
+      .filter((l) => !f || (l.host || "").toLowerCase().includes(f) || l.summary.toLowerCase().includes(f) || (l.program || "").toLowerCase().includes(f) || l.sources.join(" ").includes(f))
+      .sort((a, b) => (severityRank(b.severity) - severityRank(a.severity)) || ((b.score ?? 0) - (a.score ?? 0)));
+  }, [parsedByKind, source, filter, showHidden, scoreByHost]);
+
+  const hiddenCount = useMemo(() => {
+    let n = 0;
+    for (const [kind, parsed] of Object.entries(parsedByKind)) {
+      if (!parsed || (source !== "all" && kind !== source)) continue;
+      for (const sec of parsed.sections || []) for (const it of sec.items) if (it.suppressed) n++;
+    }
+    return n;
+  }, [parsedByKind, source]);
 
   const launchVerify = async (h?: string) => {
     const target = (h ?? vhost).trim();
     if (!target) return;
     try {
-      const t = await api.action<any>("/api/verify", { host: target });
+      const t = await api.action<{ id: number }>("/api/verify", { host: target });
       toast("ok", `verify #${t.id} started — streaming below`);
       setOpenTask(t.id);
       if (!h) setVhost("");
     } catch (e: any) { toast("err", e.message); }
   };
 
+  const loading = !briefs;
+
   return (
     <div className="fade-in space-y-4">
+      {/* invisible source loaders */}
+      {sources.map((b) => <SourceFetcher key={b.name} name={b.name} kind={b.kind} onData={onData} />)}
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">Tonight · Worklist</h1>
         <div className="flex items-center gap-2">
@@ -91,38 +175,76 @@ export default function Leads() {
         </div>
       </div>
 
-      {/* interactive worklist */}
       <Panel
         title="worklist · actionable"
         right={
-          <div className="flex items-center gap-2">
-            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter host/program…"
-              className="mono w-40 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
-            <button onClick={() => setRaw((r) => !r)}
-              className={`rounded border px-2 py-1 text-[10px] transition ${raw ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"}`}>
-              raw md
-            </button>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ScopeToggle label="incl. out-of-scope" on={inclOos} onClick={() => setInclOos((v) => !v)} />
+            <ScopeToggle label="incl. non-paying" on={inclNopay} onClick={() => setInclNopay((v) => !v)} />
+            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter…"
+              className="mono w-36 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
           </div>
         }
       >
-        {/* source tabs */}
-        {!sources.length ? <Spinner /> : (
-          <div className="mb-3 flex flex-wrap gap-1.5">
+        {/* source selector — "all" = deduped across every briefing */}
+        {loading ? <Spinner /> : (
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <SourceTab label="all sources" active={source === "all"} onClick={() => setSource("all")} />
             {sources.map((b) => (
-              <button key={b.name} onClick={() => { setActive(b.name); setFilter(""); }}
-                className={`rounded-md border px-2.5 py-1 text-[11px] transition ${active === b.name ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
-                {b.kind} <span className="text-[10px] text-[var(--color-ink-faint)]">· {b.date?.slice(5) || fmtAgo(b.mtime)}</span>
-              </button>
+              <SourceTab key={b.name} label={`${b.kind} · ${b.date?.slice(5) || fmtAgo(b.mtime)}`}
+                active={source === b.kind} onClick={() => setSource(b.kind)} />
             ))}
           </div>
         )}
-        {active ? (
-          raw ? <RawBriefing name={active} /> : <ParsedWorklist name={active} filter={filter} onHost={setHost} onVerify={launchVerify} onDismiss={dismiss} />
-        ) : <Empty>no briefing selected</Empty>}
+
+        {hiddenCount > 0 && (
+          <button onClick={() => setShowHidden((v) => !v)}
+            className="mb-2 flex w-full items-center gap-2 rounded-md border border-dashed border-[var(--color-border-bright)] px-3 py-1.5 text-[11px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]">
+            <span>⊘</span>
+            <span className="flex-1 text-left">{hiddenCount} suppressed — worked &amp; killed / benched (won't re-serve)</span>
+            <span className="text-[var(--color-accent)]">{showHidden ? "hide" : "show"}</span>
+          </button>
+        )}
+
+        {loading ? null : !merged.length ? (
+          <Empty hint={filter ? "clear the filter or widen scope toggles" : "briefings regenerate at 6:30pm — or run a lane from Hunt Control"}>
+            {filter ? "no leads match the filter" : "no actionable leads right now"}
+          </Empty>
+        ) : (
+          <div className="space-y-1.5">
+            {merged.map((l) => (
+              <CompactLeadRow key={l.key}
+                severity={l.severity} host={l.host} vulnClass={l.vulnClass} score={l.score}
+                summary={l.summary} sources={l.sources} onHost={setHost}
+                right={l.host ? (
+                  <LeadActions host={l.host} vulnClass={l.vulnClass} actions={hostActions}
+                    onTask={setOpenTask} onChanged={refresh} />
+                ) : undefined}
+                expandable={
+                  <div className="space-y-2">
+                    {l.program && <div className="text-[10px] text-[var(--color-ink-faint)]">program: {l.program}</div>}
+                    {l.raws.map((r, i) => (
+                      <div key={i}>
+                        {l.raws.length > 1 && <div className="mono mb-0.5 text-[9px] uppercase tracking-wider text-[var(--color-ink-faint)]">{r.source}</div>}
+                        <Markdown text={r.raw} />
+                      </div>
+                    ))}
+                  </div>
+                }
+              />
+            ))}
+          </div>
+        )}
       </Panel>
 
       {/* live ES signal buckets */}
-      <Panel title="active leads · live signals" right={<span className="text-[10px] text-[var(--color-ink-faint)]">not benched · pays</span>}>
+      <Panel title="active leads · live signals"
+        right={
+          <div className="flex items-center gap-2 text-[10px] text-[var(--color-ink-faint)]">
+            {leads?.suppressed ? <span title="out-of-scope / non-paying leads hidden">{leads.suppressed} suppressed</span> : null}
+            <span>{inclOos || inclNopay ? "widened" : "in-scope · pays"}</span>
+          </div>
+        }>
         {!leads ? <Spinner /> : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {leads.buckets.map((b) => (
@@ -139,8 +261,8 @@ export default function Leads() {
                         {h.triage_priority && <Badge color={priorityColor[h.triage_priority]}>{h.triage_priority}</Badge>}
                         <button onClick={() => setHost(h.host)} className="mono flex-1 truncate text-left text-[11px] text-[var(--color-ink)] hover:text-[var(--color-accent)]">{h.host}</button>
                         <span className="text-[10px] text-[var(--color-ink-faint)]">{h.triage_score}</span>
-                        <button onClick={() => dismiss(h.host)} title="mark not-actionable — stop re-serving"
-                          className="text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
+                        <button onClick={() => launchVerify(h.host)} title="run Claude verify"
+                          className="text-[10px] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100">⚡</button>
                       </div>
                     ))}
                     {b.count > 6 && <div className="pl-1.5 pt-1 text-[10px] text-[var(--color-ink-faint)]">+{b.count - 6} more</div>}
@@ -158,17 +280,21 @@ export default function Leads() {
   );
 }
 
-function ParsedWorklist({ name, filter, onHost, onVerify, onDismiss }:
-  { name: string; filter: string; onHost: (h: string) => void; onVerify: (h: string) => void; onDismiss: (h: string) => void }) {
-  const { data, loading } = useFetch<Parsed>(`/api/briefings/${encodeURIComponent(name)}/parsed`);
-  if (loading && !data) return <Spinner />;
-  if (!data) return <Empty>could not load</Empty>;
-  return <Worklist parsed={data} filter={filter} onHost={onHost} onVerify={onVerify} onDismiss={onDismiss} />;
+function SourceTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick}
+      className={`rounded-md border px-2.5 py-1 text-[11px] transition ${active ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
+      {label}
+    </button>
+  );
 }
 
-function RawBriefing({ name }: { name: string }) {
-  const { data, loading } = useFetch<{ body: string }>(`/api/briefings/${encodeURIComponent(name)}`);
-  if (loading && !data) return <Spinner />;
-  if (!data) return <Empty>could not load</Empty>;
-  return <div className="max-h-[70vh] overflow-auto"><Markdown text={data.body} /></div>;
+function ScopeToggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} title={on ? "showing widened set" : "hidden by default"}
+      className="flex items-center gap-1.5 rounded border px-2 py-1 text-[10px] transition"
+      style={{ borderColor: on ? "var(--color-accent)" : "var(--color-border-bright)", color: on ? "var(--color-accent)" : "var(--color-ink-faint)" }}>
+      <Dot color={on ? "var(--color-accent)" : "var(--color-ink-faint)"} />{label}
+    </button>
+  );
 }

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, type Finding } from "../api";
 import { useFetch } from "../hooks";
-import { Panel, Badge, Empty, Spinner } from "../components/ui";
+import { Panel, Badge, Empty, Spinner, SortTh } from "../components/ui";
 import { Drawer, Btn, useToast, ConfirmModal } from "../components/controls";
 import { stateColor, verdictColor, priorityColor, fmtAgo } from "../format";
 
@@ -16,21 +16,33 @@ export default function Findings() {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [q, setQ] = useState(sp.get("q") || "");
   const [offset, setOffset] = useState(0);
+  const [sort, setSort] = useState("recent");
+  const [order, setOrder] = useState<"asc" | "desc">("desc");
   const [selected, setSelected] = useState<number | null>(null);
   const { data: facets } = useFetch<Facets>("/api/findings/facets");
 
-  const qs = new URLSearchParams({ limit: "60", offset: String(offset) });
+  const qs = new URLSearchParams({ limit: "60", offset: String(offset), sort, order });
   Object.entries(filters).forEach(([k, v]) => v && qs.set(k, v));
   if (q) qs.set("q", q);
-  const { data, loading, refetch } = useFetch<FindingList>(`/api/findings?${qs}`, [offset, JSON.stringify(filters), q]);
+  const { data, loading, refetch } = useFetch<FindingList>(`/api/findings?${qs}`, [offset, JSON.stringify(filters), q, sort, order]);
 
   const setF = (k: string, v: string) => { setOffset(0); setFilters((f) => ({ ...f, [k]: v })); };
+  const onSort = (col: string) => {
+    setOffset(0);
+    if (sort === col) setOrder((o) => (o === "asc" ? "desc" : "asc"));
+    else { setSort(col); setOrder("desc"); }
+  };
+  const exportFindings = (fmt: "json" | "csv") => downloadFindings(data?.items || [], fmt);
 
   return (
     <div className="fade-in space-y-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-lg font-semibold">Findings</h1>
-        <span className="text-xs text-[var(--color-ink-faint)]">{data?.total ?? "—"} total</span>
+        <div className="flex items-center gap-2">
+          <Btn size="sm" onClick={() => exportFindings("json")} disabled={!data?.items.length}>export JSON</Btn>
+          <Btn size="sm" onClick={() => exportFindings("csv")} disabled={!data?.items.length}>export CSV</Btn>
+          <span className="text-xs text-[var(--color-ink-faint)]">{data?.total ?? "—"} total</span>
+        </div>
       </div>
 
       {/* filter bar */}
@@ -50,17 +62,19 @@ export default function Findings() {
       </div>
 
       <Panel className="!p-0">
-        {loading && !data ? <Spinner /> : !data?.items.length ? <Empty>no findings match</Empty> : (
+        {loading && !data ? <Spinner /> : !data?.items.length ? (
+          <Empty hint="adjust the filters, or confirmed findings will appear here as the pipeline mints them">no findings match</Empty>
+        ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">
-                <th className="px-4 py-2 font-medium">state</th>
-                <th className="px-2 py-2 font-medium">host</th>
-                <th className="px-2 py-2 font-medium">class</th>
-                <th className="px-2 py-2 font-medium">verdict</th>
-                <th className="px-2 py-2 font-medium">score</th>
-                <th className="px-2 py-2 font-medium">program</th>
-                <th className="px-4 py-2 text-right font-medium">updated</th>
+              <tr className="border-b border-[var(--color-border)] text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+                <SortTh label="state" className="!px-4" />
+                <SortTh label="host" col="host" active={sort} order={order} onSort={onSort} />
+                <SortTh label="class" />
+                <SortTh label="verdict" />
+                <SortTh label="score" col="score" active={sort} order={order} onSort={onSort} />
+                <SortTh label="program" col="program" active={sort} order={order} onSort={onSort} />
+                <SortTh label="updated" col="updated" active={sort} order={order} onSort={onSort} align="right" className="!px-4" />
               </tr>
             </thead>
             <tbody>
@@ -194,6 +208,34 @@ function FindingDrawer({ id, onClose, onChanged }: { id: number; onClose: () => 
         onConfirm={doAction} onCancel={() => setConfirm(null)} />
     </Drawer>
   );
+}
+
+// Client-side export of the current findings page — no backend round-trip.
+const EXPORT_COLS: (keyof Finding)[] = [
+  "id", "host", "url", "program", "vuln_class", "state", "score", "priority",
+  "ai_verdict", "ai_confidence", "resolution", "bounty", "created_at", "updated_at",
+];
+
+function downloadFindings(items: Finding[], fmt: "json" | "csv") {
+  let blob: Blob;
+  const stamp = new Date().toISOString().slice(0, 10);
+  if (fmt === "json") {
+    blob = new Blob([JSON.stringify(items, null, 2)], { type: "application/json" });
+  } else {
+    const esc = (v: unknown) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = [EXPORT_COLS.join(",")];
+    for (const it of items) rows.push(EXPORT_COLS.map((c) => esc((it as unknown as Record<string, unknown>)[c as string])).join(","));
+    blob = new Blob([rows.join("\n")], { type: "text/csv" });
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `findings_${stamp}.${fmt}`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
