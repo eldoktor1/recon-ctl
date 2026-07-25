@@ -166,6 +166,501 @@ _CLASSES = [
     "csrf", "auth-bypass", "info-disclosure", "secrets", "bucket", "nday",
 ]
 
+# --- WSTG v4.2 static reference --------------------------------------------
+# Per-test grounding so the Guided walkthrough never glosses over a test: an
+# objective, a concrete how-to, the relevant recon-ctl lanes / external tools,
+# and the official OWASP page URL (built from the canonical folder + test title,
+# which matches OWASP's on-disk page naming). Keyed by full WSTG id.
+_WSTG_FOLDER = {
+    "INFO": "01-Information_Gathering",
+    "CONF": "02-Configuration_and_Deployment_Management_Testing",
+    "IDNT": "03-Identity_Management_Testing",
+    "ATHN": "04-Authentication_Testing",
+    "ATHZ": "05-Authorization_Testing",
+    "SESS": "06-Session_Management_Testing",
+    "INPV": "07-Input_Validation_Testing",
+    "ERRH": "08-Testing_for_Error_Handling",
+    "CRYP": "09-Testing_for_Weak_Cryptography",
+    "BUSL": "10-Business_Logic_Testing",
+    "CLNT": "11-Client-side_Testing",
+    "APIT": "12-API_Testing",
+}
+_WSTG_BASE = ("https://owasp.org/www-project-web-security-testing-guide/latest/"
+              "4-Web_Application_Security_Testing")
+
+
+def _wstg_url(cat: str, num: int, name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    folder = _WSTG_FOLDER.get(cat)
+    if not folder:
+        return f"{_WSTG_BASE}/"
+    return f"{_WSTG_BASE}/{folder}/{num:02d}-{slug}"
+
+
+# id -> (objective, how_to, tools). Names/category/url are merged from _WSTG_SPEC.
+_WSTG_REF: dict[str, tuple[str, str, str]] = {
+    "WSTG-INFO-01": (
+        "Find information the app/organisation has leaked to search engines and public archives.",
+        "Run search-engine and archive dorks (site:, filetype:, inurl:) and pull historical URLs to spot exposed paths, keys and docs. Cross-reference cached pages and pastebin/GitHub hits.",
+        "google/bing dorks, recon-ghleaks, waybackurls/gau, recon-uncover"),
+    "WSTG-INFO-02": (
+        "Identify the web-server product and version to map it to known issues.",
+        "Inspect Server/response headers, error-page banners and quirks; confirm with an active fingerprint. Note load balancers/CDNs that mask the origin.",
+        "httpx, whatweb, nmap -sV, Burp"),
+    "WSTG-INFO-03": (
+        "Find metafiles (robots.txt, sitemap.xml, security.txt, .well-known) that leak paths or intent.",
+        "Fetch the standard metafiles and parse Disallow/Allow entries and sitemaps for hidden or admin paths. Follow any referenced but unlinked resources.",
+        "curl, httpx, recon-params crawl-host"),
+    "WSTG-INFO-04": (
+        "Enumerate all apps/vhosts running on the discovered hosts and ports.",
+        "Resolve subdomains, sweep non-standard ports, and check virtual hosts / TLS SAN names for extra apps. Correlate with the ES asset surface.",
+        "subfinder, recon-permute, recon-uncover, nmap, httpx"),
+    "WSTG-INFO-05": (
+        "Find sensitive info leaked in page content, comments, and JS (endpoints, keys, internal hosts).",
+        "Read HTML comments and mine JS for endpoints, secrets and source-maps. jsintel un-maps minified bundles to the original source surface.",
+        "recon-jsintel (jsluice/sourcemapper), recon-domxss, Burp"),
+    "WSTG-INFO-06": (
+        "Catalogue every request/parameter the app accepts (the attack surface).",
+        "Proxy a full walk of the app and record every GET/POST, param, header and JSON field. Add hidden params via active discovery.",
+        "Burp (site map), recon-params crawl-host, recon-params arjun, katana"),
+    "WSTG-INFO-07": (
+        "Understand the app's flows/states well enough to reason about coverage.",
+        "Map the main workflows (auth, checkout, admin) and build a graph of transitions and trust boundaries. Use it to spot skipped-step and access-control gaps.",
+        "Burp, manual walkthrough, recon-params crawl-host"),
+    "WSTG-INFO-08": (
+        "Fingerprint the application framework (Django/Rails/Laravel/Spring/etc.).",
+        "Look at cookie names, default paths, error signatures, headers and JS bundles that reveal the framework and version. Map to framework-specific weaknesses.",
+        "whatweb, wappalyzer, httpx, recon-mood <tech>"),
+    "WSTG-INFO-09": (
+        "Identify the specific application/product and version (CMS, panel, off-the-shelf app).",
+        "Match favicons, meta generators, unique paths and JS to a known product; confirm the version. Feeds the n-day lane.",
+        "whatweb, httpx, recon-nday, nuclei"),
+    "WSTG-INFO-10": (
+        "Produce the architecture picture: tiers, CDNs, gateways, third-party services, data flows.",
+        "Diagram how requests route (CDN → WAF → gateway → app → API/DB) and where trust boundaries sit. Note where auth is enforced.",
+        "Burp, DNS/CDN inspection, jsintel endpoint map"),
+    "WSTG-CONF-01": (
+        "Find weaknesses in the network/infra config exposed to the app tier.",
+        "Sweep for exposed admin/management ports and services that shouldn't face the internet; verify open ports are real (not CDN-ACKed).",
+        "nmap, httpx, recon-uncover (Shodan/Censys)"),
+    "WSTG-CONF-02": (
+        "Find platform-config mistakes: default files, sample apps, verbose modes, listings.",
+        "Probe for default/sample content, directory listing, server-status/actuator style endpoints and debug flags. Confirm before claiming (many are by-design).",
+        "nuclei, ffuf, httpx, recon-mood spring"),
+    "WSTG-CONF-03": (
+        "Check whether file extensions expose source or sensitive handling (.bak/.inc/.old/.php~).",
+        "Request known files with alternate extensions and look for source disclosure or different handling. Watch for editor/backup suffixes.",
+        "ffuf, curl, Burp Intruder"),
+    "WSTG-CONF-04": (
+        "Find old/backup/unreferenced files (archives, configs, dumps) left on the server.",
+        "Fuzz for common backup names and archive extensions on known paths; check for .git/.svn/.env exposure. Verify content sensitivity before reporting.",
+        "ffuf, git-dumper, nuclei, recon-params crawl-host"),
+    "WSTG-CONF-05": (
+        "Locate admin/management interfaces reachable from the internet.",
+        "Brute common admin paths and inspect JS/routes for admin endpoints; check auth on each. An unauth-reachable admin panel is high value.",
+        "ffuf, kiterunner (recon-kr), recon-params, Burp"),
+    "WSTG-CONF-06": (
+        "Test which HTTP methods are enabled (PUT/DELETE/TRACE) and whether they're dangerous.",
+        "Send OPTIONS to list methods, then safely probe PUT/DELETE/TRACE and method-override headers. A writable PUT or verb-based authz bypass is a finding.",
+        "curl -X, Burp Repeater, nuclei"),
+    "WSTG-CONF-07": (
+        "Verify HSTS is present and correctly configured on TLS endpoints.",
+        "Check the Strict-Transport-Security header (max-age, includeSubDomains, preload). Missing HSTS alone is usually low/N-A without a concrete downgrade impact.",
+        "curl -I, testssl.sh, Burp"),
+    "WSTG-CONF-08": (
+        "Test RIA cross-domain policies (crossdomain.xml, clientaccesspolicy.xml) for over-permissive rules.",
+        "Fetch the policy files and flag wildcard domains that would allow untrusted cross-domain data access. Largely legacy Flash/Silverlight surface.",
+        "curl, Burp"),
+    "WSTG-CONF-09": (
+        "Check file/directory permissions on exposed resources.",
+        "Identify files that are world-readable/writable when they shouldn't be, and directories that allow listing or upload. Tie to concrete data exposure.",
+        "httpx, ffuf, manual"),
+    "WSTG-CONF-10": (
+        "Detect dangling DNS that points to an unclaimed provider resource (subdomain takeover).",
+        "For each CNAME/dangling record, verify NXDOMAIN or an unclaimed-provider fingerprint — not a live app 404. Only a claimable target is CONFIRMED.",
+        "recon-permute, dnsx, subjack/nuclei-takeovers, the takeover lane"),
+    "WSTG-CONF-11": (
+        "Find exposed cloud storage (S3/GCS/Azure) referenced by the app.",
+        "Mine bucket references from the app's own surface (never blind-permute), then read-only grade ACL/list; public-WRITE is reportable, public-READ is a content-sensitivity lead.",
+        "recon-buckets (S3Scanner), jsintel/params provenance"),
+    "WSTG-IDNT-01": (
+        "Verify role definitions and that each role's privileges match intent.",
+        "Enumerate the roles the app exposes and map what each can do; look for over-privileged or undocumented roles. Sets up authz testing.",
+        "manual (2 owned accounts), Burp, app docs"),
+    "WSTG-IDNT-02": (
+        "Test the registration flow for weaknesses (unverified signup, role injection, duplicate identities).",
+        "Register accounts and probe whether email/role/tenant fields are trusted from the client, and whether verification is enforced. Own-account setup only.",
+        "Burp, recon-account, manual"),
+    "WSTG-IDNT-03": (
+        "Test how accounts are provisioned/de-provisioned for gaps (orphaned access, weak invites).",
+        "Check invite/provisioning tokens for predictability and expiry, and whether de-provisioned users retain access. Use owned accounts.",
+        "Burp, manual"),
+    "WSTG-IDNT-04": (
+        "Determine if valid usernames/emails can be enumerated via differing responses.",
+        "Compare login/reset/registration responses and timing for existing vs non-existing accounts. A reliable oracle is the finding (impact permitting).",
+        "Burp Intruder, ffuf, manual"),
+    "WSTG-IDNT-05": (
+        "Test username-policy weaknesses (predictable, no uniqueness, homoglyph/case collisions).",
+        "Attempt to register colliding or predictable usernames and observe normalisation. Chain to enumeration or impersonation.",
+        "Burp, manual"),
+    "WSTG-ATHN-01": (
+        "Confirm credentials are only transmitted over TLS.",
+        "Watch the login/reset/change requests and confirm no credential is sent over HTTP or in a URL. Check for mixed-content submission.",
+        "Burp, curl, testssl.sh"),
+    "WSTG-ATHN-02": (
+        "Test for default or well-known credentials on the app and any admin panels.",
+        "Try vendor default creds on discovered login/admin interfaces (in-scope only). A working default is CONFIRMED access — stop at proof.",
+        "manual, Burp, product docs"),
+    "WSTG-ATHN-03": (
+        "Test whether the lockout/anti-bruteforce mechanism is effective.",
+        "Submit repeated failed logins and check for lockout, throttling or CAPTCHA. No lockout is a lead; pair with enumeration/weak-password for impact.",
+        "Burp Intruder (throttled), manual"),
+    "WSTG-ATHN-04": (
+        "Test for authentication-schema bypass (forced browsing, param/logic flaws, token forgery).",
+        "Attempt to reach post-auth resources directly, tamper auth params/JWTs, and skip steps. A real bypass that gets you IN is high severity — never brute someone else's login.",
+        "Burp, jwt_tool, manual"),
+    "WSTG-ATHN-05": (
+        "Test 'remember me' for insecure persistence (predictable/eternal tokens, plaintext creds).",
+        "Inspect the remember-me cookie for reversible/guessable content and whether it survives password change. Use owned accounts.",
+        "Burp, manual"),
+    "WSTG-ATHN-06": (
+        "Check that sensitive pages aren't cached by the browser after logout.",
+        "Review Cache-Control/Pragma on authenticated responses and confirm back-button/history doesn't reveal data post-logout. Usually low severity.",
+        "Burp, browser devtools"),
+    "WSTG-ATHN-07": (
+        "Test password-policy strength (length, complexity, breach checks).",
+        "Attempt weak/breached passwords on registration and change flows. Policy weakness is typically low unless it enables a broader chain.",
+        "manual, Burp"),
+    "WSTG-ATHN-08": (
+        "Test security-question mechanisms for weak/guessable answers.",
+        "Check whether questions are low-entropy or answers are OSINT-derivable, and whether they gate account recovery. Chain to account takeover.",
+        "manual"),
+    "WSTG-ATHN-09": (
+        "Test password change/reset flows for bypass, token leakage, or host-header poisoning.",
+        "Examine reset-token strength/expiry/single-use, whether the reset link honours a spoofed Host header, and whether the old password is required to change it.",
+        "Burp, manual, Host-header injection probes"),
+    "WSTG-ATHN-10": (
+        "Test alternative auth channels (mobile app, API, SSO) for weaker enforcement.",
+        "Compare auth strength across channels — the mobile/API path often skips lockout/MFA. Attack the weakest channel.",
+        "Burp, mobile proxying, manual"),
+    "WSTG-ATHZ-01": (
+        "Test for path/directory traversal and local/remote file inclusion.",
+        "Inject traversal sequences and file paths into path/file params and observe file read or inclusion. Prove read of a benign file — never harvest system secrets.",
+        "Burp, ffuf, recon-params, manual"),
+    "WSTG-ATHZ-02": (
+        "Test for authorization-schema bypass (vertical: low-priv reaching high-priv functions).",
+        "Replay privileged requests from a low-priv session and compare; use Burp Autorize for automated cross-role diffing. Two owned accounts.",
+        "Burp Autorize, recon-ai-hunter, manual"),
+    "WSTG-ATHZ-03": (
+        "Test for privilege escalation (role/tenant elevation via tampered attributes or flows).",
+        "Tamper role/plan/tenant fields and mass-assignable attributes to gain higher privileges; verify server-side enforcement. Owned accounts, stop at proof.",
+        "Burp, recon-ai-hunter, manual"),
+    "WSTG-ATHZ-04": (
+        "Test for IDOR/BOLA: object references that aren't authorization-checked.",
+        "Enumerate object-ref params and, with TWO owned accounts, swap IDs to read/modify the other account's object. Numeric=enumerable, UUID=harvest from JS. Never touch third-party IDs.",
+        "recon-idor candidates, recon-ai-hunter, Burp Autorize, recon-graphql"),
+    "WSTG-SESS-01": (
+        "Analyse the session-management scheme (token generation, entropy, binding).",
+        "Collect many session tokens and analyse structure/entropy; check binding to user/IP and server-side invalidation. Weak/predictable tokens are the finding.",
+        "Burp Sequencer, manual"),
+    "WSTG-SESS-02": (
+        "Test cookie attributes (HttpOnly, Secure, SameSite, scope, expiry).",
+        "Review each session cookie's flags and domain/path scope. Missing HttpOnly/Secure matters when it enables theft; report with concrete impact.",
+        "Burp, browser devtools"),
+    "WSTG-SESS-03": (
+        "Test for session fixation (a pre-auth token surviving authentication).",
+        "Set a known session pre-login and check whether it's still valid (unrotated) after login. Rotation-on-auth absence is the finding.",
+        "Burp, manual (owned account)"),
+    "WSTG-SESS-04": (
+        "Find session variables exposed in URLs, logs, referers, or client storage.",
+        "Look for session IDs/tokens in query strings, redirects and browser storage that could leak via referer/history. Tie to a theft path.",
+        "Burp, devtools, manual"),
+    "WSTG-SESS-05": (
+        "Test for CSRF on state-changing requests.",
+        "Check whether state-changing actions require an unpredictable, bound anti-CSRF token (not just SameSite). Build a PoC form that performs the action cross-site.",
+        "Burp (CSRF PoC), manual"),
+    "WSTG-SESS-06": (
+        "Test that logout actually invalidates the session server-side.",
+        "Capture a token, log out, then replay the token and confirm it's rejected server-side (not just cleared client-side).",
+        "Burp Repeater, manual"),
+    "WSTG-SESS-07": (
+        "Test session timeout (idle/absolute) enforcement.",
+        "Leave a session idle past the stated timeout and replay; confirm the server expires it. Absent timeout is usually low without chaining.",
+        "Burp, manual"),
+    "WSTG-SESS-08": (
+        "Test for session puzzling (session variables reused across flows to bypass logic).",
+        "Trace whether a variable set in one flow (e.g. reset) is honoured to authenticate/authorize in another. Owned accounts.",
+        "Burp, manual"),
+    "WSTG-SESS-09": (
+        "Test for session hijacking exposure (token theft/replay from another context).",
+        "Assess whether a captured token is usable from a different IP/UA and how it could be captured (XSS, leak). Chain from an exposure primitive.",
+        "Burp, manual"),
+    "WSTG-INPV-01": (
+        "Test for reflected XSS (input reflected into a response and executed).",
+        "Inject context-aware break-out payloads and confirm EXECUTION, not mere reflection — encoded reflection is not XSS. dalfox verifies execution headlessly.",
+        "recon-params confirm xss (dalfox), Burp, manual"),
+    "WSTG-INPV-02": (
+        "Test for stored/persistent XSS (payload stored then executed for other users).",
+        "Plant a payload in stored fields and confirm it fires when rendered; blind sinks (admin consoles) need a persistent OOB beacon.",
+        "recon-blindxss (interactsh beacon), dalfox, Burp"),
+    "WSTG-INPV-03": (
+        "Test for HTTP verb tampering (authz/logic that depends on the method).",
+        "Swap GET/POST/HEAD/arbitrary methods and method-override headers to bypass access control or reach unintended handlers.",
+        "curl -X, Burp Repeater"),
+    "WSTG-INPV-04": (
+        "Test for HTTP parameter pollution (duplicate params parsed inconsistently).",
+        "Send duplicate/array params and observe which layer wins; use it to bypass filters/WAF or alter logic.",
+        "Burp, recon-params, manual"),
+    "WSTG-INPV-05": (
+        "Test for SQL injection.",
+        "Use the SAFE `'` vs `''` error/boolean differential to confirm injectability, THEN sqlmap for verification depth (banner/current-db) — never mass-dump third-party PII; rate-limited.",
+        "recon-params confirm sqli (diff→sqlmap), Burp"),
+    "WSTG-INPV-06": (
+        "Test for LDAP injection in directory-backed lookups (login, search).",
+        "Inject LDAP metacharacters (*, ), &, |) into fields that feed a directory query and watch for auth bypass or altered result sets.",
+        "Burp, manual"),
+    "WSTG-INPV-07": (
+        "Test for XML injection / XXE where XML is parsed.",
+        "Inject XML metacharacters and external entities; confirm XXE via an OUT-OF-BAND callback to a canary — never point entities at internal data.",
+        "Burp, interactsh (OOB canary), manual"),
+    "WSTG-INPV-08": (
+        "Test for Server-Side Includes injection.",
+        "Inject SSI directives into inputs reflected by an SSI-enabled server and check for evaluation. Prove execution with a benign directive.",
+        "Burp, manual"),
+    "WSTG-INPV-09": (
+        "Test for XPath injection in XML-query backed features.",
+        "Inject XPath metacharacters into search/login params and observe boolean/error differentials or auth bypass.",
+        "Burp, manual"),
+    "WSTG-INPV-10": (
+        "Test for IMAP/SMTP injection in mail-interacting features.",
+        "Inject CRLF/command sequences into mail fields (contact, invite) to smuggle commands or headers. Prove with a benign header injection.",
+        "Burp, manual"),
+    "WSTG-INPV-11": (
+        "Test for code injection (input evaluated as server-side code).",
+        "Probe params that may reach eval/include with language-specific payloads; confirm code execution with a benign, non-destructive proof — never run RCE-for-harm.",
+        "Burp, manual"),
+    "WSTG-INPV-12": (
+        "Test for OS command injection.",
+        "Inject shell metacharacters and confirm via a benign OOB callback or timing; do not run destructive commands. In-scope only.",
+        "Burp, interactsh (OOB), manual"),
+    "WSTG-INPV-13": (
+        "Test for format-string injection.",
+        "Feed format specifiers into inputs that may reach a formatting function and observe crashes/leaks. Rare in web stacks.",
+        "Burp, manual"),
+    "WSTG-INPV-14": (
+        "Test for incubated (second-order) vulnerabilities.",
+        "Plant tainted data that is stored and later used in a dangerous sink elsewhere; trace the delayed execution path.",
+        "Burp, manual"),
+    "WSTG-INPV-15": (
+        "Test for HTTP response splitting / request smuggling.",
+        "Inject CR/LF into reflected headers (splitting) and test desync via crafted CL/TE requests (smuggling). Prove carefully — smuggling can affect other users, keep it benign.",
+        "Burp, smuggler, manual"),
+    "WSTG-INPV-16": (
+        "Analyse how the app handles incoming requests / proxy trust.",
+        "Examine trust of forwarded/proxy headers and how the app parses incoming requests. Feeds smuggling/host-header/SSRF testing.",
+        "Burp, manual"),
+    "WSTG-INPV-17": (
+        "Test for Host-header injection (poisoned links, cache, routing).",
+        "Send crafted/duplicated Host and X-Forwarded-Host headers and observe reflection into links (password-reset), cache keys or routing.",
+        "Burp, curl, recon-wcd"),
+    "WSTG-INPV-18": (
+        "Test for Server-Side Template Injection.",
+        "Inject template syntax like {{7*7}} and confirm evaluation (49) — math only, never RCE. A confirmed evaluation is the primitive; escalate cautiously.",
+        "Burp, tplmap (careful), manual"),
+    "WSTG-INPV-19": (
+        "Test for Server-Side Request Forgery.",
+        "Point URL/host params at an interactsh canary and confirm the OOB callback; probe for metadata/internal reach but never exfiltrate internal data. SSRF guard applies.",
+        "recon-ai-hunter, interactsh (OOB), Burp"),
+    "WSTG-ERRH-01": (
+        "Test error handling for information leakage / inconsistent behaviour.",
+        "Trigger errors with malformed input and review responses for stack traces, framework details or logic leaks. Report only meaningful disclosure.",
+        "Burp, manual"),
+    "WSTG-ERRH-02": (
+        "Test specifically for stack traces exposing internals.",
+        "Force exceptions and capture stack traces revealing paths, versions, queries or secrets. Value depends on what's disclosed.",
+        "Burp, manual"),
+    "WSTG-CRYP-01": (
+        "Test TLS configuration for weak protocols/ciphers/certs.",
+        "Scan the endpoint for deprecated protocols, weak ciphers, cert issues and missing forward secrecy. Report exploitable weaknesses, not just scanner noise.",
+        "testssl.sh, sslscan, nmap --script ssl-enum-ciphers"),
+    "WSTG-CRYP-02": (
+        "Test for padding-oracle weaknesses in CBC-mode crypto.",
+        "Find tokens/ciphertext the app decrypts and probe for a padding oracle via response differentials. Confirm the oracle before claiming.",
+        "padbuster, Burp, manual"),
+    "WSTG-CRYP-03": (
+        "Find sensitive data sent over unencrypted channels.",
+        "Look for credentials/PII/tokens transmitted over HTTP or to non-TLS endpoints/mixed content. Tie to a real interception path.",
+        "Burp, testssl.sh, manual"),
+    "WSTG-CRYP-04": (
+        "Test for weak encryption / bad crypto usage (weak algos, static keys, ECB).",
+        "Inspect encrypted tokens/fields for weak algorithms, reused/static keys or ECB patterns. Chain to forgery/decryption for impact.",
+        "manual, CyberChef, Burp"),
+    "WSTG-BUSL-01": (
+        "Test business-logic data validation (server trusts client-side constraints).",
+        "Bypass client validation and submit values the server should reject (negative price, oversized qty, skipped fields). Prove a state change with impact.",
+        "Burp, manual"),
+    "WSTG-BUSL-02": (
+        "Test ability to forge requests (guess/craft params the UI never exposes).",
+        "Craft requests with hidden/undocumented params or values to trigger unintended behaviour. Owned account, non-destructive proof.",
+        "Burp, recon-params arjun, manual"),
+    "WSTG-BUSL-03": (
+        "Test integrity checks on client-controlled data (hidden fields, totals, signatures).",
+        "Tamper hidden/priced/signed fields and see if the server re-validates. A trusted client total is a classic finding.",
+        "Burp, manual"),
+    "WSTG-BUSL-04": (
+        "Test process timing (race conditions, timing-dependent logic).",
+        "Fire concurrent requests at limited actions (redeem coupon, withdraw, apply) to exploit TOCTOU races. Keep proofs non-damaging.",
+        "Burp Turbo Intruder, manual"),
+    "WSTG-BUSL-05": (
+        "Test function-usage limits (one-time actions reusable N times).",
+        "Replay actions meant to be single-use (coupon, vote, invite) and confirm the limit isn't enforced. Prove without real financial movement.",
+        "Burp, manual"),
+    "WSTG-BUSL-06": (
+        "Test for workflow circumvention (skipping required steps).",
+        "Reach a later state directly without completing prerequisite steps (pay-then-ship, verify-then-act). Map the flow first (INFO-07).",
+        "Burp, manual"),
+    "WSTG-BUSL-07": (
+        "Test defenses against application misuse (does the app detect/limit abuse?).",
+        "Probe whether abnormal automated/abusive behaviour is detected and throttled. Usually informational unless it enables another attack.",
+        "Burp, manual"),
+    "WSTG-BUSL-08": (
+        "Test upload of unexpected file types.",
+        "Upload files with disallowed types/extensions/MIME and check enforcement (extension, magic bytes, content). Chain to storage/exec.",
+        "Burp, manual"),
+    "WSTG-BUSL-09": (
+        "Test upload of malicious files (webshell, polyglot, oversized).",
+        "Attempt to upload and reach an executable/dangerous file; confirm it's served/executed. Use a benign marker, never a live shell for harm.",
+        "Burp, manual"),
+    "WSTG-CLNT-01": (
+        "Test for DOM-based XSS (client-side source→sink taint).",
+        "Trace tainted sources (location/hash/postMessage) into dangerous sinks (innerHTML/eval); confirm execution headlessly.",
+        "recon-domxss, dalfox --deep-domxss, Burp DOM Invader"),
+    "WSTG-CLNT-02": (
+        "Test for arbitrary JavaScript execution via client-side flaws.",
+        "Find client code that executes attacker-controlled strings (eval, Function, setTimeout-string) and prove execution.",
+        "recon-domxss, devtools, manual"),
+    "WSTG-CLNT-03": (
+        "Test for client-side HTML injection.",
+        "Inject markup into client-rendered content that isn't script-executable but alters the DOM (phishing, defacement). Distinguish from XSS.",
+        "Burp, devtools, manual"),
+    "WSTG-CLNT-04": (
+        "Test for client-side URL redirect (open redirect via client code).",
+        "Feed attacker URLs into client-side redirect logic (location = param) and confirm redirection off-domain. Chain to phishing/OAuth theft.",
+        "Burp, recon-params, manual"),
+    "WSTG-CLNT-05": (
+        "Test for CSS injection.",
+        "Inject CSS into style contexts and assess data exfil (attribute selectors) or UI redress. Niche but real in some apps.",
+        "Burp, manual"),
+    "WSTG-CLNT-06": (
+        "Test for client-side resource manipulation (attacker-controlled script/link/src).",
+        "Find params that drive script/iframe/link targets on the client and point them at attacker resources. Chain to XSS/exfil.",
+        "Burp, devtools, manual"),
+    "WSTG-CLNT-07": (
+        "Test CORS configuration for over-permissive cross-origin access.",
+        "Probe ACAO/ACAC handling with varied Origins; a reflected Origin + credentials true on sensitive data is the finding — reflection alone on public data is N-A.",
+        "Burp, curl, manual"),
+    "WSTG-CLNT-08": (
+        "Test for cross-site flashing (Flash crossdomain / FlashVars issues).",
+        "Assess any remaining Flash for insecure crossdomain and injectable FlashVars. Mostly legacy/dead surface.",
+        "manual, Burp"),
+    "WSTG-CLNT-09": (
+        "Test for clickjacking (framing of sensitive actions).",
+        "Check X-Frame-Options/CSP frame-ancestors and build a framing PoC that tricks a click on a sensitive action. Needs a real actionable target.",
+        "Burp, framing PoC, manual"),
+    "WSTG-CLNT-10": (
+        "Test WebSocket security (origin checks, auth, message tampering).",
+        "Inspect the WS handshake for origin/auth enforcement and tamper messages for authz/injection issues.",
+        "Burp (WS), manual"),
+    "WSTG-CLNT-11": (
+        "Test web messaging (postMessage) for missing origin validation.",
+        "Find postMessage handlers that don't validate origin and feed them malicious data reaching a sink. Chain to DOM-XSS/data theft.",
+        "recon-domxss, devtools, Burp"),
+    "WSTG-CLNT-12": (
+        "Test browser storage (localStorage/sessionStorage/IndexedDB) for sensitive data.",
+        "Inspect client storage for tokens/PII and assess XSS-reachability. Sensitive tokens in localStorage amplify any XSS.",
+        "devtools, Burp, manual"),
+    "WSTG-CLNT-13": (
+        "Test for Cross-Site Script Inclusion (XSSI) leaking data via script include.",
+        "Try including sensitive JS/JSON endpoints cross-origin as <script> and see if data leaks (non-standard JSON, callback params).",
+        "Burp, manual"),
+    "WSTG-APIT-01": (
+        "Recon the API surface: endpoints, schemas, auth model, object references.",
+        "Harvest routes from JS/specs (OpenAPI/GraphQL introspection) and brute API paths; map object-ref params for BOLA and injectable args. Feeds IDOR/GraphQL lanes.",
+        "recon-jsintel, recon-kr (kiterunner), recon-graphql, recon-idor candidates"),
+}
+
+
+def wstg_reference() -> dict[str, dict[str, str]]:
+    """Full static WSTG reference keyed by id: name/category/objective/how_to/tools/wstg_url."""
+    out: dict[str, dict[str, str]] = {}
+    for cat, cat_name, names in _WSTG_SPEC:
+        for i, name in enumerate(names, 1):
+            wid = f"WSTG-{cat}-{i:02d}"
+            obj, how, tools = _WSTG_REF.get(wid, ("", "", ""))
+            out[wid] = {
+                "id": wid, "category": cat, "cat_name": cat_name, "name": name,
+                "objective": obj, "how_to": how, "tools": tools,
+                "wstg_url": _wstg_url(cat, i, name),
+            }
+    return out
+
+
+STRIDE_GUIDE: dict[str, dict[str, Any]] = {
+    "S": {"name": "Spoofing", "prompt": (
+        "Enumerate identity/authentication threats: where can an attacker pretend to be another "
+        "user, service, or the server itself? Focus on auth schema, token/JWT forgery, session "
+        "fixation, SSO/OAuth flows, and email/host spoofing."), "examples": [
+        "Forgeable or unbound session/JWT token (alg=none, weak secret) → impersonation.",
+        "Password-reset link honours a spoofed Host header → account takeover.",
+        "Missing origin validation on postMessage/SSO callback → identity confusion."]},
+    "T": {"name": "Tampering", "prompt": (
+        "Enumerate integrity threats: which client-controlled data does the server trust without "
+        "re-validation? Focus on hidden/priced fields, mass-assignable attributes, parameter "
+        "pollution, and injection into interpreters."), "examples": [
+        "Client-side price/quantity trusted at checkout → business-logic tampering.",
+        "Mass-assignment of role/tenant on a profile update → privilege change.",
+        "SQL/command/template injection where input reaches an interpreter."]},
+    "R": {"name": "Repudiation", "prompt": (
+        "Enumerate accountability threats: what actions can a user perform without a reliable, "
+        "tamper-evident audit trail? Focus on missing logging, forgeable logs, and unverifiable "
+        "transactions."), "examples": [
+        "Sensitive state-changing action produces no server-side audit record.",
+        "User-controllable timestamp/actor fields let an action be denied later.",
+        "Log injection via unsanitised input corrupts the audit trail."]},
+    "I": {"name": "Information Disclosure", "prompt": (
+        "Enumerate confidentiality threats: where can data leak to an unauthorised party? Focus on "
+        "IDOR/BOLA, verbose errors, exposed JS secrets/endpoints, open buckets, and directory/backup "
+        "exposure."), "examples": [
+        "IDOR on an object-ref endpoint returns another tenant's data.",
+        "Leaked API key/endpoint in a JS bundle or reconstructed source-map.",
+        "Public-read bucket or exposed backup file with sensitive content."]},
+    "D": {"name": "Denial of Service", "prompt": (
+        "Enumerate availability threats — but keep every probe non-damaging (never actually DoS an "
+        "in-scope target). Focus on unbounded/expensive operations and missing rate limits, reported "
+        "by reasoning, not by taking the service down."), "examples": [
+        "Unbounded query/expansion (GraphQL nesting, large export) with no cost limit.",
+        "No rate limit on an expensive endpoint (report the gap, do not flood it).",
+        "Amplification via a redirect/callback the app will fetch repeatedly."]},
+    "E": {"name": "Elevation of Privilege", "prompt": (
+        "Enumerate authorization threats: where can a low-privilege user reach high-privilege "
+        "functions or another role/tenant? Focus on vertical/horizontal access-control bypass, "
+        "forced browsing to admin, and IDOR-to-privesc chains (test with two owned accounts)."), "examples": [
+        "Low-priv session replaying an admin-only request succeeds (Burp Autorize).",
+        "Forced-browse to an unauth-reachable admin interface.",
+        "Tampering a role/plan attribute elevates privileges server-side."]},
+}
+
+
+def merge_reference(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return WSTG items with the static reference (objective/how_to/tools/wstg_url) merged in."""
+    ref = wstg_reference()
+    out = []
+    for it in items:
+        r = ref.get(it.get("id", ""), {})
+        out.append({**it, "objective": r.get("objective", ""), "how_to": r.get("how_to", ""),
+                    "tools": r.get("tools", ""), "wstg_url": r.get("wstg_url", "")})
+    return out
+
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -446,3 +941,65 @@ def ensure_seeded() -> dict[str, Any] | None:
         return create("glassdoor", name, platform)
     except Exception:
         return None
+
+
+# --- AI-guidance prompt (Claude co-pilot) ----------------------------------
+_DOCTRINE = (
+    "DOCTRINE (hard lines): only in-scope + paying hosts; IDOR/BAC uses TWO accounts the "
+    "researcher OWNS (never guessed/third-party IDs); reflection is NOT XSS (execution must be "
+    "proven); PoC-or-GTFO — prove it or move on; never harvest third-party data, move money, or "
+    "run destructive/RCE-for-harm. Recommend the SAFE confirm primitive per class."
+)
+
+
+def _program_context(ws: dict[str, Any], hosts: list[dict[str, Any]],
+                     endpoints: list[str]) -> str:
+    name = ws.get("name") or ws.get("key")
+    lines = [f"PROGRAM: {name}  (platform: {ws.get('platform') or '?'})"]
+    if hosts:
+        lines.append("In-scope + paying hosts (sample, host — tech — top classes):")
+        for h in hosts[:20]:
+            tech = ", ".join((h.get("tech") or [])[:4]) if isinstance(h.get("tech"), list) else ""
+            cls = ", ".join((h.get("triage_classes") or [])[:4]) if isinstance(h.get("triage_classes"), list) else ""
+            lines.append(f"  - {h.get('host')}  [{tech or 'tech?'}]  {('classes: ' + cls) if cls else ''}".rstrip())
+    else:
+        lines.append("(no ES hosts joined yet for this program)")
+    if endpoints:
+        lines.append("Sample discovered endpoints (from jsintel/ES):")
+        for e in endpoints[:25]:
+            lines.append(f"  - {e}")
+    return "\n".join(lines)
+
+
+def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
+                       hosts: list[dict[str, Any]], endpoints: list[str]) -> str:
+    """Build the grounded co-pilot prompt for the Guided walkthrough (one step)."""
+    ctx = _program_context(ws, hosts, endpoints)
+    focus_host = f"\nOperator has selected host to focus on: {host}" if host else ""
+    if phase == "wstg":
+        ref = wstg_reference().get(ident, {})
+        head = (f"You are guiding a bug-bounty operator through OWASP WSTG test {ident} — "
+                f"\"{ref.get('name', ident)}\" ({ref.get('cat_name', '')}).")
+        body = (
+            f"Test objective: {ref.get('objective', '')}\n"
+            f"General approach: {ref.get('how_to', '')}\n"
+            f"Reference tools: {ref.get('tools', '')}\n\n"
+            "Give COMPREHENSIVE, program-specific guidance for THIS engagement. Cover, as a tight "
+            "numbered list:\n"
+            "1. Exactly what to check on THESE hosts/endpoints for this test (name real hosts/paths).\n"
+            "2. Concrete steps and payloads to try.\n"
+            "3. Which recon-ctl lane/tool to run and the exact command.\n"
+            "4. What a VALID finding looks like here + the minimal PoC to capture.\n"
+            "5. Common false-positive / N-A pitfalls to avoid for this class.\n"
+            "Be specific to the program context above — do not give generic WSTG boilerplate.")
+    else:
+        g = STRIDE_GUIDE.get((ident or "").upper()[:1], {})
+        head = (f"You are guiding a bug-bounty operator through STRIDE threat modelling — "
+                f"category {ident.upper()[:1]} ({g.get('name', '')}) — for THIS engagement.")
+        body = (
+            f"Category focus: {g.get('prompt', '')}\n\n"
+            "Enumerate CONCRETE threats in this category over the app's actual assets, roles and "
+            "data-flows above. For each threat: name the specific host/endpoint/flow, map it to the "
+            "WSTG test(s) that confirm it, and state whether it's unauth-testable or needs two owned "
+            "accounts. Rank by likely payout/impact and end with the 2-3 to test first.")
+    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_DOCTRINE}"

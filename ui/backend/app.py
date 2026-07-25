@@ -552,9 +552,19 @@ async def api_workspace_create(body: dict = Depends(safety.require_confirm)):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/wstg/reference")
+async def api_wstg_reference():
+    """Static WSTG v4.2 reference (objective/how_to/tools/url per test) + the STRIDE guide.
+
+    Read-only grounding for the Guided walkthrough so no test is glossed over."""
+    return {"wstg": workspace.wstg_reference(), "stride": workspace.STRIDE_GUIDE}
+
+
 @app.get("/api/workspaces/{key}")
 async def api_workspace(key: str):
-    """Full workspace + LIVE joins: in-scope+paying ES hosts and findings.db rows."""
+    """Full workspace + LIVE joins: in-scope+paying ES hosts and findings.db rows.
+
+    Each WSTG item carries the merged static reference so the UI always has substance."""
     ws = workspace.load(key)
     if not ws:
         raise HTTPException(404, "workspace not found")
@@ -567,7 +577,42 @@ async def api_workspace(key: str):
         fnd = findings.list_findings(program=name, limit=200)["items"]
     except Exception:
         fnd = []
+    ws["wstg"] = workspace.merge_reference(ws.get("wstg", []))
     return {**ws, "hosts": hosts, "findings": fnd}
+
+
+@app.post("/api/workspaces/{key}/guide")
+async def api_workspace_guide(key: str, body: dict = Depends(safety.require_confirm)):
+    """AI-guided, program-specific guidance for one STRIDE/WSTG step.
+
+    Off-target by construction (Claude reasoning over context, no target packets) so no VPN
+    gate — it streams to the frontend over the existing task-output WS like the co-pilot."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    phase = (body.get("phase") or "").strip().lower()
+    if phase not in ("stride", "wstg"):
+        raise HTTPException(400, "phase must be 'stride' or 'wstg'")
+    ident = (body.get("id") or "").strip()
+    host = (body.get("host") or "").strip()
+    if host and any(c in host for c in " ;|&$`\n\t'\"\\"):
+        raise HTTPException(400, "bad host")
+    if phase == "wstg" and ident not in workspace.wstg_reference():
+        raise HTTPException(400, "unknown WSTG id")
+    if phase == "stride" and ident.upper()[:1] not in workspace.STRIDE_GUIDE:
+        raise HTTPException(400, "unknown STRIDE category")
+    name = ws.get("name") or ws.get("key")
+    try:
+        hosts = (await es.search(program=name, limit=25)).get("items", [])
+    except Exception:
+        hosts = []
+    endpoints = files.program_endpoints([h.get("host") for h in hosts])
+    prompt = workspace.build_guide_prompt(ws, phase, ident, host, hosts, endpoints)
+    sid = claude_console.new_session_id()
+    argv = claude_console.build_argv(sid, prompt, body.get("model"))
+    label = (ident or host or key)[:16]
+    t = await manager.spawn(f"guide:{phase}:{label}", argv)
+    return {**t.snapshot(), "session_id": sid, "task_id": t.id}
 
 
 @app.post("/api/workspaces/{key}/wstg")

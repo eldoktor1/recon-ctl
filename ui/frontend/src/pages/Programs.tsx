@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner, SortTh } from "../components/ui";
@@ -7,8 +8,10 @@ import { TaskConsole } from "../components/TaskConsole";
 import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
 import { api, type WorkspacesResp, type WorkspaceSummary, type WorkspaceCandidate,
-  type WorkspaceDetail, type WstgItem, type StrideThreat, type WsHost } from "../api";
+  type WorkspaceDetail, type WstgItem, type StrideThreat, type WsHost,
+  type WstgReference } from "../api";
 import { priorityColor, stateColor, verdictColor, classColor, asArr, fmtAgo } from "../format";
+import { isDemo, demoGuidance } from "../demo";
 
 // workspace/checklist status → color (todo / in-progress / done / na / finding + program status)
 const wsStatusColor: Record<string, string> = {
@@ -60,12 +63,20 @@ export default function Programs() {
   const toast = useToast();
   const [sel, setSel] = useState<string | null>(null);
   const [openTask, setOpenTask] = useState<number | null>(null);
+  const [sp, setSp] = useSearchParams();
 
-  // default the selection to the current workspace once the list arrives
+  // Deep-link from the Target Board (/programs?key=…): select that workspace once,
+  // then consume the param. Otherwise default to the current workspace.
   useEffect(() => {
-    if (sel || !list?.workspaces?.length) return;
-    setSel((list.workspaces.find((w) => w.current) || list.workspaces[0]).key);
-  }, [list, sel]);
+    if (!list?.workspaces?.length) return;
+    const urlKey = sp.get("key");
+    if (urlKey) {
+      if (list.workspaces.some((w) => w.key === urlKey)) setSel(urlKey);
+      sp.delete("key"); setSp(sp, { replace: true });
+      return;
+    }
+    if (!sel) setSel((list.workspaces.find((w) => w.current) || list.workspaces[0]).key);
+  }, [list, sp]);
 
   const { data: ws, loading: wsLoading, refetch: refetchWs } =
     useFetch<WorkspaceDetail>(sel ? `/api/workspaces/${encodeURIComponent(sel)}` : null, [sel]);
@@ -183,11 +194,11 @@ function RailRow({ w, active, onClick }: { w: WorkspaceSummary; active: boolean;
 }
 
 // --- Workspace view: header + sub-tabs ---------------------------------------
-type Tab = "overview" | "wstg" | "stride" | "notes";
+type Tab = "guided" | "overview" | "wstg" | "stride" | "notes";
 
 function WorkspaceView({ ws, onChanged, onTask }:
   { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void }) {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>("guided");
   const toast = useToast();
   const done = ws.wstg.filter((w) => w.status === "done").length;
   const total = ws.wstg.length;
@@ -201,7 +212,8 @@ function WorkspaceView({ ws, onChanged, onTask }:
   };
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: "overview", label: "Overview" }, { id: "wstg", label: `WSTG · ${done}/${total}` },
+    { id: "guided", label: "◎ Guided" }, { id: "overview", label: "Overview" },
+    { id: "wstg", label: `WSTG · ${done}/${total}` },
     { id: "stride", label: "STRIDE" }, { id: "notes", label: "Notes / Timeline" },
   ];
 
@@ -258,6 +270,7 @@ function WorkspaceView({ ws, onChanged, onTask }:
         ))}
       </div>
 
+      {tab === "guided" && <GuidedTab ws={ws} onChanged={onChanged} onTask={onTask} />}
       {tab === "overview" && <OverviewTab ws={ws} onChanged={onChanged} onTask={onTask} />}
       {tab === "wstg" && <WstgTab ws={ws} onChanged={onChanged} />}
       {tab === "stride" && <StrideTab ws={ws} onChanged={onChanged} />}
@@ -407,6 +420,304 @@ function HostRow({ h, expanded, onToggle, onDrawer, actions, onTask, onChanged }
         </tr>
       )}
     </>
+  );
+}
+
+// --- Guided walkthrough: STRIDE → WSTG, one step at a time, AI-driven --------
+type GuideStep = { phase: "stride" | "wstg"; key: string };
+
+function GuidedTab({ ws, onChanged, onTask }:
+  { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void }) {
+  const toast = useToast();
+  const hostActions = useHostActions();
+  const { data: ref } = useFetch<WstgReference>("/api/wstg/reference");
+  const enc = encodeURIComponent(ws.key);
+  const [idx, setIdx] = useState(0);
+  const [host, setHost] = useState("");
+  const [canned, setCanned] = useState<string | null>(null);
+  const [showMap, setShowMap] = useState(false);
+
+  // ordered walkthrough: 6 STRIDE categories, then all WSTG tests in canonical order
+  const steps = useMemo<GuideStep[]>(() => [
+    ...STRIDE_COLS.map((c) => ({ phase: "stride" as const, key: c.cat })),
+    ...ws.wstg.map((w) => ({ phase: "wstg" as const, key: w.id })),
+  ], [ws.wstg]);
+
+  const wstgById = useMemo(() => new Map(ws.wstg.map((w) => [w.id, w])), [ws.wstg]);
+  const isCovered = (s: GuideStep) =>
+    s.phase === "stride" ? (ws.stride[s.key as keyof StrideBoardT] || []).length > 0
+      : (wstgById.get(s.key)?.status || "todo") !== "todo";
+
+  const strideCovered = STRIDE_COLS.filter((c) => (ws.stride[c.cat] || []).length > 0).length;
+  const wstgCovered = ws.wstg.filter((w) => w.status !== "todo").length;
+
+  // reset per-step scratch when the focus changes
+  useEffect(() => { setHost(""); setCanned(null); }, [idx]);
+
+  const clamped = Math.min(idx, Math.max(0, steps.length - 1));
+  const step = steps[clamped];
+
+  const jumpNextUncovered = () => {
+    for (let i = 1; i <= steps.length; i++) {
+      const j = (clamped + i) % steps.length;
+      if (!isCovered(steps[j])) { setIdx(j); return; }
+    }
+    toast("ok", "every step is covered — nothing left uncovered");
+  };
+
+  const guide = async (phase: "stride" | "wstg", id: string, h?: string) => {
+    if (isDemo()) { setCanned(demoGuidance(phase, id)); return; }
+    setCanned(null);
+    try {
+      const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`,
+        { phase, id, host: h || undefined });
+      toast("ok", `Claude guidance #${t.id} — streaming below`);
+      onTask(t.id);
+    } catch (e: any) { toast("err", e.message); }
+  };
+
+  if (!steps.length) return <Panel><Empty>walkthrough not initialized</Empty></Panel>;
+
+  return (
+    <div className="min-h-0 flex-1 space-y-3 overflow-auto pb-4">
+      {/* progress header */}
+      <Panel>
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-ink)]">
+            <span className="text-[var(--color-accent)]">◎</span> Guided engagement
+          </div>
+          <div className="min-w-[160px] flex-1">
+            <div className="mb-0.5 flex items-center justify-between text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+              <span>STRIDE threat model</span><span className="mono">{strideCovered}/{STRIDE_COLS.length}</span>
+            </div>
+            <CoverageBar done={strideCovered} total={STRIDE_COLS.length} height={6} />
+          </div>
+          <div className="min-w-[160px] flex-1">
+            <div className="mb-0.5 flex items-center justify-between text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+              <span>WSTG · {ws.wstg.length} tests</span><span className="mono">{wstgCovered}/{ws.wstg.length}</span>
+            </div>
+            <CoverageBar done={wstgCovered} total={ws.wstg.length} height={6} />
+          </div>
+          <Btn size="sm" variant="primary" onClick={jumpNextUncovered}>next uncovered →</Btn>
+          <button onClick={() => setShowMap((v) => !v)}
+            className="mono rounded border border-[var(--color-border-bright)] px-2 py-1 text-[11px] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]">
+            {showMap ? "hide map" : "all steps"}
+          </button>
+        </div>
+        {showMap && <StepMap ws={ws} steps={steps} focus={clamped} isCovered={isCovered} onPick={setIdx} />}
+      </Panel>
+
+      {/* step nav */}
+      <div className="flex items-center justify-between gap-2">
+        <button onClick={() => setIdx((i) => Math.max(0, i - 1))} disabled={clamped === 0}
+          className="mono rounded border border-[var(--color-border-bright)] px-2.5 py-1 text-[11px] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)] disabled:opacity-40">
+          ← prev
+        </button>
+        <span className="mono text-[11px] text-[var(--color-ink-faint)]">
+          step {clamped + 1} / {steps.length} · {step.phase === "stride" ? "STRIDE" : "WSTG"}
+        </span>
+        <button onClick={() => setIdx((i) => Math.min(steps.length - 1, i + 1))} disabled={clamped === steps.length - 1}
+          className="mono rounded border border-[var(--color-border-bright)] px-2.5 py-1 text-[11px] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)] disabled:opacity-40">
+          next →
+        </button>
+      </div>
+
+      {step.phase === "stride"
+        ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
+            onGuide={() => guide("stride", step.key)} canned={canned} onNext={jumpNextUncovered} />
+        : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
+            actions={hostActions} onTask={onTask} onChanged={onChanged}
+            onGuide={() => guide("wstg", step.key, host)} canned={canned} onNext={jumpNextUncovered} />}
+    </div>
+  );
+}
+
+// compact "all steps" map — comprehensiveness made visible, nothing silently skipped
+function StepMap({ ws, steps, focus, isCovered, onPick }:
+  { ws: WorkspaceDetail; steps: GuideStep[]; focus: number;
+    isCovered: (s: GuideStep) => boolean; onPick: (i: number) => void }) {
+  const wstgGroups = useMemo(() => {
+    const m = new Map<string, { cat: string; cat_name: string; items: { i: number; it: WstgItem }[] }>();
+    steps.forEach((s, i) => {
+      if (s.phase !== "wstg") return;
+      const it = ws.wstg.find((w) => w.id === s.key)!;
+      const g = m.get(it.category) || { cat: it.category, cat_name: it.cat_name, items: [] };
+      g.items.push({ i, it }); m.set(it.category, g);
+    });
+    return Array.from(m.values());
+  }, [steps, ws.wstg]);
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-[var(--color-border)] pt-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mono w-16 shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">STRIDE</span>
+        {steps.map((s, i) => s.phase === "stride" && (
+          <button key={s.key} onClick={() => onPick(i)} title={s.key}
+            className={`mono rounded border px-1.5 py-0.5 text-[10px] ${i === focus ? "border-[var(--color-accent)] text-[var(--color-accent)]" : "border-[var(--color-border-bright)]"}`}
+            style={{ color: i === focus ? undefined : wsc(isCovered(s) ? "done" : "todo") }}>
+            {s.key}
+          </button>
+        ))}
+      </div>
+      {wstgGroups.map((g) => (
+        <div key={g.cat} className="flex flex-wrap items-center gap-1">
+          <span className="mono w-16 shrink-0 truncate text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]" title={g.cat_name}>{g.cat}</span>
+          {g.items.map(({ i, it }) => (
+            <button key={it.id} onClick={() => onPick(i)} title={`${it.id} · ${it.name} — ${it.status}`}
+              className={`mono h-5 w-6 rounded border text-[9px] ${i === focus ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"}`}
+              style={{ color: wsc(it.status), background: `${wsc(it.status)}18` }}>
+              {it.id.split("-")[2]}
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GuideBox({ canned }: { canned: string | null }) {
+  if (canned == null) return null;
+  return (
+    <div className="mt-2 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 p-3">
+      <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-[var(--color-accent)]">
+        <span>◎</span> Claude guidance <span className="text-[var(--color-ink-faint)]">(demo · canned)</span>
+      </div>
+      <div className="mono whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--color-ink-dim)]">{canned}</div>
+    </div>
+  );
+}
+
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext }:
+  { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
+    onChanged: () => void; onGuide: () => void; canned: string | null; onNext: () => void }) {
+  const toast = useToast();
+  const [val, setVal] = useState("");
+  const threats = ws.stride[cat as keyof StrideBoardT] || [];
+  const add = async () => {
+    if (!val.trim()) return;
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, threat: val.trim() }); setVal(""); toast("ok", "threat added"); onChanged(); }
+    catch (e: any) { toast("err", e.message); }
+  };
+  const label = STRIDE_COLS.find((c) => c.cat === cat)?.label || guideCat?.name || cat;
+  return (
+    <Panel title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-accent)]">{cat}</span>{label}<Badge>STRIDE</Badge></span>}
+      right={<Badge>{threats.length} threats</Badge>}>
+      {guideCat && (
+        <>
+          <p className="text-[12px] leading-relaxed text-[var(--color-ink-dim)]">{guideCat.prompt}</p>
+          {guideCat.examples?.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {guideCat.examples.map((e, i) => (
+                <li key={i} className="flex gap-2 text-[11px] text-[var(--color-ink-faint)]">
+                  <span className="text-[var(--color-accent)]">▹</span><span>{e}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
+        <span className="text-[10px] text-[var(--color-ink-faint)]">program-specific threats for this category → streams below</span>
+      </div>
+      <GuideBox canned={canned} />
+      <div className="mt-3 space-y-1">
+        {threats.map((t, i) => (
+          <div key={t.id || i} className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
+            <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: wsc(t.status) }} />
+            <span className="min-w-0 flex-1 text-[11px] text-[var(--color-ink)]">{t.threat}</span>
+          </div>
+        ))}
+        {!threats.length && <div className="px-1 py-1 text-[10px] text-[var(--color-ink-faint)]">no threats logged for this category yet</div>}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()}
+          placeholder="+ add a concrete threat for this category…"
+          className="mono flex-1 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
+        <Btn size="sm" onClick={add}>add</Btn>
+        <Btn size="sm" variant="primary" onClick={onNext}>next →</Btn>
+      </div>
+    </Panel>
+  );
+}
+
+const GUIDE_STATUSES = ["done", "finding", "na", "in-progress"];
+
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, onNext }:
+  { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
+    actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
+    onGuide: () => void; canned: string | null; onNext: () => void }) {
+  const toast = useToast();
+  const [note, setNote] = useState(item.note || "");
+  useEffect(() => { setNote(item.note || ""); }, [item.id]);
+  const post = async (status: string) => {
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/wstg`, { id: item.id, status, note }); toast("ok", `${item.id} → ${status}`); onChanged(); }
+    catch (e: any) { toast("err", e.message); }
+  };
+  const mark = async (status: string) => { await post(status); onNext(); };
+
+  return (
+    <Panel
+      title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-ink-faint)]">{item.id}</span>{item.name}</span>}
+      right={<div className="flex items-center gap-2"><Badge>{item.cat_name}</Badge><Badge color={wsc(item.status)} filled>{item.status}</Badge></div>}>
+      {/* static reference — always shown so nothing is glossed over */}
+      <div className="space-y-2">
+        {item.objective && (
+          <div><span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">objective</span>
+            <p className="text-[12px] leading-relaxed text-[var(--color-ink)]">{item.objective}</p></div>
+        )}
+        {item.how_to && (
+          <div><span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">how to test</span>
+            <p className="text-[12px] leading-relaxed text-[var(--color-ink-dim)]">{item.how_to}</p></div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {item.tools && item.tools.split(",").map((t, i) => (
+            <span key={i} className="mono rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)]">{t.trim()}</span>
+          ))}
+          {item.wstg_url && (
+            <a href={item.wstg_url} target="_blank" rel="noreferrer"
+              className="mono text-[10px] text-[var(--color-accent)] hover:underline">WSTG ↗</a>
+          )}
+        </div>
+      </div>
+
+      {/* AI guidance */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-3">
+        <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
+        <span className="text-[10px] text-[var(--color-ink-faint)]">comprehensive, program-specific steps for this test → streams below</span>
+      </div>
+      <GuideBox canned={canned} />
+
+      {/* inline testing on a chosen host */}
+      <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">run on host · VPN-gated</span>
+          <select value={host} onChange={(e) => setHost(e.target.value)}
+            className="mono max-w-[260px] rounded border border-[var(--color-border-bright)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]">
+            <option value="">— pick a host —</option>
+            {ws.hosts.map((h) => <option key={h.host} value={h.host} style={{ background: "var(--color-panel)" }}>{h.host}</option>)}
+          </select>
+        </div>
+        {host
+          ? <LeadActions host={host} vulnClass={null} actions={actions} onTask={onTask} onChanged={onChanged} />
+          : <div className="text-[10px] text-[var(--color-ink-faint)]">pick a host to run the relevant tools without leaving this step</div>}
+      </div>
+
+      {/* status + advance */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] pt-3">
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="note / evidence…"
+          onKeyDown={(e) => e.key === "Enter" && post(item.status)}
+          className="mono min-w-[180px] flex-1 rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
+        {GUIDE_STATUSES.map((s) => (
+          <button key={s} onClick={() => mark(s)} title={`mark ${item.id} ${s} and advance`}
+            className="mono rounded border px-2 py-1 text-[11px] transition"
+            style={{ borderColor: `${wsc(s)}66`, color: wsc(s), background: `${wsc(s)}12` }}>
+            {s === "in-progress" ? "wip" : s}
+          </button>
+        ))}
+        <Btn size="sm" variant="primary" onClick={onNext}>next test →</Btn>
+      </div>
+    </Panel>
   );
 }
 

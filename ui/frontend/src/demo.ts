@@ -207,6 +207,32 @@ const WSTG = [
   { id: "WSTG-APIT-01", category: "APIT", cat_name: "API Testing", name: "API Reconnaissance", status: "done", note: "GraphQL introspection on, schema harvested", updated_at: ago(700) },
 ];
 
+// static WSTG reference (subset covering the demo WSTG items) — objective/how_to/tools/url
+const WSTG_REF_DEMO: Record<string, { objective: string; how_to: string; tools: string; wstg_url: string }> = {
+  "WSTG-INFO-02": { objective: "Identify the web-server product/version to map known issues.", how_to: "Inspect Server headers and error-page quirks, confirm with an active fingerprint. Note CDNs that mask the origin.", tools: "httpx, whatweb, nmap -sV, Burp", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server" },
+  "WSTG-INFO-08": { objective: "Produce the architecture picture: tiers, CDNs, gateways, data flows.", how_to: "Diagram how requests route and where trust boundaries and auth enforcement sit.", tools: "Burp, DNS/CDN inspection, jsintel map", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/08-Fingerprint_Web_Application_Framework" },
+  "WSTG-INFO-10": { objective: "Understand the app's flows/states to reason about coverage.", how_to: "Map main workflows and build a graph of transitions; use it to spot access-control gaps.", tools: "Burp, recon-params crawl-host", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/10-Map_Application_Architecture" },
+  "WSTG-CONF-05": { objective: "Locate admin/management interfaces reachable from the internet.", how_to: "Brute common admin paths and inspect JS routes; check auth on each.", tools: "ffuf, recon-kr, Burp", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/05-Enumerate_Infrastructure_and_Application_Admin_Interfaces" },
+  "WSTG-CONF-07": { objective: "Verify HSTS is present and correctly configured.", how_to: "Check the Strict-Transport-Security header; missing HSTS alone is usually low without impact.", tools: "curl -I, testssl.sh, Burp", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/07-Test_HTTP_Strict_Transport_Security" },
+  "WSTG-ATHN-01": { objective: "Confirm credentials are only transmitted over TLS.", how_to: "Watch login/reset/change requests; confirm no credential over HTTP or in a URL.", tools: "Burp, curl, testssl.sh", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/04-Authentication_Testing/01-Testing_for_Credentials_Transported_over_an_Encrypted_Channel" },
+  "WSTG-ATHN-03": { objective: "Test whether the lockout/anti-bruteforce mechanism is effective.", how_to: "Submit repeated failed logins; check for lockout/throttle/CAPTCHA. Pair with enumeration for impact.", tools: "Burp Intruder (throttled), manual", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/04-Authentication_Testing/03-Testing_for_Weak_Lock_Out_Mechanism" },
+  "WSTG-ATHZ-02": { objective: "Test for authorization-schema bypass (low-priv reaching high-priv).", how_to: "Replay privileged requests from a low-priv session; use Burp Autorize. Two owned accounts.", tools: "Burp Autorize, recon-ai-hunter", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema" },
+  "WSTG-ATHZ-04": { objective: "Test for IDOR/BOLA: object refs that aren't authorization-checked.", how_to: "With TWO owned accounts, swap object-ref IDs to read the other account's object. Never third-party IDs.", tools: "recon-idor candidates, Burp Autorize", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References" },
+  "WSTG-INPV-01": { objective: "Test for reflected XSS (input reflected and executed).", how_to: "Inject context-aware break-out payloads and confirm EXECUTION, not reflection. dalfox verifies headlessly.", tools: "recon-params confirm xss (dalfox), Burp", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting" },
+  "WSTG-INPV-05": { objective: "Test for SQL injection.", how_to: "Use the SAFE ' vs '' differential to confirm, THEN sqlmap for depth — never mass-dump third-party PII.", tools: "recon-params confirm sqli, Burp", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection" },
+  "WSTG-BUSL-01": { objective: "Test business-logic data validation (server trusts client constraints).", how_to: "Bypass client validation and submit values the server should reject; prove a state change with impact.", tools: "Burp, manual", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/10-Business_Logic_Testing/01-Test_Business_Logic_Data_Validation" },
+  "WSTG-APIT-01": { objective: "Recon the API surface: endpoints, schemas, auth model, object refs.", how_to: "Harvest routes from JS/specs (OpenAPI/GraphQL introspection) and brute API paths; map object-ref params.", tools: "recon-jsintel, recon-kr, recon-graphql", wstg_url: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/12-API_Testing/01-API_Reconnaissance" },
+};
+
+const STRIDE_GUIDE_DEMO: Record<string, { name: string; prompt: string; examples: string[] }> = {
+  S: { name: "Spoofing", prompt: "Enumerate identity/authentication threats: where can an attacker pretend to be another user, service, or the server itself? Focus on auth schema, token/JWT forgery, session fixation, SSO/OAuth, and email/host spoofing.", examples: ["Forgeable or unbound session/JWT token (alg=none) → impersonation.", "Password-reset link honours a spoofed Host header → account takeover."] },
+  T: { name: "Tampering", prompt: "Enumerate integrity threats: which client-controlled data does the server trust without re-validation? Focus on hidden/priced fields, mass-assignment, param pollution, injection.", examples: ["Client-side price/quantity trusted at checkout.", "Mass-assignment of role/tenant on a profile update."] },
+  R: { name: "Repudiation", prompt: "Enumerate accountability threats: what actions lack a reliable, tamper-evident audit trail?", examples: ["Sensitive state-changing action produces no server-side audit record.", "Log injection via unsanitised input corrupts the trail."] },
+  I: { name: "Information Disclosure", prompt: "Enumerate confidentiality threats: where can data leak to an unauthorised party? Focus on IDOR/BOLA, verbose errors, leaked JS secrets, open buckets, backup exposure.", examples: ["IDOR on an object-ref endpoint returns another tenant's data.", "Leaked API key/endpoint in a JS bundle or source-map."] },
+  D: { name: "Denial of Service", prompt: "Enumerate availability threats — non-damaging probes only (never DoS an in-scope target). Focus on unbounded/expensive operations and missing rate limits, reported by reasoning.", examples: ["Unbounded GraphQL nesting / large export with no cost limit.", "No rate limit on an expensive endpoint (report the gap, do not flood)."] },
+  E: { name: "Elevation of Privilege", prompt: "Enumerate authorization threats: where can a low-priv user reach high-priv functions or another tenant? Focus on vertical/horizontal bypass, forced browsing to admin, IDOR-to-privesc (two owned accounts).", examples: ["Low-priv session replaying an admin-only request succeeds.", "Tampering a role/plan attribute elevates privileges server-side."] },
+};
+
 const STRIDE = {
   S: [{ id: "s1", threat: "Session token predictable / reusable across users", note: "check JWT alg=none", status: "todo", hosts: ["app.glassdoor-demo.example.com"] }],
   T: [{ id: "t1", threat: "Client-side price param tampering at checkout", note: "?amount= trusted server-side?", status: "in-progress", hosts: [] }],
@@ -227,9 +253,10 @@ const WS_FINDINGS = FINDINGS.slice(0, 3).map((f) => ({ ...f, program: "Glassdoor
 
 function workspaceDetail(key: string) {
   const s = WORKSPACES.workspaces.find((w) => w.key === key) || WORKSPACES.workspaces[0];
+  const wstg = WSTG.map((w) => ({ ...w, ...(WSTG_REF_DEMO[w.id] || {}) }));
   return {
     key: s.key, name: s.name, platform: s.platform, status: s.status, current: s.current, added_at: s.added_at,
-    wstg: WSTG, stride: STRIDE, classes: WS_CLASSES,
+    wstg, stride: STRIDE, classes: WS_CLASSES,
     notes: [
       { ts: ago(40), text: "IDOR on /v2/orders/{id} confirmed with 2 owned accounts — drafting report." },
       { ts: ago(320), text: "GraphQL introspection ON but no sensitive unauth mutation reachable — info-only, not reporting." },
@@ -268,6 +295,7 @@ export function demoGet(path: string): unknown | undefined {
   if (p === "/api/lanes/activity") return LANES;
   if (p.startsWith("/api/lanes/") && p.endsWith("/log")) return LANE_LOG;
   if (p === "/api/lanes") return LANES.filter((l) => l.target).map((l) => ({ lane: l.lane, sub: l.lane, target: l.target, desc: l.desc }));
+  if (p === "/api/wstg/reference") return { wstg: WSTG_REF_DEMO, stride: STRIDE_GUIDE_DEMO };
   if (p === "/api/workspaces") return WORKSPACES;
   if (p.startsWith("/api/workspaces/")) return workspaceDetail(decodeURIComponent(p.slice("/api/workspaces/".length)));
   if (p === "/api/host-actions") return HOST_ACTIONS;
@@ -282,4 +310,31 @@ export function demoGet(path: string): unknown | undefined {
 // Mutating POSTs in demo mode just acknowledge (with a fake task id).
 export function demoAction(): { ok: true; id: number } {
   return { ok: true, id: Math.floor(Math.random() * 9000) + 1000 };
+}
+
+// Canned "Guide me (Claude)" snippet for demo mode — the live AI call is skipped.
+export function demoGuidance(phase: string, id: string): string {
+  if (phase === "stride") {
+    const g = STRIDE_GUIDE_DEMO[id.toUpperCase().slice(0, 1)];
+    return [
+      `STRIDE · ${g?.name || id} — program-specific threats (demo)`,
+      "",
+      "1. api.acme-demo.example.com — /v2/orders/{id} numeric object-ref → horizontal access-control (WSTG-ATHZ-04). Test with two owned accounts.",
+      "2. gql.initech-demo.example.com — unauth GraphQL mutation reachable → sensitive action without auth (WSTG-APIT-01 + ATHZ-02).",
+      "3. app.glassdoor-demo.example.com — session/JWT binding: check alg=none / reset Host-header poisoning (WSTG-ATHN-04/09).",
+      "",
+      "Test first: #1 (highest payout, unauth-surfaceable then 2-account confirm). Enable AI to get a live, fully-contextual pass.",
+    ].join("\n");
+  }
+  return [
+    `${id} — comprehensive guidance for this engagement (demo)`,
+    "",
+    "1. Check THIS app: focus on api.acme-demo.example.com and shop.globex-demo.example.com — the endpoints jsintel surfaced (/v2/orders, /search).",
+    "2. Steps/payloads: start with the safe confirm primitive for this class; escalate only to prove impact.",
+    "3. Run: use the host picker below + the inline tool row (e.g. recon-params confirm / verify) on a chosen host.",
+    "4. Valid finding: a demonstrated primitive (execution / injectable / cross-account read) with a minimal read-only PoC.",
+    "5. Avoid: reflection≠XSS, version-only/CORS-reflection N-A, product-class dups, third-party IDs.",
+    "",
+    "Enable AI (disable demo mode) to stream a live, fully program-specific walkthrough here.",
+  ].join("\n");
 }

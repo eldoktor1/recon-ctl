@@ -47,6 +47,47 @@ def benched_host_set() -> set[str]:
     """Hosts currently benched (active 7-day ignore) — hide until the TTL lapses."""
     return {(r.get("host") or "").lower() for r in active_ignores() if r.get("host")}
 
+
+def program_endpoints(hosts: list[str] | None, limit: int = 40) -> list[str]:
+    """Best-effort sample of jsintel-discovered endpoints for a set of program hosts.
+
+    Reads ~/recon/js_recon/endpoints.jsonl (the IDOR/BAC feedstock) and keeps rows whose
+    host is in the set (or whose URL contains one). Never raises — missing file → []."""
+    host_set = {(h or "").lower() for h in (hosts or []) if h}
+    if not host_set:
+        return []
+    p = config.BASE_DIR / "js_recon" / "endpoints.jsonl"
+    out: list[str] = []
+    try:
+        with p.open(encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    d = json.loads(ln)
+                except Exception:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                host = str(d.get("host") or d.get("hostname") or "").lower()
+                url = d.get("url") or d.get("endpoint") or d.get("path") or ""
+                if not url:
+                    continue
+                if host and host not in host_set:
+                    if not any(hh in str(url).lower() for hh in host_set):
+                        continue
+                if not host and not any(hh in str(url).lower() for hh in host_set):
+                    continue
+                s = str(url)[:300]
+                if s not in out:
+                    out.append(s)
+                if len(out) >= limit:
+                    break
+    except Exception:
+        return out
+    return out
+
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner } from "../components/ui";
@@ -17,6 +17,17 @@ export default function TargetBoard() {
   const [q, setQ] = useState(sp.get("q") || "");
   const [confirm, setConfirm] = useState<Program | null>(null);
   const toast = useToast();
+  const navigate = useNavigate();
+
+  // Bridge: fresh program on the board -> start (or reuse) its workspace and jump
+  // straight into it to work it systematically (STRIDE + WSTG).
+  const work = async (p: Program) => {
+    try {
+      await api.action(`/api/workspaces`, { key: p.key, name: p.name, platform: p.platform });
+      toast("ok", `${p.name} — workspace ready`);
+      navigate(`/programs?key=${encodeURIComponent(p.key)}`);
+    } catch (e: any) { toast("err", e.message); }
+  };
 
   const onboard = async () => {
     if (!confirm) return;
@@ -62,7 +73,7 @@ export default function TargetBoard() {
                   <td className="mono px-2 py-2 text-xs text-[var(--color-good)]">{p.payout ? `$${p.payout}` : p.pays ? "pays" : "—"}</td>
                   <td className="max-w-[220px] truncate px-2 py-2 text-[11px] text-[var(--color-ink-faint)]" title={p.why}>{p.why || "—"}</td>
                   <td className="mono px-2 py-2 text-xs text-[var(--color-accent)]">{p.score}</td>
-                  <td className="px-4 py-2 text-right"><Btn size="sm" onClick={() => setConfirm(p)}>onboard</Btn></td>
+                  <td className="px-4 py-2 text-right"><span className="inline-flex justify-end gap-2"><Btn size="sm" onClick={() => setConfirm(p)}>onboard</Btn><Btn size="sm" onClick={() => work(p)}>work →</Btn></span></td>
                 </tr>
               ))}
             </tbody>

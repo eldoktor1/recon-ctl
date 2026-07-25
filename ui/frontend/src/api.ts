@@ -121,9 +121,20 @@ export interface WorkspaceCandidate { key: string; name: string; platform?: stri
 export interface WorkspacesResp { workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] }
 
 // status ∈ todo | in-progress | done | na | finding
+// objective/how_to/tools/wstg_url are merged from the static WSTG_REFERENCE.
 export interface WstgItem {
   id: string; category: string; cat_name: string; name: string;
   status: string; note?: string; updated_at?: string;
+  objective?: string; how_to?: string; tools?: string; wstg_url?: string;
+}
+export interface WstgRefItem {
+  id: string; category: string; cat_name: string; name: string;
+  objective: string; how_to: string; tools: string; wstg_url: string;
+}
+export interface StrideGuideCat { name: string; prompt: string; examples: string[] }
+export interface WstgReference {
+  wstg: Record<string, WstgRefItem>;
+  stride: Record<string, StrideGuideCat>;
 }
 export interface StrideThreat {
   id?: string; threat: string; note?: string; status?: string; hosts?: string[];
