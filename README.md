@@ -168,6 +168,7 @@ recon-fresh | recon-top      # true-fresh queue · top triage targets
 
 ## Docs & meta
 
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — configure the AI model (Claude + local fallback agent), Burp/Brave MCP, Mullvad egress, ES + secrets, and lanes. The **Settings → AI models · wizard** does most of it in-UI.
 - [`CLAUDE.md`](CLAUDE.md) — the operating doctrine (the motto, the lanes, the hard lines).
 - [`docs/knowledge/`](docs/knowledge/) — 45+ reusable `class-*` / `tech-*` / `tool-*` KB docs.
 - [`docs/QUICKSTART.md`](docs/QUICKSTART.md) · [`SECURITY.md`](SECURITY.md) ·

@@ -143,8 +143,8 @@ emit_local_streamjson() {  # $1 = user message
 serve_local() {  # $1 = message
   local agent="$REPO_DIR/scripts/ai_agent.py"
   if [[ "${AI_AGENT_ENABLED:-1}" == "1" && -f "$agent" ]] && command -v python3 >/dev/null 2>&1; then
-    if AGENT_MODEL="${AI_AGENT_MODEL:-hermes3:8b}" OLLAMA_URL="$OLLAMA_URL" \
-       python3 "$agent" "$1" 2>>"$STATE_DIR/ai_agent.err"; then
+    if AGENT_MODEL="${AI_AGENT_MODEL:-$(cat "$STATE_DIR/ai_agent_model" 2>/dev/null || echo hermes3:8b)}" \
+       OLLAMA_URL="$OLLAMA_URL" python3 "$agent" "$1" 2>>"$STATE_DIR/ai_agent.err"; then
       return 0
     fi
   fi

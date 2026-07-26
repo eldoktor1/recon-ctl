@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import mimetypes
+import os
 import re
 from typing import Any
+
+import httpx
 
 # PWA: ensure correct content types for the manifest + service worker
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -372,6 +375,67 @@ async def api_hunt(lane: str, body: dict = Depends(safety.require_confirm)):
 async def api_claude_config():
     """Is the in-UI Claude co-pilot wired up, and which models are offered."""
     return claude_console.available()
+
+
+# --------------------------------------------------------------------------- AI model wizard
+_AI_AGENT_MODEL_FILE = config.STATE_DIR / "ai_agent_model"   # persisted local-agent model choice
+_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,120}$")
+
+
+@app.get("/api/ai/models")
+async def api_ai_models():
+    """State for the AI-model wizard: Claude status + installed local (Ollama) models + which one
+    is the fallback agent + live failover state."""
+    models, ollama_up = [], False
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            r = await cl.get(f"{_OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                ollama_up = True
+                for m in (r.json().get("models") or []):
+                    models.append({"name": m.get("name"), "size_gb": round((m.get("size") or 0) / 1e9, 1)})
+    except Exception:
+        pass
+    agent = "hermes3:8b"
+    try:
+        if _AI_AGENT_MODEL_FILE.exists():
+            agent = (_AI_AGENT_MODEL_FILE.read_text().strip() or agent)
+    except Exception:
+        pass
+    cfg = claude_console.available()
+    return {
+        "ollama_up": ollama_up,
+        "ollama_models": sorted(models, key=lambda x: x["name"]),
+        "agent_model": agent,
+        "recommended": "hermes3:8b",
+        "claude": {"bin": cfg.get("claude_bin"), "available": cfg.get("available"),
+                   "provider": cfg.get("provider"), "provider_label": cfg.get("provider_label")},
+        "fallback": claude_console.fallback_state(),
+    }
+
+
+@app.post("/api/ai/agent-model")
+async def api_ai_set_agent_model(body: dict = Depends(safety.require_confirm)):
+    """Pick which local model the co-pilot falls over to (persisted; read by the console script)."""
+    m = (body.get("model") or "").strip()
+    if not _MODEL_RE.match(m):
+        raise HTTPException(400, "bad model name")
+    try:
+        _AI_AGENT_MODEL_FILE.write_text(m)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True, "agent_model": m}
+
+
+@app.post("/api/ai/pull")
+async def api_ai_pull(body: dict = Depends(safety.require_confirm)):
+    """Pull a local (Ollama) model — streams progress to the task console."""
+    m = (body.get("model") or "").strip()
+    if not _MODEL_RE.match(m):
+        raise HTTPException(400, "bad model name")
+    t = await manager.spawn(f"ollama-pull:{m[:24]}", ["ollama", "pull", m])
+    return {**t.snapshot(), "task_id": t.id}
 
 
 @app.get("/api/claude/sessions")

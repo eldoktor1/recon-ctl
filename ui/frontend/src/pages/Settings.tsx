@@ -1,7 +1,9 @@
-import { clearToken, getToken, type ClaudeConfig } from "../api";
+import { useState } from "react";
+import { api, clearToken, getToken, type ClaudeConfig } from "../api";
 import { useFetch, useLiveStatus } from "../hooks";
 import { Panel, Badge, Dot, Spinner } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
+import { TaskConsole } from "../components/TaskConsole";
 import { isDemo, setDemo } from "../demo";
 
 export default function Settings() {
@@ -16,6 +18,8 @@ export default function Settings() {
       <h1 className="text-lg font-semibold">Settings</h1>
 
       <AIEngine />
+
+      <AIModelWizard />
 
       <Panel title="demo mode">
         <div className="space-y-3 text-sm">
@@ -134,6 +138,98 @@ function AIEngine() {
           </p>
         </div>
       )}
+    </Panel>
+  );
+}
+
+interface AIModelsResp {
+  ollama_up: boolean;
+  ollama_models: { name: string; size_gb: number }[];
+  agent_model: string;
+  recommended: string;
+  claude: { bin?: boolean; available?: boolean; provider?: string; provider_label?: string };
+  fallback: { active_provider: string; fallback_active: boolean; claude_reset_at: string | null };
+}
+
+// Interactive wizard: connect Claude (primary) + pick/pull the local fallback AGENT model.
+function AIModelWizard() {
+  const { data, loading, refetch } = useFetch<AIModelsResp>("/api/ai/models");
+  const toast = useToast();
+  const [pullName, setPullName] = useState("");
+  const [pullTask, setPullTask] = useState<number | null>(null);
+
+  const setAgent = async (model: string) => {
+    try { await api.action("/api/ai/agent-model", { model }); toast("ok", `local agent → ${model}`); refetch(); }
+    catch (e: any) { toast("err", e.message); }
+  };
+  const pull = async (model: string) => {
+    const m = model.trim(); if (!m) return;
+    try { const t = await api.action<{ id: number }>("/api/ai/pull", { model: m }); toast("ok", `pulling ${m} — streaming below`); setPullTask(t.id); setPullName(""); }
+    catch (e: any) { toast("err", e.message); }
+  };
+
+  const models = data
+    ? (data.ollama_models.some((m) => m.name === data.agent_model) ? data.ollama_models : [{ name: data.agent_model, size_gb: 0 }, ...data.ollama_models])
+    : [];
+  const hasRec = !!data?.ollama_models.some((m) => m.name.startsWith("hermes3"));
+
+  return (
+    <Panel title="AI models · wizard"
+      right={data?.fallback?.fallback_active ? <Badge color="var(--color-warn)">on local fallback</Badge> : <Badge color="var(--color-good)">Claude active</Badge>}>
+      {loading && !data ? <Spinner /> : !data ? <div className="text-xs text-[var(--color-ink-faint)]">unavailable</div> : (
+        <div className="space-y-3 text-sm">
+          {/* Claude — primary */}
+          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-3">
+            <div className="mb-1 flex items-center gap-2">
+              <Dot color={data.claude.available && data.claude.bin ? "var(--color-good)" : "var(--color-bad)"} />
+              <span className="font-semibold text-[var(--color-ink)]">Claude — primary brain</span>
+              <Badge>{data.claude.provider_label || "Anthropic"}</Badge>
+            </div>
+            <div className="text-[11px] text-[var(--color-ink-dim)]">
+              {data.claude.bin ? "CLI found on the box." : "claude CLI not found on the box."} Runs on your Max subscription (no API key).
+              For full offensive-security capability, enroll in Anthropic's Cyber Verification Program.
+            </div>
+            <div className="mono mt-1.5 flex flex-wrap items-center gap-3 text-[10px] text-[var(--color-ink-faint)]">
+              <span>connect: run <span className="text-[var(--color-accent)]">claude</span> → <span className="text-[var(--color-accent)]">/login</span></span>
+              <a href="https://portal.anthropic.com/programs/cvp" target="_blank" rel="noreferrer" className="text-[var(--color-info)] hover:underline">apply for CVP ↗</a>
+            </div>
+          </div>
+
+          {/* Local agent — fallback */}
+          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <Dot color={data.ollama_up ? "var(--color-good)" : "var(--color-bad)"} pulse={data.fallback.fallback_active} />
+              <span className="font-semibold text-[var(--color-ink)]">Local agent — fallback when Claude is rate-limited</span>
+              {data.fallback.fallback_active && <Badge color="var(--color-warn)">active now</Badge>}
+            </div>
+            {!data.ollama_up ? (
+              <div className="text-[11px] text-[var(--color-bad)]">Ollama not reachable at 127.0.0.1:11434 — start it: <span className="mono">systemctl --user start ollama</span> (or <span className="mono">ollama serve</span>).</div>
+            ) : (
+              <>
+                <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-[var(--color-ink-faint)]">agent model:</span>
+                  <select value={data.agent_model} onChange={(e) => setAgent(e.target.value)}
+                    className="mono rounded border border-[var(--color-border-bright)] bg-[var(--color-panel)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]">
+                    {models.map((m) => <option key={m.name} value={m.name}>{m.name}{m.size_gb ? ` · ${m.size_gb}GB` : ""}</option>)}
+                  </select>
+                  {data.agent_model === data.recommended && <Badge color="var(--color-good)">recommended</Badge>}
+                </div>
+                <div className="text-[10px] text-[var(--color-ink-faint)]">
+                  {data.ollama_models.length} installed · best tool-driving pick: <span className="mono text-[var(--color-accent)]">{data.recommended}</span> (native tool-calling + low-refusal). The agent gets bash + web_search parity with the co-pilot.
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input value={pullName} onChange={(e) => setPullName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pull(pullName)}
+                    placeholder="pull a model… e.g. hermes3:8b"
+                    className="mono min-w-[180px] flex-1 rounded border border-[var(--color-border-bright)] bg-[var(--color-panel)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
+                  <Btn size="sm" onClick={() => pull(pullName)}>pull</Btn>
+                  {!hasRec && <Btn size="sm" variant="primary" onClick={() => pull("hermes3:8b")}>pull hermes3:8b</Btn>}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+      {pullTask != null && <TaskConsole tid={pullTask} onClose={() => setPullTask(null)} onChanged={refetch} />}
     </Panel>
   );
 }
