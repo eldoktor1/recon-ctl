@@ -40,14 +40,17 @@ ALIASES_F=os.path.join(PRIV,"email_aliases.json")
 PROFILES_F=os.path.join(PRIV,"signup_profiles.json")
 CREDS_F=os.path.join(PRIV,"account_creds.md")
 
-# built-in fallback alias patterns (overridden by email_aliases.json if present)
+# Built-in PLACEHOLDER alias patterns. Put YOUR real emails in
+#   ~/recon/state/private_programs/email_aliases.json
+# (same shape as below — kept OUT of the repo); it overrides these at runtime. The
+# platform "ninja" domains are each platform's private email-relay for signups.
 DEFAULT_ALIASES={
- "bugcrowd":{"base":"you@bugcrowdninja.com","plus":"eldoktor1+{tag}@bugcrowdninja.com"},
- "hackerone":{"base":"you@wearehackerone.com","plus":"eldoktor_1+{tag}@wearehackerone.com"},
- "yeswehack":{"base":"you@yeswehack.ninja","plus":"you@yeswehack.ninja"},
- "intigriti":{"base":"you@example.com","plus":"mhabskhron+{tag}@gmail.com"},
- "gmail":{"base":"you@example.com","plus":"mhabskhron+{tag}@gmail.com"},
- "default":{"base":"you@example.com","plus":"mhabskhron+{tag}@gmail.com"},
+ "bugcrowd":{"base":"you@bugcrowdninja.com","plus":"you+{tag}@bugcrowdninja.com"},
+ "hackerone":{"base":"you@wearehackerone.com","plus":"you+{tag}@wearehackerone.com"},
+ "yeswehack":{"base":"you@yeswehack.ninja","plus":"you+{tag}@yeswehack.ninja"},
+ "intigriti":{"base":"you@example.com","plus":"you+{tag}@example.com"},
+ "gmail":{"base":"you@example.com","plus":"you+{tag}@example.com"},
+ "default":{"base":"you@example.com","plus":"you+{tag}@example.com"},
 }
 PW_SYMBOLS="!@#$%^&*-_=+"
 
