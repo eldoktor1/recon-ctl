@@ -773,6 +773,69 @@ async def api_workspace_note_delete(key: str, body: dict = Depends(safety.requir
         raise HTTPException(404, "workspace not found")
 
 
+# --------------------------------------------------------------------------- hunter by vuln-class
+# Per-class hunting cockpit: pick a class → its fitting in-scope+paying targets (ES triage_classes),
+# the SAFE confirm primitive for that class, the on-demand command, and the KB methodology doc.
+HUNTER_CLASSES: list[dict] = [
+    {"cls": "xss", "label": "Cross-Site Scripting", "kb": "class-xss.md",
+     "confirm": "dalfox — marker must EXECUTE (reflection ≠ XSS)", "cmd": "recon-params confirm xss <host>"},
+    {"cls": "sqli", "label": "SQL Injection", "kb": "class-sqli.md",
+     "confirm": "' vs '' error/boolean differential → sqlmap PoC-depth", "cmd": "recon-params confirm sqli <host>"},
+    {"cls": "idor", "label": "IDOR / BOLA", "kb": "class-idor.md",
+     "confirm": "TWO OWNED accounts, swap owned IDs (human-confirmed)", "cmd": "recon-hunter (safe-probe + plan)"},
+    {"cls": "ssrf", "label": "SSRF", "kb": "class-ssrf.md",
+     "confirm": "OUT-OF-BAND callback to an interactsh canary", "cmd": ""},
+    {"cls": "graphql", "label": "GraphQL", "kb": "class-graphql.md",
+     "confirm": "introspection schema → reason (read-only, never a mutation)", "cmd": "recon-graphql <host>"},
+    {"cls": "takeover", "label": "Subdomain Takeover", "kb": "class-takeover.md",
+     "confirm": "NXDOMAIN / unclaimed provider fingerprint", "cmd": ""},
+    {"cls": "bucket", "label": "Cloud Buckets", "kb": "class-bucket-exposure.md",
+     "confirm": "read-only ACL/list; public-WRITE = confirmed", "cmd": "recon-buckets"},
+    {"cls": "cache", "label": "Web-Cache Deception", "kb": "class-cache-deception.md",
+     "confirm": "cacheability flip under our OWN cache-buster (never poison shared)", "cmd": "recon-wcd <host>"},
+    {"cls": "nday", "label": "n-day / KEV", "kb": "class-nday.md",
+     "confirm": "version-reason the KEV/CVE match into range", "cmd": "recon-nday"},
+    {"cls": "secrets", "label": "Leaked Secrets", "kb": "class-clientside-secrets.md",
+     "confirm": "trufflehog --only-verified (LIVE secret)", "cmd": ""},
+    {"cls": "blindxss", "label": "Blind / Stored XSS", "kb": "class-blind-xss.md",
+     "confirm": "interactsh beacon fires later (e.g. admin console)", "cmd": "recon-blindxss"},
+    {"cls": "domxss", "label": "DOM XSS", "kb": "class-domxss.md",
+     "confirm": "dalfox --deep-domxss --force-headless-verification (EXECUTION)", "cmd": "recon-domxss <host>"},
+    {"cls": "ssti", "label": "SSTI", "kb": "",
+     "confirm": "{{a*b}} evaluates to the product (math only, never RCE)", "cmd": ""},
+    {"cls": "redirect", "label": "Open Redirect", "kb": "",
+     "confirm": "param drives Location: to OUR canary host", "cmd": "recon-params confirm redirect <host>"},
+    {"cls": "jwt", "label": "JWT attacks", "kb": "class-jwt-attacks.md",
+     "confirm": "alg-confusion / weak-secret on an OWNED token (human)", "cmd": ""},
+    {"cls": "smuggling", "label": "Request Smuggling", "kb": "class-request-smuggling.md",
+     "confirm": "CL.TE / TE.CL timing differential (careful, in-scope only)", "cmd": ""},
+]
+
+
+@app.get("/api/hunter/classes")
+async def api_hunter_classes():
+    """The vuln-class registry with a live count of in-scope + paying targets per class."""
+    async def count(c: dict) -> dict:
+        try:
+            r = await es.search(cls=c["cls"], pays=True, limit=0)
+            n = r.get("total", 0)
+        except Exception:
+            n = 0
+        return {**c, "count": n, "kb_exists": bool(c["kb"])}
+    rows = await asyncio.gather(*[count(c) for c in HUNTER_CLASSES])
+    return {"classes": sorted(rows, key=lambda x: -x["count"])}
+
+
+@app.get("/api/hunter/{cls}")
+async def api_hunter_class(cls: str, limit: int = 60):
+    """Ranked in-scope + paying targets for one class + its metadata (confirm primitive, KB, cmd)."""
+    meta = next((c for c in HUNTER_CLASSES if c["cls"] == cls), None)
+    if not meta:
+        raise HTTPException(404, "unknown class")
+    r = await es.search(cls=cls, pays=True, limit=min(limit, 200), sort="triage_score", order="desc")
+    return {"meta": meta, "total": r.get("total", 0), "items": r.get("items", [])}
+
+
 @app.post("/api/workspaces/{key}/status")
 async def api_workspace_status(key: str, body: dict = Depends(safety.require_confirm)):
     try:

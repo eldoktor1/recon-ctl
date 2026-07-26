@@ -6,6 +6,7 @@ import { fmtNum } from "./format";
 import CommandCenter from "./pages/CommandCenter";
 import Programs, { CrosshairIcon } from "./pages/Programs";
 import Console from "./pages/Console";
+import Hunter from "./pages/Hunter";
 import TokenGate from "./pages/TokenGate";
 import Findings from "./pages/Findings";
 import Assets from "./pages/Assets";
@@ -31,6 +32,7 @@ const NAV: NavItem[] = [
   { to: "/", label: "Command Center", icon: "◎" },
   { to: "/console", label: "Co-Pilot", icon: "✧" },
   { to: "/programs", label: "Programs", icon: <CrosshairIcon size={15} /> },
+  { to: "/hunter", label: "Hunter · Class", icon: "☣" },
   { to: "/findings", label: "Findings", icon: "◆" },
   { to: "/assets", label: "Asset Explorer", icon: "❑" },
   { to: "/leads", label: "Leads", icon: "✦" },
@@ -192,6 +194,7 @@ function AppShell() {
             <Route path="/" element={<CommandCenter />} />
             <Route path="/console" element={<Console />} />
             <Route path="/programs" element={<Programs />} />
+            <Route path="/hunter" element={<Hunter />} />
             <Route path="/findings" element={<Findings />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/leads" element={<Leads />} />

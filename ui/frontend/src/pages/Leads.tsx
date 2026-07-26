@@ -71,19 +71,24 @@ export default function Leads() {
 
   const refresh = useCallback(() => qc.invalidateQueries(), [qc]);
 
-  // latest briefing per kind
+  // latest briefing per kind, dropping STALE one-off sources (keep the curated core always,
+  // and any other kind only while it's fresh) so the chip row doesn't accumulate 40-day rubbish.
+  const SOURCE_FRESH_S = 14 * 86400;
   const sources = useMemo(() => {
     const latest: Record<string, Brief> = {};
     for (const b of briefs || []) {
       const cur = latest[b.kind];
       if (!cur || b.mtime > cur.mtime) latest[b.kind] = b;
     }
-    return Object.values(latest).sort((a, b) => {
-      const ia = SOURCE_ORDER.findIndex((k) => a.kind.startsWith(k));
-      const ib = SOURCE_ORDER.findIndex((k) => b.kind.startsWith(k));
-      const ra = ia === -1 ? 99 : ia, rb = ib === -1 ? 99 : ib;
-      return ra !== rb ? ra - rb : b.mtime - a.mtime;
-    });
+    const now = Date.now() / 1000;
+    return Object.values(latest)
+      .filter((b) => SOURCE_ORDER.some((k) => b.kind.startsWith(k)) || now - b.mtime < SOURCE_FRESH_S)
+      .sort((a, b) => {
+        const ia = SOURCE_ORDER.findIndex((k) => a.kind.startsWith(k));
+        const ib = SOURCE_ORDER.findIndex((k) => b.kind.startsWith(k));
+        const ra = ia === -1 ? 99 : ia, rb = ib === -1 ? 99 : ib;
+        return ra !== rb ? ra - rb : b.mtime - a.mtime;
+      });
   }, [briefs]);
 
   // collect parsed briefings from the SourceFetcher children

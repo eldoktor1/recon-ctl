@@ -189,11 +189,34 @@ _WSTG_BASE = ("https://owasp.org/www-project-web-security-testing-guide/latest/"
               "4-Web_Application_Security_Testing")
 
 
+# Exact OWASP filenames (id -> "NN-slug") where a title-derived slug can't match the real page:
+# OWASP preserves hyphens/casing in compound modifiers, and a couple of INPV tests were renamed.
+_WSTG_URL_OVERRIDE = {
+    "WSTG-CLNT-01": "01-Testing_for_DOM-based_Cross_Site_Scripting",
+    "WSTG-CLNT-04": "04-Testing_for_Client-side_URL_Redirect",
+    "WSTG-CLNT-06": "06-Testing_for_Client-side_Resource_Manipulation",
+    "WSTG-INPV-15": "15-Testing_for_HTTP_Response_Splitting",
+    "WSTG-INPV-16": "16-Testing_for_HTTP_Request_Smuggling",
+    "WSTG-INPV-18": "18-Testing_for_Server-side_Template_Injection",
+    "WSTG-INPV-19": "19-Testing_for_Server-Side_Request_Forgery",
+    # OWASP renamed these tests (title/case drift from the code's older titles):
+    "WSTG-INFO-04": "04-Attack_Surface_Identification",
+    "WSTG-INFO-05": "05-Review_Web_Page_Content_for_Information_Leakage",
+    "WSTG-ATHN-07": "07-Testing_for_Weak_Authentication_Methods",
+    "WSTG-ERRH-01": "01-Testing_For_Improper_Error_Handling",
+    "WSTG-CRYP-04": "04-Testing_for_Weak_Cryptographic_Primitives",
+}
+
+
 def _wstg_url(cat: str, num: int, name: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
     folder = _WSTG_FOLDER.get(cat)
     if not folder:
         return f"{_WSTG_BASE}/"
+    override = _WSTG_URL_OVERRIDE.get(f"WSTG-{cat}-{num:02d}")
+    if override:
+        return f"{_WSTG_BASE}/{folder}/{override}"
+    # keep hyphens (OWASP preserves them in compound words like Client-side, DOM-based)
+    slug = re.sub(r"[^A-Za-z0-9-]+", "_", name).strip("_")
     return f"{_WSTG_BASE}/{folder}/{num:02d}-{slug}"
 
 

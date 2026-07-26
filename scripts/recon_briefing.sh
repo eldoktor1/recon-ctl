@@ -250,11 +250,12 @@ if [[ "${nshow:-0}" -eq 0 && "${nheld:-0}" -eq 0 && "${nsub:-0}" -eq 0 && "${nne
   touch "$sent"; exit 0
 fi
 
-# --- noted hosts: flag (do NOT suppress) leads I've already worked. Set of every host +
-# root_domain that has a permanent note, so the renderer can prefix 📝 on touched leads. ---
+# --- noted hosts: flag (do NOT suppress) leads I've already worked. Emit the exact noted HOST;
+# only contribute the root_domain when the note is genuinely ROOT-LEVEL (host empty or host==root)
+# — otherwise a note on one subdomain flags every unrelated sibling under the apex (the leak). ---
 NOTES_FILE="${NOTES_FILE:-$STATE_DIR/host_notes.jsonl}"
 NOTED='[]'
-[[ -s "$NOTES_FILE" ]] && NOTED="$(jq -r '.host // empty, .root_domain // empty' "$NOTES_FILE" 2>/dev/null | sort -u | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
+[[ -s "$NOTES_FILE" ]] && NOTED="$(jq -r 'if ((.host // "") == "") or (.host == .root_domain) then (.root_domain // .host // empty) else (.host // empty) end' "$NOTES_FILE" 2>/dev/null | sort -u | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
 [[ -n "$NOTED" ]] || NOTED='[]'
 
 # --- rs0n XSS/SQLi lane: regenerate today's ranked, dup-proof worklist (ES-only, read-only —
