@@ -124,8 +124,8 @@ fi
 emit_local_streamjson() {  # $1 = user message
   local ans note
   ans="$(run_ollama "$1")"
-  [[ -n "$ans" ]] || ans="(Claude is rate-limited and the local WhiteRabbitNeo fallback returned no output — check that ollama is running at ${OLLAMA_URL} and the model is pulled.)"
-  note="⚠ Claude is rate-limited — answered by the local WhiteRabbitNeo fallback (reasoning only: no tools, no session continuity)."
+  [[ -n "$ans" ]] || ans="(Claude is rate-limited and the local model returned no output — check that ollama is running at ${OLLAMA_URL} and ${OLLAMA_MODEL} is pulled.)"
+  note="⚠ Claude is rate-limited — answered by the local model (plain chat: the agent was unavailable this turn)."
   if have_jq; then
     jq -nc --arg n "$note" --arg a "$ans" '{type:"assistant",message:{content:[{type:"text",text:($n+"\n\n"+$a)}]}}'
     jq -nc --arg a "$ans" '{type:"result",subtype:"success",is_error:false,result:$a,num_turns:1,duration_ms:0}'
@@ -135,6 +135,20 @@ emit_local_streamjson() {  # $1 = user message
     [[ -n "$esc" ]] || esc='"local model output unavailable"'
     printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$esc"
   fi
+}
+
+# Serve a local turn with the FULL-CAPABILITY agent (native tool-calling: bash/recon-ctl/burp/brave
+# + web_search, doctrine-guarded) when wired; fall back to plain-chat stream-json if the agent
+# produced nothing (exit!=0). The agent emits stream-json itself, so its output flows straight through.
+serve_local() {  # $1 = message
+  local agent="$REPO_DIR/scripts/ai_agent.py"
+  if [[ "${AI_AGENT_ENABLED:-1}" == "1" && -f "$agent" ]] && command -v python3 >/dev/null 2>&1; then
+    if AGENT_MODEL="${AI_AGENT_MODEL:-hermes3:8b}" OLLAMA_URL="$OLLAMA_URL" \
+       python3 "$agent" "$1" 2>>"$STATE_DIR/ai_agent.err"; then
+      return 0
+    fi
+  fi
+  emit_local_streamjson "$1"   # fallback: plain chat wrapped as stream-json
 }
 
 # ---- dispatch: pick the live brain from the shared failover state ----
@@ -155,7 +169,7 @@ if [[ "$_active" == "ollama" ]]; then
     _active="claude"
   else
     write_state ollama "$_reset" "$( { have_jq && jq -r '.reason // "fallback active"' "$STATE_FILE" 2>/dev/null; } || echo 'fallback active')" "$_pc"
-    emit_local_streamjson "$MESSAGE"
+    serve_local "$MESSAGE"
     exit 0
   fi
 fi
@@ -175,7 +189,7 @@ if [[ "$_ec" -ne 0 ]] && is_limit "$_ec" "$_combined"; then
   _why="$(printf '%s' "$_combined" | grep -ioE '.{0,60}(usage limit|rate limit|limit reached|out of credit|quota|429).{0,40}' | head -1 | tr -d '\n' | cut -c1-160)"
   write_state ollama "$_rt" "${_why:-claude limit detected}" 0
   log "SWITCH claude->ollama (console limit: ${_why:-detected}; reset_at=$_rt)"
-  emit_local_streamjson "$MESSAGE"
+  serve_local "$MESSAGE"
   _ec=0   # the turn was served by the fallback — don't surface a task failure to the UI
 fi
 rm -f "$_tmp" "$_tmp.err" 2>/dev/null

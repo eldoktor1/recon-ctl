@@ -23,7 +23,7 @@ LOG_FILE="${AI_FALLBACK_LOG:-$STATE_DIR/ai_fallback.log}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"; [[ -x "$CLAUDE_BIN" ]] || CLAUDE_BIN="$(command -v claude 2>/dev/null || echo '')"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-WhiteRabbitNeo/WhiteRabbitNeo-V3-7B:latest}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-hermes3:8b}"
 OLLAMA_TIMEOUT="${OLLAMA_TIMEOUT:-600}"
 PRIMER_FILE="${AI_PRIMER_FILE:-$REPO_DIR/docs/knowledge/ai-system-primer.md}"
 [[ -f "$PRIMER_FILE" ]] || PRIMER_FILE="${AI_PRIMER_FALLBACK:-$STATE_DIR/ai_primer.txt}"
