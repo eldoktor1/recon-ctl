@@ -7,6 +7,7 @@ import CommandCenter from "./pages/CommandCenter";
 import Programs, { CrosshairIcon } from "./pages/Programs";
 import Console from "./pages/Console";
 import Hunter from "./pages/Hunter";
+import TargetWorkspace from "./pages/TargetWorkspace";
 import TokenGate from "./pages/TokenGate";
 import Findings from "./pages/Findings";
 import Assets from "./pages/Assets";
@@ -195,6 +196,7 @@ function AppShell() {
             <Route path="/console" element={<Console />} />
             <Route path="/programs" element={<Programs />} />
             <Route path="/hunter" element={<Hunter />} />
+            <Route path="/target/:host" element={<TargetWorkspace />} />
             <Route path="/findings" element={<Findings />} />
             <Route path="/assets" element={<Assets />} />
             <Route path="/leads" element={<Leads />} />

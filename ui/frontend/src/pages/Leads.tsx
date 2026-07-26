@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFetch } from "../hooks";
 import { Panel, Badge, Empty, Spinner, Dot } from "../components/ui";
@@ -74,10 +75,25 @@ export default function Leads() {
   const [unseenOnly, setUnseenOnly] = useState(false);  // "drain rubbish" — only never-worked targets
   const [openTask, setOpenTask] = useState<number | null>(null);
   const [vhost, setVhost] = useState("");
+  const [verifyHost, setVerifyHost] = useState<string | null>(null);  // host a running verify is for
   const toast = useToast();
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const openTarget = useCallback((h: string) => navigate(`/target/${encodeURIComponent(h)}`), [navigate]);
 
   const refresh = useCallback(() => qc.invalidateQueries(), [qc]);
+
+  // when a verify task ends, if it surfaced (or there is) a finding on that host, jump to the
+  // per-target workspace to exhaust it — otherwise just refresh.
+  const onVerifyDone = useCallback(async () => {
+    refresh();
+    const h = verifyHost; setVerifyHost(null);
+    if (!h) return;
+    try {
+      const r = await api.get<{ items: any[] }>(`/api/findings?q=${encodeURIComponent(h)}&limit=1`);
+      if (r.items && r.items.length) { toast("ok", `finding on ${h} — opening workspace to exhaust it`); openTarget(h); }
+    } catch { /* ignore */ }
+  }, [verifyHost, refresh, toast, openTarget]);
 
   // latest briefing per kind, dropping STALE one-off sources (keep the curated core always,
   // and any other kind only while it's fresh) so the chip row doesn't accumulate 40-day rubbish.
@@ -172,7 +188,8 @@ export default function Leads() {
     if (!target) return;
     try {
       const t = await api.action<{ id: number }>("/api/verify", { host: target });
-      toast("ok", `verify #${t.id} started — streaming below`);
+      toast("ok", `verify #${t.id} started — if it finds something you'll drop into the 🔬 target workspace`);
+      setVerifyHost(target);
       setOpenTask(t.id);
       if (!h) setVhost("");
     } catch (e: any) { toast("err", e.message); }
@@ -244,8 +261,12 @@ export default function Leads() {
                 severity={l.severity} host={l.host} vulnClass={l.vulnClass} score={l.score}
                 summary={l.summary} sources={l.sources} onHost={setHost}
                 right={l.host ? (
-                  <LeadActions host={l.host} vulnClass={l.vulnClass} actions={hostActions}
-                    onTask={setOpenTask} onChanged={refresh} />
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => openTarget(l.host!)} title="open the target workspace — exhaust this lead"
+                      className="text-[13px] text-[var(--color-ink-faint)] transition hover:text-[var(--color-accent)]">🔬</button>
+                    <LeadActions host={l.host} vulnClass={l.vulnClass} actions={hostActions}
+                      onTask={setOpenTask} onChanged={refresh} />
+                  </div>
                 ) : undefined}
                 expandable={
                   <div className="space-y-2">
@@ -290,6 +311,8 @@ export default function Leads() {
                         <span className="text-[10px] text-[var(--color-ink-faint)]">{h.triage_score}</span>
                         <button onClick={() => launchVerify(h.host)} title="run Claude verify"
                           className="text-[10px] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100">⚡</button>
+                        <button onClick={() => openTarget(h.host)} title="open the target workspace — exhaust this lead"
+                          className="text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-accent)] group-hover:opacity-100">🔬</button>
                       </div>
                     ))}
                     {b.count > 6 && <div className="pl-1.5 pt-1 text-[10px] text-[var(--color-ink-faint)]">+{b.count - 6} more</div>}
@@ -302,7 +325,7 @@ export default function Leads() {
       </Panel>
 
       {host && <HostDrawer host={host} onClose={() => setHost(null)} onChanged={refresh} />}
-      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
+      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} onChanged={onVerifyDone} />}
     </div>
   );
 }
