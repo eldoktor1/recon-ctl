@@ -483,6 +483,10 @@ function GuidedTab({ ws, onChanged, onTask }:
   // running/finished task instead of re-spawning it (which would waste tokens).
   const [guideTid, setGuideTid] = useState<number | null>(null);
   const guideKey = useCallback((phase: string, key: string) => `guide:${ws.key}:${phase}:${key}`, [ws.key]);
+  // live "program intel" panel — the data + notes needed to make decisions while working a step
+  const [showIntel, setShowIntel] = useState(() => getNum(`guided-intel:${ws.key}`, 0) === 1);
+  useEffect(() => { setNum(`guided-intel:${ws.key}`, showIntel ? 1 : 0); }, [showIntel, ws.key]);
+  const [drawer, setDrawer] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [auto, setAuto] = useState(false);
   // legible auto-drive status: which step + which stage of the pick→guide→mark→advance cycle
@@ -708,6 +712,12 @@ function GuidedTab({ ws, onChanged, onTask }:
             className="mono rounded border border-[var(--color-border-bright)] px-2 py-1 text-[11px] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]">
             {showMap ? "hide map" : "all steps"}
           </button>
+          <button onClick={() => setShowIntel((v) => !v)} title="program data + notes to decide with, while you work"
+            className={`mono rounded border px-2 py-1 text-[11px] transition ${showIntel
+              ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+              : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]"}`}>
+            ◈ intel
+          </button>
         </div>
         {auto && (
           <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--color-accent)]/20 pt-2">
@@ -723,6 +733,7 @@ function GuidedTab({ ws, onChanged, onTask }:
           </div>
         )}
         {showMap && <StepMap ws={ws} steps={steps} focus={clamped} working={workingIdx} isCovered={isCovered} onPick={setIdx} />}
+        {showIntel && <GuidedIntel ws={ws} onHost={setDrawer} />}
         <div className="mt-3 border-t border-[var(--color-border)] pt-3">
           <AutoNote title="engagement note"
             hint={strideCovered === STRIDE_COLS.length && wstgCovered === ws.wstg.length
@@ -757,6 +768,8 @@ function GuidedTab({ ws, onChanged, onTask }:
             actions={hostActions} onTask={onTask} onChanged={onChanged}
             onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid} auto={auto}
             onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />}
+
+      {drawer && <HostDrawer host={drawer} onClose={() => setDrawer(null)} onChanged={onChanged} />}
     </div>
   );
 }
@@ -816,6 +829,70 @@ function guideSummary(text: string): string {
     if (l.length > 8) return l.slice(0, 240);
   }
   return "";
+}
+
+// Live program intel for decision-making WHILE working a guided step: findings, top hosts (with
+// their worked-knowledge note counts), and program notes — all clickable through to the host
+// drawer (full data + host_notes + inline tools). Reflects the live workspace state.
+function GuidedIntel({ ws, onHost }: { ws: WorkspaceDetail; onHost: (h: string) => void }) {
+  const hosts = useMemo(
+    () => [...ws.hosts].sort((a: any, b: any) => (b.triage_score ?? 0) - (a.triage_score ?? 0)).slice(0, 12),
+    [ws.hosts]);
+  const cell = "rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2.5";
+  const hdr = "mb-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-dim)]";
+  return (
+    <div className="mt-3 grid grid-cols-1 gap-3 border-t border-[var(--color-border)] pt-3 lg:grid-cols-3">
+      <div className={cell}>
+        <div className={hdr}><span>findings</span><Badge color="var(--color-accent)">{ws.findings.length}</Badge></div>
+        {!ws.findings.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">none yet</div> : (
+          <div className="max-h-56 space-y-1 overflow-auto">
+            {ws.findings.map((f) => (
+              <div key={f.id} className="flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1">
+                <Badge color={stateColor[f.state] || "var(--color-ink-dim)"} filled>{f.state}</Badge>
+                <button onClick={() => onHost(f.host)} title={f.host}
+                  className="mono min-w-0 flex-1 truncate text-left text-[10px] text-[var(--color-ink)] hover:text-[var(--color-accent)]">{f.host}</button>
+                {f.vuln_class && <Badge color={classColor[f.vuln_class] || "var(--color-ink-dim)"}>{f.vuln_class}</Badge>}
+                {f.ai_verdict && <Badge color={verdictColor[f.ai_verdict] || "var(--color-ink-dim)"}>{f.ai_verdict}</Badge>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={cell}>
+        <div className={hdr}><span>hosts · top</span><Badge>{ws.hosts.length}</Badge></div>
+        {!hosts.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">no hosts</div> : (
+          <div className="max-h-56 space-y-1 overflow-auto">
+            {hosts.map((h: WsHost) => (
+              <button key={h.host} onClick={() => onHost(h.host)} title={h.host}
+                className="flex w-full items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1 text-left hover:border-[var(--color-accent)]">
+                {h.triage_priority && <Badge color={priorityColor[h.triage_priority] || "var(--color-ink-dim)"}>{h.triage_priority}</Badge>}
+                <span className="mono min-w-0 flex-1 truncate text-[10px] text-[var(--color-ink)]">{h.host}</span>
+                {h.triage_true_fresh && <Badge color="var(--color-accent)">fresh</Badge>}
+                {h.triage_kev_match && <Badge color="var(--color-bad)">kev</Badge>}
+                {h.js_secret_hit && <Badge color="var(--color-warn)">sec</Badge>}
+                {!!h.host_notes_count && <Badge>📝{h.host_notes_count}</Badge>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={cell}>
+        <div className={hdr}><span>program notes</span><Badge>{ws.notes.length}</Badge></div>
+        {!ws.notes.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">no notes yet</div> : (
+          <div className="max-h-56 space-y-1 overflow-auto">
+            {ws.notes.map((n, i) => (
+              <div key={i} className="rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1">
+                <div className="text-[9px] text-[var(--color-ink-faint)]">{fmtAgo(n.ts)}</div>
+                <div className="text-[10px] text-[var(--color-ink)]">{n.text}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function GuideBox({ canned, tid, onComplete, onDead }:

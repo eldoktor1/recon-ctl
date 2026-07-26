@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import mimetypes
+import re
 from typing import Any
 
 # PWA: ensure correct content types for the manifest + service worker
@@ -66,6 +67,18 @@ async def security_gate(request: Request, call_next):
 
 
 # --------------------------------------------------------------------------- status
+def _ui_build() -> str:
+    """Content hash of the currently-served bundle (the main JS asset filename changes every
+    rebuild). A running tab compares this against the build it loaded and prompts a reload when
+    it changes — so a rebuild is never silently stale behind SPA-internal navigation."""
+    try:
+        html = (config.FRONTEND_DIST / "index.html").read_text()
+        m = re.search(r"/assets/(index-[A-Za-z0-9_-]+\.js)", html)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 async def build_status() -> dict[str, Any]:
     es_health, = await asyncio.gather(es.cluster_health())
     return {
@@ -75,6 +88,7 @@ async def build_status() -> dict[str, Any]:
         "queue": daemon.queue_depth(),
         "killswitches": daemon.killswitches(),
         "findings_by_state": findings.state_counts(),
+        "ui_build": _ui_build(),
         "token_required": True,
     }
 

@@ -81,6 +81,7 @@ export interface Status {
   queue: Record<string, number>;
   killswitches: { lane: string; killed: boolean; since: number }[];
   findings_by_state: Record<string, number>;
+  ui_build?: string;   // main bundle hash; a change means a new build was deployed
 }
 
 export interface Overview extends Status {

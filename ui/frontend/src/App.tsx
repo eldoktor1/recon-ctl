@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useLiveStatus, StatusProvider } from "./hooks";
 import { Pill } from "./components/ui";
@@ -137,10 +137,36 @@ export default function App() {
   );
 }
 
+// Detect a rebuild while a tab is open: the status stream carries the served bundle hash; if it
+// changes from the one we loaded with, the running JS is stale — offer a one-click reload so a
+// deploy is never silently missed (SPA-internal navigation never re-fetches the bundle on its own).
+function UpdateBanner() {
+  const { status } = useLiveStatus();
+  const loaded = useRef<string | null>(null);
+  const [stale, setStale] = useState(false);
+  useEffect(() => {
+    const b = status?.ui_build;
+    if (!b) return;
+    if (loaded.current === null) { loaded.current = b; return; }
+    if (b !== loaded.current) setStale(true);
+  }, [status?.ui_build]);
+  if (!stale) return null;
+  return (
+    <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-3 bg-[var(--color-accent)] px-4 py-2 text-[13px] font-medium text-[#0a0e14] shadow-lg">
+      <span>A new version of recon·ctl is available.</span>
+      <button onClick={() => location.reload()}
+        className="rounded bg-[#0a0e14] px-3 py-1 text-[12px] font-semibold text-[var(--color-accent)] hover:opacity-90">
+        Reload now
+      </button>
+    </div>
+  );
+}
+
 function AppShell() {
   const loc = useLocation();
   return (
     <StatusProvider>
+    <UpdateBanner />
     <CommandPalette />
     <div className="flex h-full">
       <Sidebar />
