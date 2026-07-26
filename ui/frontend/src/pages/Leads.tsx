@@ -14,7 +14,7 @@ import { priorityColor, fmtAgo, classFromSection, severityRank } from "../format
 
 interface BucketHost { host: string; triage_priority?: string; triage_score?: number; triage_pays?: boolean; triage_in_scope?: boolean }
 interface Bucket { key: string; label: string; count: number; hosts: BucketHost[]; error?: string }
-interface Leads { buckets: Bucket[]; suppressed?: number }
+interface Leads { buckets: Bucket[]; suppressed?: number; noted_hosts?: string[] }
 interface Brief { name: string; kind: string; date: string | null; mtime: number }
 
 const bucketColor: Record<string, string> = {
@@ -26,6 +26,13 @@ const SOURCE_ORDER = [
   "tonight", "2IC_tonight", "hunter", "idor_candidates", "xss_candidates",
   "sqli_candidates", "graphql_candidates", "fresh", "targets",
 ];
+
+// hosts that aren't real TARGETS — bug-bounty platform / infra domains that leak into the
+// worklist from program-header bullets (e.g. an engagement URL `https://bugcrowd.com/...`).
+const NON_TARGET_HOSTS = new Set([
+  "bugcrowd.com", "hackerone.com", "intigriti.com", "app.intigriti.com", "yeswehack.com",
+  "github.com", "gitlab.com", "owasp.org",
+]);
 
 // A single deduped lead, merged across every briefing source it appears in.
 interface ULead {
@@ -64,6 +71,7 @@ export default function Leads() {
   const [source, setSource] = useState<string>("all");
   const [filter, setFilter] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  const [unseenOnly, setUnseenOnly] = useState(false);  // "drain rubbish" — only never-worked targets
   const [openTask, setOpenTask] = useState<number | null>(null);
   const [vhost, setVhost] = useState("");
   const toast = useToast();
@@ -96,6 +104,9 @@ export default function Leads() {
   const onData = useCallback((kind: string, p: Parsed | null) => {
     setParsedByKind((prev) => (prev[kind] === p ? prev : { ...prev, [kind]: p }));
   }, []);
+
+  // hosts we've already worked (have a note) — for the "drain rubbish" unseen-only filter
+  const notedSet = useMemo(() => new Set((leads?.noted_hosts || []).map((h) => h.toLowerCase())), [leads]);
 
   // score-by-host from the live ES buckets, to enrich briefing rows
   const scoreByHost = useMemo(() => {
@@ -138,10 +149,14 @@ export default function Leads() {
     }
     const f = filter.trim().toLowerCase();
     return Array.from(map.values())
+      // worklist = actionable TARGET rows only: must have a real host, and not a bug-bounty
+      // platform/infra host (program-header + metadata-bullet leaks are hostless or platform hosts)
+      .filter((l) => l.host && !NON_TARGET_HOSTS.has(l.host.toLowerCase()))
       .filter((l) => showHidden || !l.suppressed)
+      .filter((l) => !unseenOnly || !notedSet.has((l.host || "").toLowerCase()))
       .filter((l) => !f || (l.host || "").toLowerCase().includes(f) || l.summary.toLowerCase().includes(f) || (l.program || "").toLowerCase().includes(f) || l.sources.join(" ").includes(f))
       .sort((a, b) => (severityRank(b.severity) - severityRank(a.severity)) || ((b.score ?? 0) - (a.score ?? 0)));
-  }, [parsedByKind, source, filter, showHidden, scoreByHost]);
+  }, [parsedByKind, source, filter, showHidden, unseenOnly, notedSet, scoreByHost]);
 
   const hiddenCount = useMemo(() => {
     let n = 0;
@@ -184,6 +199,13 @@ export default function Leads() {
         title="worklist · actionable"
         right={
           <div className="flex flex-wrap items-center gap-1.5">
+            <button onClick={() => setUnseenOnly((v) => !v)}
+              title="drain the rubbish — hide targets we've already worked (have a note), leaving only NEW ones to inspect"
+              className={`flex items-center gap-1.5 rounded border px-2 py-1 text-[10px] transition ${unseenOnly
+                ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent)]/10"
+                : "border-[var(--color-border-bright)] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]"}`}>
+              🧹 {unseenOnly ? "unseen only" : "drain seen"}
+            </button>
             <ScopeToggle label="incl. out-of-scope" on={inclOos} onClick={() => setInclOos((v) => !v)} />
             <ScopeToggle label="incl. non-paying" on={inclNopay} onClick={() => setInclNopay((v) => !v)} />
             <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter…"

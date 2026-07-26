@@ -191,6 +191,11 @@ async def api_leads(pays_only: bool = True, include_dismissed: bool = False,
                 b["suppressed"] = drop
                 if isinstance(b.get("count"), int):
                     b["count"] = max(0, b["count"] - drop)
+    # hosts already worked (have a note) → powers the "drain rubbish / unseen only" worklist filter
+    try:
+        data["noted_hosts"] = sorted(files.noted_host_set())
+    except Exception:
+        data["noted_hosts"] = []
     return data
 
 

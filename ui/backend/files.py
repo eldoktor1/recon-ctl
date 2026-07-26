@@ -43,6 +43,28 @@ def killed_host_set() -> set[str]:
         return set()
 
 
+def noted_host_set() -> set[str]:
+    """Every host that has ANY note (i.e. has been worked/SEEN) — for an 'unseen only' worklist
+    drain that leaves only targets we haven't looked at yet."""
+    out: set[str] = set()
+    try:
+        with open(config.HOST_NOTES, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                h = (d.get("host") or "").lower()
+                if h:
+                    out.add(h)
+    except Exception:
+        pass
+    return out
+
+
 def killed_host_classes() -> dict[str, set[str]]:
     """{host -> set(vuln_classes)} for hosts killed only for SPECIFIC classes (class-scoped FP).
 
