@@ -468,6 +468,61 @@ async function pollGuideTask(tid: number, alive: () => boolean, maxMs = 6 * 60 *
   return { ...last, timedOut: alive() && last.state === "running" };
 }
 
+// --- surface-aware relevance -------------------------------------------------
+// Which WSTG tests actually apply to THIS program's real attack surface, derived from the live
+// signals (host tech, candidate classes, findings). Used to FOCUS relevant steps and FLAG likely-
+// N/A ones — never to auto-mark (the operator verifies before skipping; no premature exhaustion).
+type ProgSignals = { classes: Set<string>; tech: Set<string>; hasApi: boolean; hasAuth: boolean; hasJs: boolean };
+
+function programSignals(ws: WorkspaceDetail): ProgSignals {
+  const classes = new Set<string>(), tech = new Set<string>();
+  ws.hosts.forEach((h: any) => {
+    asArr(h.triage_classes).forEach((c) => classes.add(String(c).toLowerCase()));
+    asArr(h.tech).forEach((t) => tech.add(String(t).toLowerCase()));
+  });
+  ws.findings.forEach((f) => f.vuln_class && classes.add(f.vuln_class.toLowerCase()));
+  const all = [...classes, ...tech];
+  const has = (kw: string) => all.some((s) => s.includes(kw));
+  return {
+    classes, tech,
+    hasApi: has("api") || has("graphql") || has("swagger") || has("openapi") || has("rest") || has("apollo"),
+    hasAuth: has("auth") || has("login") || has("oauth") || has("jwt") || has("session") || has("account")
+      || has("idor") || has("bac") || has("cognito") || has("okta") || has("keycloak"),
+    hasJs: has("react") || has("vue") || has("angular") || has("next") || has("svelte") || has("javascript") || has("spa"),
+  };
+}
+
+// WSTG category → the vuln classes it targets + an optional surface it REQUIRES (absent ⇒ likely N/A)
+const WSTG_REL: Record<string, { classes: string[]; needs?: "api" | "auth" }> = {
+  INFO: { classes: [] }, CONF: { classes: ["misconfig", "exposure", "bucket", "secret", "takeover", "cors"] },
+  IDNT: { classes: ["idor", "bac", "account"], needs: "auth" },
+  ATHN: { classes: ["auth", "login", "jwt", "oauth", "cognito"], needs: "auth" },
+  ATHZ: { classes: ["idor", "bac", "bola", "privesc"], needs: "auth" },
+  SESS: { classes: ["session", "csrf", "jwt", "cookie"], needs: "auth" },
+  INPV: { classes: ["xss", "sqli", "ssti", "xxe", "injection", "ssrf", "redirect", "lfi", "rce", "nosqli"] },
+  ERRH: { classes: ["error", "disclosure"] }, CRYP: { classes: ["tls", "crypto", "cipher"] },
+  BUSL: { classes: ["logic", "race", "workflow"] },
+  CLNT: { classes: ["xss", "dom", "postmessage", "cors", "clickjacking", "csp"] },
+  APIT: { classes: ["api", "graphql", "rest", "bola"], needs: "api" },
+};
+
+type Relevance = { level: "hot" | "cold" | null; reason: string; hosts: string[] };
+
+function wstgRelevance(it: WstgItem | undefined, sig: ProgSignals, ws: WorkspaceDetail): Relevance {
+  const R = it && WSTG_REL[it.category];
+  if (!R) return { level: null, reason: "", hosts: [] };
+  const matched = R.classes.filter((c) => [...sig.classes].some((pc) => pc.includes(c) || c.includes(pc)));
+  const hosts = ws.hosts.filter((h: any) =>
+    asArr(h.triage_classes).some((c) => R.classes.some((rc) => String(c).toLowerCase().includes(rc)))
+  ).map((h: any) => h.host);
+  const finding = ws.findings.some((f) => f.vuln_class && R.classes.some((rc) => f.vuln_class!.toLowerCase().includes(rc)));
+  if (finding) return { level: "hot", reason: `confirmed ${matched[0] || "finding"} on this program`, hosts };
+  if (matched.length) return { level: "hot", reason: `surface for ${matched.slice(0, 3).join(", ")}`, hosts };
+  if (R.needs === "api" && !sig.hasApi) return { level: "cold", reason: "no API / GraphQL surface detected yet", hosts: [] };
+  if (R.needs === "auth" && !sig.hasAuth) return { level: "cold", reason: "no authenticated surface detected yet", hosts: [] };
+  return { level: null, reason: "", hosts: [] };
+}
+
 function GuidedTab({ ws, onChanged, onTask }:
   { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void }) {
   const toast = useToast();
@@ -502,6 +557,13 @@ function GuidedTab({ ws, onChanged, onTask }:
   ], [ws.wstg]);
 
   const wstgById = useMemo(() => new Map(ws.wstg.map((w) => [w.id, w])), [ws.wstg]);
+  // surface-aware relevance per WSTG test (hot = matches surface/findings, cold = likely N/A)
+  const sig = useMemo(() => programSignals(ws), [ws.hosts, ws.findings]);
+  const relMap = useMemo(() => {
+    const m = new Map<string, Relevance>();
+    ws.wstg.forEach((it) => m.set(it.id, wstgRelevance(it, sig, ws)));
+    return m;
+  }, [ws.wstg, sig, ws.hosts, ws.findings]);
   const isCovered = (s: GuideStep) =>
     s.phase === "stride" ? (ws.stride[s.key as keyof StrideBoardT] || []).length > 0
       : (wstgById.get(s.key)?.status || "todo") !== "todo";
@@ -674,6 +736,9 @@ function GuidedTab({ ws, onChanged, onTask }:
     if (step) clearTask(guideKey(step.phase, step.key));
     setGuideTid(null);
   }, [step, guideKey]);
+  const stepRel: Relevance = step?.phase === "wstg"
+    ? (relMap.get(step.key) || { level: null, reason: "", hosts: [] })
+    : { level: null, reason: "", hosts: [] };
   const STAGE_LABEL: Record<DriveStage, string> = {
     spawning: "spawning guide", "in-progress": "marked in-progress",
     streaming: "streaming", marked: "marked", error: "error — paused",
@@ -732,8 +797,8 @@ function GuidedTab({ ws, onChanged, onTask }:
             </span>
           </div>
         )}
-        {showMap && <StepMap ws={ws} steps={steps} focus={clamped} working={workingIdx} isCovered={isCovered} onPick={setIdx} />}
-        {showIntel && <GuidedIntel ws={ws} onHost={setDrawer} />}
+        {showMap && <StepMap ws={ws} steps={steps} focus={clamped} working={workingIdx} isCovered={isCovered} onPick={setIdx} rel={relMap} />}
+        {showIntel && <GuidedIntel ws={ws} onHost={setDrawer} relHosts={stepRel.hosts} />}
         <div className="mt-3 border-t border-[var(--color-border)] pt-3">
           <AutoNote title="engagement note"
             hint={strideCovered === STRIDE_COLS.length && wstgCovered === ws.wstg.length
@@ -767,7 +832,7 @@ function GuidedTab({ ws, onChanged, onTask }:
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
             onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid} auto={auto}
-            onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />}
+            onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} rel={stepRel} />}
 
       {drawer && <HostDrawer host={drawer} onClose={() => setDrawer(null)} onChanged={onChanged} />}
     </div>
@@ -776,9 +841,9 @@ function GuidedTab({ ws, onChanged, onTask }:
 
 // compact "all steps" map — comprehensiveness made visible, nothing silently skipped.
 // `working` is the index of the step actively being driven (pulsing accent ring).
-function StepMap({ ws, steps, focus, working, isCovered, onPick }:
+function StepMap({ ws, steps, focus, working, isCovered, onPick, rel }:
   { ws: WorkspaceDetail; steps: GuideStep[]; focus: number; working: number;
-    isCovered: (s: GuideStep) => boolean; onPick: (i: number) => void }) {
+    isCovered: (s: GuideStep) => boolean; onPick: (i: number) => void; rel: Map<string, Relevance> }) {
   const wstgGroups = useMemo(() => {
     const m = new Map<string, { cat: string; cat_name: string; items: { i: number; it: WstgItem }[] }>();
     steps.forEach((s, i) => {
@@ -792,6 +857,10 @@ function StepMap({ ws, steps, focus, working, isCovered, onPick }:
 
   return (
     <div className="mt-3 space-y-2 border-t border-[var(--color-border)] pt-3">
+      <div className="mono flex flex-wrap items-center gap-3 text-[9px] text-[var(--color-ink-faint)]">
+        <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 rounded-sm border border-[var(--color-border)] ring-1 ring-[var(--color-accent)]/70" /> relevant to this surface</span>
+        <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 rounded-sm border border-[var(--color-border)] opacity-40" /> likely N/A (verify before skipping)</span>
+      </div>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mono w-16 shrink-0 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">STRIDE</span>
         {steps.map((s, i) => s.phase === "stride" && (
@@ -805,14 +874,18 @@ function StepMap({ ws, steps, focus, working, isCovered, onPick }:
       {wstgGroups.map((g) => (
         <div key={g.cat} className="flex flex-wrap items-center gap-1">
           <span className="mono w-16 shrink-0 truncate text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]" title={g.cat_name}>{g.cat}</span>
-          {g.items.map(({ i, it }) => (
-            <button key={it.id} onClick={() => onPick(i)}
-              title={`${it.id} · ${it.name} — ${i === working ? "working…" : it.status}`}
-              className={`mono h-5 w-6 rounded border text-[9px] ${i === working ? "working-ring" : ""} ${i === focus ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"}`}
-              style={{ color: wsc(it.status), background: `${wsc(it.status)}18` }}>
-              {it.id.split("-")[2]}
-            </button>
-          ))}
+          {g.items.map(({ i, it }) => {
+            const r = rel.get(it.id);
+            const hot = r?.level === "hot", cold = r?.level === "cold";
+            return (
+              <button key={it.id} onClick={() => onPick(i)}
+                title={`${it.id} · ${it.name} — ${i === working ? "working…" : it.status}${hot ? ` · ⚡ relevant: ${r!.reason}` : cold ? ` · likely N/A: ${r!.reason}` : ""}`}
+                className={`mono h-5 w-6 rounded border text-[9px] ${i === working ? "working-ring" : ""} ${hot ? "ring-1 ring-[var(--color-accent)]/70" : ""} ${cold ? "opacity-40" : ""} ${i === focus ? "border-[var(--color-accent)]" : "border-[var(--color-border)]"}`}
+                style={{ color: wsc(it.status), background: `${wsc(it.status)}18` }}>
+                {it.id.split("-")[2]}
+              </button>
+            );
+          })}
         </div>
       ))}
     </div>
@@ -834,10 +907,16 @@ function guideSummary(text: string): string {
 // Live program intel for decision-making WHILE working a guided step: findings, top hosts (with
 // their worked-knowledge note counts), and program notes — all clickable through to the host
 // drawer (full data + host_notes + inline tools). Reflects the live workspace state.
-function GuidedIntel({ ws, onHost }: { ws: WorkspaceDetail; onHost: (h: string) => void }) {
+function GuidedIntel({ ws, onHost, relHosts = [] }:
+  { ws: WorkspaceDetail; onHost: (h: string) => void; relHosts?: string[] }) {
+  const relSet = useMemo(() => new Set(relHosts), [relHosts]);
+  // relevant-to-this-step hosts float to the top and get an ⚡ marker; then by score
   const hosts = useMemo(
-    () => [...ws.hosts].sort((a: any, b: any) => (b.triage_score ?? 0) - (a.triage_score ?? 0)).slice(0, 12),
-    [ws.hosts]);
+    () => [...ws.hosts].sort((a: any, b: any) => {
+      const d = (relSet.has(b.host) ? 1 : 0) - (relSet.has(a.host) ? 1 : 0);
+      return d !== 0 ? d : (b.triage_score ?? 0) - (a.triage_score ?? 0);
+    }).slice(0, 12),
+    [ws.hosts, relSet]);
   const cell = "rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2.5";
   const hdr = "mb-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-dim)]";
   return (
@@ -863,9 +942,12 @@ function GuidedIntel({ ws, onHost }: { ws: WorkspaceDetail; onHost: (h: string) 
         <div className={hdr}><span>hosts · top</span><Badge>{ws.hosts.length}</Badge></div>
         {!hosts.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">no hosts</div> : (
           <div className="max-h-56 space-y-1 overflow-auto">
-            {hosts.map((h: WsHost) => (
+            {hosts.map((h: WsHost) => {
+              const relevant = relSet.has(h.host);
+              return (
               <button key={h.host} onClick={() => onHost(h.host)} title={h.host}
-                className="flex w-full items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1 text-left hover:border-[var(--color-accent)]">
+                className={`flex w-full items-center gap-1.5 rounded border bg-[var(--color-panel-2)] px-2 py-1 text-left hover:border-[var(--color-accent)] ${relevant ? "border-[var(--color-accent)]/60 ring-1 ring-[var(--color-accent)]/40" : "border-[var(--color-border)]"}`}>
+                {relevant && <span className="text-[10px] text-[var(--color-accent)]" title="relevant to the current step">⚡</span>}
                 {h.triage_priority && <Badge color={priorityColor[h.triage_priority] || "var(--color-ink-dim)"}>{h.triage_priority}</Badge>}
                 <span className="mono min-w-0 flex-1 truncate text-[10px] text-[var(--color-ink)]">{h.host}</span>
                 {h.triage_true_fresh && <Badge color="var(--color-accent)">fresh</Badge>}
@@ -873,7 +955,8 @@ function GuidedIntel({ ws, onHost }: { ws: WorkspaceDetail; onHost: (h: string) 
                 {h.js_secret_hit && <Badge color="var(--color-warn)">sec</Badge>}
                 {!!h.host_notes_count && <Badge>📝{h.host_notes_count}</Badge>}
               </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -982,11 +1065,11 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
 // alternate outcomes; the primary "done · next" CTA handles the common finish path
 const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
-function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active }:
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active, rel }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
     actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
     onGuide: () => void; canned: string | null; guideTid: number | null; auto: boolean;
-    onDead?: () => void; onNext: () => void; active?: boolean }) {
+    onDead?: () => void; onNext: () => void; active?: boolean; rel?: Relevance }) {
   const toast = useToast();
   const [note, setNote] = useState(item.note || "");
   useEffect(() => { setNote(item.note || ""); }, [item.id]);
@@ -1018,6 +1101,30 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
     <Panel className={active ? "working-ring" : ""}
       title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-ink-faint)]">{item.id}</span>{item.name}{active && <span className="mono text-[10px] text-[var(--color-accent)]">● working…</span>}</span>}
       right={<div className="flex items-center gap-2"><Badge>{item.cat_name}</Badge><Badge color={wsc(item.status)} filled>{item.status}</Badge></div>}>
+      {/* surface-aware relevance banner: focus the relevant, flag the likely-N/A (never auto-marked) */}
+      {rel?.level === "hot" && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-2.5 py-1.5 text-[11px] text-[var(--color-accent)]">
+          <span className="font-semibold">⚡ Relevant here</span>
+          <span className="text-[var(--color-ink-dim)]">{rel.reason}</span>
+          {rel.hosts.length > 0 && (
+            <span className="mono text-[10px] text-[var(--color-ink-faint)]">
+              {rel.hosts.length} matching host{rel.hosts.length > 1 ? "s" : ""} — {rel.hosts.slice(0, 2).join(", ")}{rel.hosts.length > 2 ? "…" : ""}
+            </span>
+          )}
+          {rel.hosts[0] && host !== rel.hosts[0] && (
+            <button onClick={() => setHost(rel.hosts[0])}
+              className="mono rounded border border-[var(--color-accent)]/50 px-1.5 py-0.5 text-[10px] hover:bg-[var(--color-accent)]/15">use {rel.hosts[0].length > 22 ? rel.hosts[0].slice(0, 22) + "…" : rel.hosts[0]} →</button>
+          )}
+        </div>
+      )}
+      {rel?.level === "cold" && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/8 px-2.5 py-1.5 text-[11px] text-[var(--color-ink-dim)]">
+          <span className="font-semibold text-[var(--color-warn)]">likely N/A</span>
+          <span>{rel.reason} — verify before skipping.</span>
+          <button onClick={() => mark("na")} title={`mark ${item.id} N/A and advance`}
+            className="mono rounded border border-[var(--color-warn)]/50 px-1.5 py-0.5 text-[10px] text-[var(--color-warn)] hover:bg-[var(--color-warn)]/15">mark N/A →</button>
+        </div>
+      )}
       {/* static reference — always shown so nothing is glossed over */}
       <div className="space-y-2">
         {item.objective && (
