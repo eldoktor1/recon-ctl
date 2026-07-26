@@ -9,6 +9,7 @@ import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
 import { GuideStream } from "../components/GuideStream";
 import { AutoNote } from "../components/AutoNote";
+import { useResizable } from "../components/useResizable";
 import { getTask, setTask, clearTask, getNum, setNum, claimDone } from "../taskStore";
 import { api, type WorkspacesResp, type WorkspaceSummary, type WorkspaceCandidate,
   type WorkspaceDetail, type WstgItem, type StrideThreat, type WsHost,
@@ -919,12 +920,18 @@ function GuidedIntel({ ws, onHost, relHosts = [] }:
     [ws.hosts, relSet]);
   const cell = "rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2.5";
   const hdr = "mb-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-dim)]";
+  const { size: listH, onGripDown } = useResizable({
+    axis: "y", storageKey: "recon.guidedintel.h", initial: 220,
+    min: 100, max: () => Math.round(window.innerHeight * 0.7), growTowardPointer: true,
+  });
+  const listCls = "space-y-1 overflow-auto";
   return (
-    <div className="mt-3 grid grid-cols-1 gap-3 border-t border-[var(--color-border)] pt-3 lg:grid-cols-3">
+    <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
       <div className={cell}>
         <div className={hdr}><span>findings</span><Badge color="var(--color-accent)">{ws.findings.length}</Badge></div>
         {!ws.findings.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">none yet</div> : (
-          <div className="max-h-56 space-y-1 overflow-auto">
+          <div className={listCls} style={{ height: listH }}>
             {ws.findings.map((f) => (
               <div key={f.id} className="flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1">
                 <Badge color={stateColor[f.state] || "var(--color-ink-dim)"} filled>{f.state}</Badge>
@@ -941,7 +948,7 @@ function GuidedIntel({ ws, onHost, relHosts = [] }:
       <div className={cell}>
         <div className={hdr}><span>hosts · top</span><Badge>{ws.hosts.length}</Badge></div>
         {!hosts.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">no hosts</div> : (
-          <div className="max-h-56 space-y-1 overflow-auto">
+          <div className={listCls} style={{ height: listH }}>
             {hosts.map((h: WsHost) => {
               const relevant = relSet.has(h.host);
               return (
@@ -964,7 +971,7 @@ function GuidedIntel({ ws, onHost, relHosts = [] }:
       <div className={cell}>
         <div className={hdr}><span>program notes</span><Badge>{ws.notes.length}</Badge></div>
         {!ws.notes.length ? <div className="px-1 py-2 text-[10px] text-[var(--color-ink-faint)]">no notes yet</div> : (
-          <div className="max-h-56 space-y-1 overflow-auto">
+          <div className={listCls} style={{ height: listH }}>
             {ws.notes.map((n, i) => (
               <div key={i} className="rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1">
                 <div className="text-[9px] text-[var(--color-ink-faint)]">{fmtAgo(n.ts)}</div>
@@ -974,6 +981,12 @@ function GuidedIntel({ ws, onHost, relHosts = [] }:
           </div>
         )}
       </div>
+    </div>
+    {/* drag grip — resize all three intel lists together */}
+    <div onPointerDown={onGripDown} title="drag to resize"
+      className="group mt-1 flex h-2.5 cursor-ns-resize items-center justify-center">
+      <span className="h-0.5 w-12 rounded-full bg-[var(--color-border-bright)] transition group-hover:bg-[var(--color-accent)]" />
+    </div>
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getToken } from "../api";
 import { Spinner } from "./ui";
 import { Markdown } from "./Markdown";
+import { useResizable } from "./useResizable";
 
 // Compact label for a tool_use event streamed from a Claude task.
 export function guideToolLabel(name: string, input: any): string {
@@ -29,6 +30,11 @@ export function GuideStream({ tid, onComplete, onDead }:
   const boxRef = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onComplete); cbRef.current = onComplete;
   const deadRef = useRef(onDead); deadRef.current = onDead;
+  // drag-resizable output height (grip on the bottom edge), persisted
+  const { size: boxH, onGripDown } = useResizable({
+    axis: "y", storageKey: "recon.guidestream.h", initial: 320,
+    min: 120, max: () => Math.round(window.innerHeight * 0.85), growTowardPointer: true,
+  });
 
   useEffect(() => {
     setSegs([]); setRunning(true); setErr(null);
@@ -84,7 +90,7 @@ export function GuideStream({ tid, onComplete, onDead }:
           ? <span className="inline-flex items-center gap-1 text-[var(--color-warn)]"><Spinner /> streaming…</span>
           : <span className="text-[var(--color-ink-faint)]">· task #{tid}</span>}
       </div>
-      <div ref={boxRef} className="max-h-[440px] space-y-1.5 overflow-auto">
+      <div ref={boxRef} style={{ height: boxH }} className="space-y-1.5 overflow-auto">
         {segs.map((s, i) => s.kind === "text"
           ? <Markdown key={i} text={s.text} />
           : <div key={i} className="mono flex items-center gap-1.5 text-[10px] text-[var(--color-ink-faint)]">
@@ -92,6 +98,11 @@ export function GuideStream({ tid, onComplete, onDead }:
             </div>)}
         {!hasText && running && <div className="mono text-[11px] text-[var(--color-ink-faint)]">waiting for Claude…</div>}
         {!hasText && !running && !err && <div className="mono text-[11px] text-[var(--color-ink-faint)]">(no guidance text returned)</div>}
+      </div>
+      {/* drag grip — resize the output height */}
+      <div onPointerDown={onGripDown} title="drag to resize"
+        className="group mt-1 flex h-2.5 cursor-ns-resize items-center justify-center">
+        <span className="h-0.5 w-12 rounded-full bg-[var(--color-border-bright)] transition group-hover:bg-[var(--color-accent)]" />
       </div>
       {err && <div className="mono mt-1 text-[10px] text-[var(--color-bad)]">⚠ {err}</div>}
     </div>

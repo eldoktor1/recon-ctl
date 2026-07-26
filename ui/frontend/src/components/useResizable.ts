@@ -9,8 +9,12 @@ type Axis = "x" | "y";
 // re-clamped to [min, max()] on drag and on window resize. No external deps.
 export function useResizable(opts: {
   axis: Axis; storageKey: string; initial: number; min: number; max: () => number;
+  // default false: grip faces the viewport centre (docked panels), dragging toward it grows.
+  // true: grip is on the trailing edge (bottom/right of an inline box), dragging AWAY grows.
+  growTowardPointer?: boolean;
 }) {
   const { axis, storageKey, initial, min, max } = opts;
+  const dir = opts.growTowardPointer ? 1 : -1;
 
   const [size, setSize] = useState<number>(() => {
     try {
@@ -28,7 +32,7 @@ export function useResizable(opts: {
     const onMove = (e: PointerEvent) => {
       if (!drag.current) return;
       const pos = axis === "y" ? e.clientY : e.clientX;
-      setSize(clamp(drag.current.base + (drag.current.start - pos)));
+      setSize(clamp(drag.current.base + dir * (pos - drag.current.start)));
     };
     const onUp = () => {
       if (!drag.current) return;
@@ -43,7 +47,7 @@ export function useResizable(opts: {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [axis, clamp, storageKey]);
+  }, [axis, clamp, storageKey, dir]);
 
   // keep the panel inside the viewport when it shrinks
   useEffect(() => {
