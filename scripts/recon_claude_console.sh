@@ -42,7 +42,13 @@ MARKER="$CONSOLE_DIR/$SESSION.started"
 mkdir -p "$CONSOLE_DIR" 2>/dev/null || true
 
 cd "$REPO_DIR" 2>/dev/null || { echo '{"type":"error","error":"repo dir missing"}'; exit 1; }
-[[ -x "$CLAUDE_BIN" ]] || { echo "{\"type\":\"error\",\"error\":\"claude cli not found at $CLAUDE_BIN\"}"; exit 1; }
+
+# Shared bidirectional failover engine (Claude <-> local WhiteRabbitNeo). Sourcing it here is
+# what makes the in-UI co-pilot / Guide-me / auto-drive / AutoNote fail over to the local model
+# when Claude is rate-limited — the same engine the shell AI lanes use (scripts/ai_invoke.sh).
+# A MISSING claude CLI is no longer fatal: the dispatch at the end routes the turn to the local
+# model instead of erroring the console.
+source "$REPO_DIR/scripts/lib/ai_failover.sh"
 
 # TOOLS: no --allowedTools is passed. Under bypassPermissions the co-pilot has the
 # full built-in toolset (Bash, Read/Grep/Glob, Edit/Write, WebSearch/WebFetch, Task,
@@ -104,11 +110,73 @@ ARGS=( -p "$MESSAGE"
        --append-system-prompt "$APPEND_SYS" )
 [[ -n "$MODEL" ]] && ARGS+=( --model "$MODEL" )
 
+# session continuity: the first claude turn pins --session-id, later turns --resume. The marker
+# is created only AFTER claude actually runs (see dispatch) so an ollama-fallback turn never
+# leaves a marker pointing at a claude session that was never created.
 if [[ -f "$MARKER" ]]; then
   ARGS+=( --resume "$SESSION" )
 else
   ARGS+=( --session-id "$SESSION" )
-  : > "$MARKER"
 fi
 
-exec "$CLAUDE_BIN" "${ARGS[@]}"
+# Emit the local model's plain-text answer as the SAME stream-json events the browser already
+# parses (assistant text + result) — so a fallback turn is readable, not invisible JSON.
+emit_local_streamjson() {  # $1 = user message
+  local ans note
+  ans="$(run_ollama "$1")"
+  [[ -n "$ans" ]] || ans="(Claude is rate-limited and the local WhiteRabbitNeo fallback returned no output — check that ollama is running at ${OLLAMA_URL} and the model is pulled.)"
+  note="⚠ Claude is rate-limited — answered by the local WhiteRabbitNeo fallback (reasoning only: no tools, no session continuity)."
+  if have_jq; then
+    jq -nc --arg n "$note" --arg a "$ans" '{type:"assistant",message:{content:[{type:"text",text:($n+"\n\n"+$a)}]}}'
+    jq -nc --arg a "$ans" '{type:"result",subtype:"success",is_error:false,result:$a,num_turns:1,duration_ms:0}'
+  else
+    local esc
+    esc="$(printf '%s\n\n%s' "$note" "$ans" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)"
+    [[ -n "$esc" ]] || esc='"local model output unavailable"'
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$esc"
+  fi
+}
+
+# ---- dispatch: pick the live brain from the shared failover state ----
+_st="$(read_state)"
+_active="$(printf '%s' "$_st" | cut -f1)"
+_reset="$(printf '%s' "$_st" | cut -f2)"
+_pc="$(printf '%s' "$_st" | cut -f3)"
+[[ -x "$CLAUDE_BIN" ]] || _active="ollama"
+
+if [[ "$_active" == "ollama" ]]; then
+  # reverse-check whether Claude's quota is back before serving locally
+  _pc=$(( _pc + 1 )); _probe=0
+  reset_passed "$_reset" && _probe=1
+  [[ "$_reset" == "null" ]] && (( _pc % PROBE_EVERY_N == 0 )) && _probe=1
+  if [[ "$_probe" == "1" && -x "$CLAUDE_BIN" ]] && claude_alive; then
+    write_state claude null "claude quota renewed (console reverse-probe)" 0
+    log "SWITCH ollama->claude (console reverse-probe)"
+    _active="claude"
+  else
+    write_state ollama "$_reset" "$( { have_jq && jq -r '.reason // "fallback active"' "$STATE_FILE" 2>/dev/null; } || echo 'fallback active')" "$_pc"
+    emit_local_streamjson "$MESSAGE"
+    exit 0
+  fi
+fi
+
+# active=claude: stream live via `tee` while capturing stdout+stderr to spot a usage limit.
+_tmp="$(mktemp "${TMPDIR:-/tmp}/console.XXXXXX")"
+"$CLAUDE_BIN" "${ARGS[@]}" 2>"$_tmp.err" | tee "$_tmp"
+_ec=${PIPESTATUS[0]}
+# mark a NEW session started only on success, so a limited first turn retries cleanly next time
+[[ ! -f "$MARKER" && "$_ec" -eq 0 ]] && : > "$MARKER"
+_combined="$(cat "$_tmp" "$_tmp.err" 2>/dev/null)"
+# fall over ONLY on a genuine failure (non-zero exit) that also looks like a limit — a successful
+# answer that merely mentions "rate limit" is never mistaken for one.
+if [[ "$_ec" -ne 0 ]] && is_limit "$_ec" "$_combined"; then
+  _rt="$(parse_reset "$_combined")"
+  [[ "$_rt" == "null" ]] && _rt="$(date -u -d "+${FALLBACK_COOLDOWN} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo null)"
+  _why="$(printf '%s' "$_combined" | grep -ioE '.{0,60}(usage limit|rate limit|limit reached|out of credit|quota|429).{0,40}' | head -1 | tr -d '\n' | cut -c1-160)"
+  write_state ollama "$_rt" "${_why:-claude limit detected}" 0
+  log "SWITCH claude->ollama (console limit: ${_why:-detected}; reset_at=$_rt)"
+  emit_local_streamjson "$MESSAGE"
+  _ec=0   # the turn was served by the fallback — don't surface a task failure to the UI
+fi
+rm -f "$_tmp" "$_tmp.err" 2>/dev/null
+exit "$_ec"
