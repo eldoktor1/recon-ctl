@@ -220,6 +220,15 @@ function WorkspaceView({ ws, onChanged, onTask }:
     catch (e: any) { toast("err", e.message); }
   };
 
+  // jump to the Guided walkthrough focused on a specific test/category — from any tab.
+  // GuidedTab reads its step index from storage on mount, so we set it then switch tabs.
+  const goToStep = useCallback((phase: "stride" | "wstg", key: string) => {
+    const i = phase === "stride"
+      ? STRIDE_COLS.findIndex((c) => c.cat === key)
+      : STRIDE_COLS.length + ws.wstg.findIndex((w) => w.id === key);
+    if (i >= 0) { setNum(`guided-idx:${ws.key}`, i); setTab("guided"); }
+  }, [ws.wstg, ws.key]);
+
   const tabs: { id: Tab; label: string }[] = [
     { id: "guided", label: "◎ Guided" }, { id: "overview", label: "Overview" },
     { id: "wstg", label: `WSTG · ${done}/${total}` },
@@ -281,8 +290,8 @@ function WorkspaceView({ ws, onChanged, onTask }:
 
       {tab === "guided" && <GuidedTab ws={ws} onChanged={onChanged} onTask={onTask} />}
       {tab === "overview" && <OverviewTab ws={ws} onChanged={onChanged} onTask={onTask} />}
-      {tab === "wstg" && <WstgTab ws={ws} onChanged={onChanged} />}
-      {tab === "stride" && <StrideTab ws={ws} onChanged={onChanged} />}
+      {tab === "wstg" && <WstgTab ws={ws} onChanged={onChanged} onGoToStep={goToStep} />}
+      {tab === "stride" && <StrideTab ws={ws} onChanged={onChanged} onGoToStep={goToStep} />}
       {tab === "notes" && <NotesTab ws={ws} onChanged={onChanged} />}
     </div>
   );
@@ -1020,6 +1029,10 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, threat: val.trim() }); setVal(""); toast("ok", "threat added"); onChanged(); }
     catch (e: any) { toast("err", e.message); }
   };
+  const del = async (t: StrideThreat) => {
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride/delete`, { cat, id: t.id }); onChanged(); }
+    catch (e: any) { toast("err", e.message); }
+  };
   // Manual "Guide me" leaves a trace: when the guidance stream finishes, record its summary as a
   // threat for this category (auto-drive already records its own, so only for the manual path).
   const recordGuide = async (text: string, tid: number) => {
@@ -1057,9 +1070,11 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
       <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead} />
       <div className="mt-3 space-y-1">
         {threats.map((t, i) => (
-          <div key={t.id || i} className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
+          <div key={t.id || i} className="group flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
             <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: wsc(t.status) }} />
             <span className="min-w-0 flex-1 text-[11px] text-[var(--color-ink)]">{t.threat}</span>
+            <button onClick={() => del(t)} title="delete threat"
+              className="shrink-0 rounded px-1 text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
           </div>
         ))}
         {!threats.length && <div className="px-1 py-1 text-[10px] text-[var(--color-ink-faint)]">no threats logged for this category yet</div>}
@@ -1200,7 +1215,8 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
 }
 
 // --- WSTG tab: OWASP checklist grouped by category ---------------------------
-function WstgTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => void }) {
+function WstgTab({ ws, onChanged, onGoToStep }:
+  { ws: WorkspaceDetail; onChanged: () => void; onGoToStep: (phase: "wstg", id: string) => void }) {
   const toast = useToast();
   const groups = useMemo(() => {
     const m = new Map<string, { cat: string; cat_name: string; items: WstgItem[] }>();
@@ -1225,7 +1241,7 @@ function WstgTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => void
             title={<span className="flex items-center gap-2"><span className="mono text-[var(--color-ink-faint)]">{g.cat}</span>{g.cat_name}</span>}
             right={<div className="w-40"><CoverageBar done={done} total={g.items.length} label /></div>}>
             <div className="space-y-1">
-              {g.items.map((it) => <WstgRow key={it.id} it={it} onPost={post} />)}
+              {g.items.map((it) => <WstgRow key={it.id} it={it} onPost={post} onGuide={() => onGoToStep("wstg", it.id)} />)}
             </div>
           </Panel>
         );
@@ -1235,18 +1251,32 @@ function WstgTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => void
   );
 }
 
-function WstgRow({ it, onPost }: { it: WstgItem; onPost: (b: { id: string; status: string; note?: string }) => void }) {
+// default note stamped when a step is worked with no note typed — so working ALWAYS leaves a trace
+const WSTG_DEFAULT_NOTE: Record<string, string> = {
+  done: "reviewed — no issue", finding: "flagged as a finding", na: "not applicable to this surface",
+  "in-progress": "in progress",
+};
+function WstgRow({ it, onPost, onGuide }:
+  { it: WstgItem; onPost: (b: { id: string; status: string; note?: string }) => void; onGuide: () => void }) {
   const [note, setNote] = useState(it.note || "");
   useEffect(() => { setNote(it.note || ""); }, [it.note]);
   const saveNote = () => { if (note !== (it.note || "")) onPost({ id: it.id, status: it.status, note }); };
+  // marking a status auto-stamps a note when none was typed, so nothing is worked without a trace
+  const setStatus = (status: string) => {
+    const n = note.trim() || (status !== "todo" ? (WSTG_DEFAULT_NOTE[status] || "") : "");
+    if (n && n !== note) setNote(n);
+    onPost({ id: it.id, status, note: n });
+  };
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
       <span className="mono shrink-0 text-[10px] text-[var(--color-ink-faint)]" style={{ minWidth: 92 }}>{it.id}</span>
+      <button onClick={onGuide} title="work this test in the Guided walkthrough"
+        className="mono shrink-0 rounded border border-[var(--color-border-bright)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">◎ guide</button>
       <span className="min-w-[160px] flex-1 text-[12px] text-[var(--color-ink)]">{it.name}</span>
       <input value={note} onChange={(e) => setNote(e.target.value)} onBlur={saveNote}
         onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} placeholder="note…"
         className="mono w-48 rounded border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
-      <select value={it.status} onChange={(e) => onPost({ id: it.id, status: e.target.value, note })}
+      <select value={it.status} onChange={(e) => setStatus(e.target.value)}
         className="mono shrink-0 rounded border px-2 py-1 text-[11px] outline-none"
         style={{ borderColor: `${wsc(it.status)}66`, color: wsc(it.status), background: `${wsc(it.status)}12` }}>
         {WSTG_STATUSES.map((s) => <option key={s} value={s} style={{ background: "var(--color-panel)", color: "var(--color-ink)" }}>{s}</option>)}
@@ -1256,7 +1286,8 @@ function WstgRow({ it, onPost }: { it: WstgItem; onPost: (b: { id: string; statu
 }
 
 // --- STRIDE tab: 6-column threat board ---------------------------------------
-function StrideTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => void }) {
+function StrideTab({ ws, onChanged, onGoToStep }:
+  { ws: WorkspaceDetail; onChanged: () => void; onGoToStep: (phase: "stride", cat: string) => void }) {
   const toast = useToast();
   const add = async (cat: string, threat: string) => {
     if (!threat.trim()) return;
@@ -1267,12 +1298,18 @@ function StrideTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => vo
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, id: t.id, threat: t.threat, note: t.note, status }); onChanged(); }
     catch (e: any) { toast("err", e.message); }
   };
+  const del = async (cat: string, t: StrideThreat) => {
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride/delete`, { cat, id: t.id }); onChanged(); }
+    catch (e: any) { toast("err", e.message); }
+  };
   return (
     <div className="min-h-0 flex-1 overflow-auto pb-4">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         {STRIDE_COLS.map((col) => (
           <StrideColumn key={col.cat} label={col.label} cat={col.cat}
-            threats={ws.stride[col.cat] || []} onAdd={(v) => add(col.cat, v)} onCycle={(t) => update(col.cat, t, nextStride(t.status))} />
+            threats={ws.stride[col.cat] || []} onAdd={(v) => add(col.cat, v)}
+            onCycle={(t) => update(col.cat, t, nextStride(t.status))} onDelete={(t) => del(col.cat, t)}
+            onGuide={() => onGoToStep("stride", col.cat)} />
         ))}
       </div>
     </div>
@@ -1283,23 +1320,30 @@ function nextStride(cur?: string) {
   return seq[(seq.indexOf(cur || "todo") + 1) % seq.length];
 }
 
-function StrideColumn({ label, cat, threats, onAdd, onCycle }:
-  { label: string; cat: string; threats: StrideThreat[]; onAdd: (v: string) => void; onCycle: (t: StrideThreat) => void }) {
+function StrideColumn({ label, cat, threats, onAdd, onCycle, onDelete, onGuide }:
+  { label: string; cat: string; threats: StrideThreat[]; onAdd: (v: string) => void;
+    onCycle: (t: StrideThreat) => void; onDelete: (t: StrideThreat) => void; onGuide: () => void }) {
   const [val, setVal] = useState("");
   const submit = () => { onAdd(val); setVal(""); };
   return (
     <div className="flex flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)]">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2">
         <span className="text-xs font-semibold text-[var(--color-ink)]"><span className="mono text-[var(--color-accent)]">{cat}</span> · {label}</span>
-        <Badge>{threats.length}</Badge>
+        <div className="flex items-center gap-1.5">
+          <button onClick={onGuide} title="work this category in the Guided walkthrough"
+            className="mono rounded border border-[var(--color-border-bright)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">◎ guide</button>
+          <Badge>{threats.length}</Badge>
+        </div>
       </div>
       <div className="flex-1 space-y-1.5 p-2">
         {threats.map((t, i) => (
-          <div key={t.id || i} className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1.5">
+          <div key={t.id || i} className="group rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2 py-1.5">
             <div className="flex items-start gap-1.5">
               <button onClick={() => onCycle(t)} title={`${t.status || "todo"} — click to cycle`}
                 className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: wsc(t.status) }} />
               <span className="min-w-0 flex-1 text-[11px] text-[var(--color-ink)]">{t.threat}</span>
+              <button onClick={() => onDelete(t)} title="delete threat"
+                className="shrink-0 rounded px-1 text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
             </div>
             {t.note && <div className="mt-1 pl-3.5 text-[10px] text-[var(--color-ink-faint)]">{t.note}</div>}
             {t.hosts && t.hosts.length > 0 && (
@@ -1329,6 +1373,10 @@ function NotesTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => voi
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/note`, { text: text.trim() }); setText(""); toast("ok", "note saved"); onChanged(); }
     catch (e: any) { toast("err", e.message); }
   };
+  const del = async (index: number) => {
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/note/delete`, { index }); onChanged(); }
+    catch (e: any) { toast("err", e.message); }
+  };
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto pb-4 lg:grid-cols-2">
       <Panel title="notes">
@@ -1341,9 +1389,13 @@ function NotesTab({ ws, onChanged }: { ws: WorkspaceDetail; onChanged: () => voi
         {!ws.notes.length ? <Empty>no notes yet</Empty> : (
           <div className="space-y-1.5">
             {ws.notes.map((n, i) => (
-              <div key={i} className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
-                <div className="text-[10px] text-[var(--color-ink-faint)]">{fmtAgo(n.ts)}</div>
-                <div className="mt-0.5 text-[12px] text-[var(--color-ink)]">{n.text}</div>
+              <div key={i} className="group flex items-start gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] text-[var(--color-ink-faint)]">{fmtAgo(n.ts)}</div>
+                  <div className="mt-0.5 text-[12px] text-[var(--color-ink)]">{n.text}</div>
+                </div>
+                <button onClick={() => del(i)} title="delete note"
+                  className="shrink-0 rounded px-1 text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
               </div>
             ))}
           </div>

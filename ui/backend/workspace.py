@@ -861,6 +861,32 @@ def add_note(key: str, text: str) -> dict[str, Any]:
     return save(ws)
 
 
+def delete_stride(key: str, cat: str, sid: str) -> dict[str, Any]:
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    cat = (cat or "").strip().upper()[:1]
+    bucket = ws.get("stride", {}).get(cat, [])
+    kept = [t for t in bucket if t.get("id") != sid]
+    if len(kept) != len(bucket):
+        ws["stride"][cat] = kept
+        ws["history"].append({"ts": _now(), "event": f"STRIDE {sid} deleted"})
+        return save(ws)
+    return ws
+
+
+def delete_note(key: str, index: int) -> dict[str, Any]:
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    notes = ws.get("notes", [])
+    if 0 <= index < len(notes):
+        notes.pop(index)
+        ws["history"].append({"ts": _now(), "event": "note deleted"})
+        return save(ws)
+    return ws
+
+
 def set_status(key: str, status: str | None = None,
                current: bool | None = None) -> dict[str, Any]:
     ws = load(key)

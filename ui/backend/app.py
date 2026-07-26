@@ -749,6 +749,29 @@ async def api_workspace_note(key: str, body: dict = Depends(safety.require_confi
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/workspaces/{key}/stride/delete")
+async def api_workspace_stride_delete(key: str, body: dict = Depends(safety.require_confirm)):
+    cat = (body.get("cat") or "").strip()
+    sid = (body.get("id") or "").strip()
+    if not cat or not sid:
+        raise HTTPException(400, "cat and id required")
+    try:
+        return workspace.delete_stride(key, cat, sid)
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+
+
+@app.post("/api/workspaces/{key}/note/delete")
+async def api_workspace_note_delete(key: str, body: dict = Depends(safety.require_confirm)):
+    idx = body.get("index")
+    if not isinstance(idx, int) or idx < 0:
+        raise HTTPException(400, "valid index required")
+    try:
+        return workspace.delete_note(key, idx)
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+
+
 @app.post("/api/workspaces/{key}/status")
 async def api_workspace_status(key: str, body: dict = Depends(safety.require_confirm)):
     try:
