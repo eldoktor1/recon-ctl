@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useFetch } from "../hooks";
 import { api } from "../api";
 import { Panel, Badge, Empty, Spinner } from "../components/ui";
-import { Btn } from "../components/controls";
+import { Btn, useToast } from "../components/controls";
 import { LeadActions, useHostActions } from "../components/LeadActions";
 import { AutoNote } from "../components/AutoNote";
 import { TaskConsole } from "../components/TaskConsole";
@@ -20,10 +20,31 @@ export default function TargetWorkspace() {
   const { data: asset, refetch: refetchAsset } = useFetch<any>(host ? `/api/assets/${enc}` : null, [host]);
   const { data: findings, refetch: refetchF } = useFetch<{ items: any[] }>(host ? `/api/findings?q=${enc}&limit=50` : null, [host]);
   const actions = useHostActions();
+  const toast = useToast();
   const [openTask, setOpenTask] = useState<number | null>(() => getTask(`drawer:target:${host}`));
   const onTask = (tid: number) => { setOpenTask(tid); setTask(`drawer:target:${host}`, tid); };
   const closeTask = () => { setOpenTask(null); clearTask(`drawer:target:${host}`); };
   const refresh = () => { refetchAsset(); refetchF(); };
+  const nFindings = findings?.items?.length ?? 0;
+
+  // finishing a host: persist the outcome and hide it — the appropriate moment for the FP call.
+  const markFP = async () => {
+    const reason = prompt(`Finish ${host} — mark false-positive / not-actionable.\nOptional reason (persisted as a note):`,
+      "exhausted every angle — no exploitable primitive") ?? undefined;
+    if (reason === undefined) return;
+    try {
+      await api.action(`/api/hosts/${enc}/dismiss`, { kind: "fp", reason });
+      toast("ok", `${host} marked FP + noted — hidden from the worklist`);
+      nav("/leads");
+    } catch (e: any) { toast("err", e.message); }
+  };
+  const bench = async () => {
+    try {
+      await api.action(`/api/hosts/${enc}/ignore`, { reason: "ui: benched from target workspace (revisit later)" });
+      toast("ok", `${host} benched 7d`);
+      nav("/leads");
+    } catch (e: any) { toast("err", e.message); }
+  };
 
   return (
     <div className="fade-in space-y-4">
@@ -81,6 +102,24 @@ export default function TargetWorkspace() {
           hint="log what you tried + the outcome; auto-draft where this target stands"
           spawn={() => api.action<any>(`/api/hosts/${enc}/autonote`)}
           onSave={async (text) => { const r = await api.action(`/api/hosts/${enc}/note`, { text }); refresh(); return r; }} />
+      </Panel>
+
+      <Panel title="finish this host"
+        right={nFindings ? <Badge color="var(--color-good)">{nFindings} finding{nFindings > 1 ? "s" : ""}</Badge> : <Badge color="var(--color-ink-faint)">no finding yet</Badge>}>
+        <div className="space-y-2.5 text-[12px]">
+          {nFindings ? (
+            <div className="text-[var(--color-good)]">This host has finding(s) — report them from the Findings page, and save the exhaustion note above so the outcome is recorded.</div>
+          ) : (
+            <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/8 px-2.5 py-1.5 text-[var(--color-ink-dim)]">
+              <span className="font-semibold text-[var(--color-warn)]">Exhausted with nothing?</span> Mark it a false-positive — that records the reason as a note and drops it from the worklist so you never re-inspect it. (Save the exhaustion note above first if you want the full trail.)
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Btn size="sm" variant="danger" onClick={markFP}>✕ mark false-positive &amp; hide</Btn>
+            <Btn size="sm" onClick={bench}>bench 7d (revisit later)</Btn>
+            <Btn size="sm" onClick={() => nav("/leads")}>← back to worklist</Btn>
+          </div>
+        </div>
       </Panel>
 
       {openTask != null && <TaskConsole tid={openTask} onClose={closeTask} onChanged={() => { clearTask(`drawer:target:${host}`); refresh(); }} />}
