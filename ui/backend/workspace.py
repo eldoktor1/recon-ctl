@@ -1012,6 +1012,9 @@ _DRIVE_TOOLS = (
     "  - `brave` MCP → the operator's logged-in debug Brave over CDP (chrome-devtools, :9222). Use it "
     "to NAVIGATE to pages, read the live DOM / JS / network requests, and run browser-driven / "
     "client-side checks in the authed session.\n"
+    "  - BURP PROJECT: for sustained work on this program/target, RECOMMEND the operator open a "
+    "DEDICATED Burp project (one per program) up front, so proxy history / Repeater / Intruder / "
+    "Autorize state persists across the whole engagement; then drive it via the burp MCP.\n"
     "If a `burp` call fails, Burp Pro isn't up with its MCP server on :9876; if a `brave` call fails, "
     "debug-Brave isn't running on :9222 (launch: scripts/launch_brave_debug.ps1). In that case say so "
     "plainly and hand the operator the exact manual steps/commands instead of retrying blindly."
@@ -1025,8 +1028,43 @@ _ACCOUNTS = (
     "`python3 scripts/recon_account.py create <name> --url <signup_url> --platform <bugcrowd|hackerone|"
     "yeswehack|gmail> --label <a|b>` (alias `recon-account`; the operator solves the CAPTCHA + final "
     "submit; creds are local-only). Provision TWO accounts the operator OWNS, then confirm with the "
-    "2-account swap using ONLY your own object IDs — never a guessed/enumerated third-party ID."
+    "2-account swap using ONLY your own object IDs — never a guessed/enumerated third-party ID. "
+    "While signing up / logging in, CAPTURE the auth flow in Burp (the login/token/refresh requests, "
+    "the session-cookie + auth-header NAMES, the JWT structure, your own user/object IDs) and FLAG "
+    "anything interesting for the class you're hunting — predictable/enumerable IDs, JWT alg=none or a "
+    "weak secret, an open oauth redirect_uri, IDOR-shaped params. This applies to single targets too."
 )
+
+# Depth doctrine: version-aware + exhaustive, grounded in the recorded KB methodology.
+_EXHAUSTIVE = (
+    "GO EXHAUSTIVE + VERSION-AWARE — do EVERYTHING to find the bug for THIS target:\n"
+    "- FINGERPRINT the exact stack + VERSIONS (server, framework, libraries, WAF/CDN) from headers, "
+    "JS bundles, error pages, favicon hash, /actuator etc. Map version-specific CVEs / known exploits "
+    "and VERSION-REASON whether the running version is genuinely in range — never a tech-class-only P0.\n"
+    "- READ the recorded methodology for this class in the docs/knowledge/class-*.md file(s) named "
+    "below (use the Read tool) and apply EVERY applicable technique/payload/bypass in it — not just the "
+    "happy path. Adapt payloads to the target's framework/encoding/WAF; if standard payloads are "
+    "filtered, RESEARCH that framework's specific sinks/bypasses and try those.\n"
+    "- A first negative probe is NOT proof of absence: enumerate the untested angles (other params/"
+    "endpoints/verbs/content-types/headers, the staging/pre-prod host, an adjacent class) and work them "
+    "until suspicion is truly exhausted. When stuck, research disclosed reports / CVE PoCs for a fresh "
+    "angle before concluding.\n"
+    "- PERSIST what you discover into the pipeline: new subdomains/endpoints + worked-knowledge via "
+    "`recon note <host> \"...\"`; a real confirmed primitive rides the normal mint -> verify path."
+)
+
+# WSTG category -> KB methodology docs to read for exhaustive, class-specific testing.
+_WSTG_KB = {
+    "INFO": ["class-unauth-hunting.md"],
+    "CONF": ["class-bucket-exposure.md", "class-takeover.md", "class-cache-deception.md", "class-403-bypass.md"],
+    "IDNT": ["class-idor.md"], "ATHN": ["class-jwt-attacks.md"], "ATHZ": ["class-idor.md"],
+    "SESS": ["class-jwt-attacks.md"],
+    "INPV": ["class-xss.md", "class-sqli.md", "class-ssrf.md", "class-domxss.md"],
+    "ERRH": ["class-unauth-hunting.md"], "CRYP": ["class-jwt-attacks.md"],
+    "BUSL": ["class-race-conditions.md", "class-idor.md"],
+    "CLNT": ["class-domxss.md", "class-xss.md", "class-clientside-secrets.md", "class-firebase.md"],
+    "APIT": ["class-graphql.md", "class-idor.md", "class-ssrf.md"],
+}
 
 # Machine-readable trailer the Auto-drive UI parses to auto-mark the step + write its outcome note.
 _STEP_RESULT = (
@@ -1066,6 +1104,10 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
     focus_host = f"\nOperator has selected host to focus on: {host}" if host else ""
     if phase == "wstg":
         ref = wstg_reference().get(ident, {})
+        cat = ident.split("-")[1] if ident.count("-") >= 2 else ""
+        kb = _WSTG_KB.get(cat, [])
+        kb_line = ("KB METHODOLOGY to READ (Read tool) + fully apply for this class: "
+                   + ", ".join(f"docs/knowledge/{d}" for d in kb) + "\n\n") if kb else ""
         head = (f"You are the operator's co-pilot DRIVING OWASP WSTG test {ident} — "
                 f"\"{ref.get('name', ident)}\" ({ref.get('cat_name', '')}) — on THIS engagement. "
                 f"Actively work the test end-to-end with the tools below; do not merely describe it.")
@@ -1088,7 +1130,7 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
             "operator's authed step to close it), N-A, or clean pass.\n"
             "5. Call out this class's common false-positive / N-A pitfalls so nothing is overclaimed.\n"
             "Be specific to the program context above — no generic WSTG boilerplate.\n\n"
-            f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
+            f"{kb_line}{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
     else:
         g = STRIDE_GUIDE.get((ident or "").upper()[:1], {})
         head = (f"You are the operator's co-pilot DRIVING STRIDE threat modelling — category "
@@ -1102,7 +1144,7 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
             "it now (read-only, in-scope+paying). Rank by likely payout/impact and end with the 2-3 to "
             "test first.\n\n"
             f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
-    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_DOCTRINE}\n\n{_STEP_RESULT}"
+    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_EXHAUSTIVE}\n\n{_DOCTRINE}\n\n{_STEP_RESULT}"
 
 
 # --- Auto-note prompts (summarize where testing stands into a worked-knowledge note) ----------
