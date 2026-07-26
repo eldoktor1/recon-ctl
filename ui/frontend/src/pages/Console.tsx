@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, getToken } from "../api";
-import { useFetch } from "../hooks";
+import { useFetch, useLiveStatus } from "../hooks";
 import { Badge, Dot, Empty, Spinner } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { Markdown } from "../components/Markdown";
@@ -55,6 +55,13 @@ function fmtReset(resetsAt?: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function fmtBackInISO(iso: string): string {
+  const secs = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+  if (secs <= 0) return "any moment";
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
+
 const SID_KEY = "recon_console_sid";
 const MODEL_KEY = "recon_console_model";
 
@@ -69,6 +76,8 @@ function newSid(): string {
 
 export default function Console() {
   const { data: cfg } = useFetch<ConsoleCfg>("/api/claude/config");
+  const { status: liveStatus } = useLiveStatus();
+  const ai = liveStatus?.ai;
   const [sid, setSid] = useState<string>(() => localStorage.getItem(SID_KEY) || newSid());
   const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || "opus");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -298,6 +307,14 @@ export default function Console() {
       {notReady && (
         <div className="mb-3 rounded-md border border-[var(--color-bad)]/40 bg-[var(--color-bad)]/10 px-3 py-2 text-xs text-[var(--color-ink-dim)]">
           Console not wired: {!cfg?.available ? "recon_claude_console.sh missing" : "claude CLI not found on this box"}.
+        </div>
+      )}
+
+      {ai?.fallback_active && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-warn)]/40 bg-[var(--color-warn)]/10 px-3 py-2 text-xs text-[var(--color-ink-dim)]">
+          <span className="font-semibold text-[var(--color-warn)]">⚠ Claude is rate-limited</span>
+          <span>— running on the local WhiteRabbitNeo fallback (reasoning only, no tools).</span>
+          {ai.claude_reset_at && <span className="mono text-[var(--color-ink-faint)]">Claude back {fmtBackInISO(ai.claude_reset_at)}</span>}
         </div>
       )}
 

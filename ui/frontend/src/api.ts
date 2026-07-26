@@ -82,6 +82,7 @@ export interface Status {
   killswitches: { lane: string; killed: boolean; since: number }[];
   findings_by_state: Record<string, number>;
   ui_build?: string;   // main bundle hash; a change means a new build was deployed
+  ai?: { active_provider: string; fallback_active: boolean; fallback_reason: string; claude_reset_at: string | null };
 }
 
 export interface Overview extends Status {

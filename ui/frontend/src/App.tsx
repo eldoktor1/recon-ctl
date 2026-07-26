@@ -45,11 +45,21 @@ const NAV: NavItem[] = [
   { to: "/settings", label: "Settings", icon: "⧉" },
 ];
 
+// "Claude back in Xh Ym" from the ISO reset time (recomputed each status tick)
+function fmtBackIn(iso?: string | null): string {
+  if (!iso) return "";
+  const secs = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+  if (secs <= 0) return "any moment";
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 function TopBar() {
   const { status, connected, staleMs } = useLiveStatus();
   const d = status?.daemon;
   const vpn = status?.vpn;
   const es = status?.es;
+  const ai = status?.ai;
   const stale = staleMs > 12_000;
   const openPalette = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
   return (
@@ -75,6 +85,10 @@ function TopBar() {
           color={vpn?.up ? "var(--color-good)" : "var(--color-bad)"} pulse={!vpn?.up} />
         <Pill label="es" value={es?.reachable ? `${es.status} · ${fmtNum(es.docs)}` : "offline"}
           color={es?.reachable ? (es.status === "green" ? "var(--color-good)" : "var(--color-warn)") : "var(--color-bad)"} />
+        {ai?.fallback_active && (
+          <Pill label="ai" pulse color="var(--color-warn)"
+            value={`local · Claude back ${fmtBackIn(ai.claude_reset_at) ? "in " + fmtBackIn(ai.claude_reset_at) : "soon"}`} />
+        )}
       </div>
     </header>
   );

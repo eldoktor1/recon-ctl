@@ -89,6 +89,7 @@ async def build_status() -> dict[str, Any]:
         "killswitches": daemon.killswitches(),
         "findings_by_state": findings.state_counts(),
         "ui_build": _ui_build(),
+        "ai": claude_console.fallback_state(),
         "token_required": True,
     }
 

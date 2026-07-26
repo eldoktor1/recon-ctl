@@ -317,6 +317,11 @@ def _fallback_state() -> dict:
         return default
 
 
+def fallback_state() -> dict:
+    """Public accessor for the runtime AI-failover state (claude vs local ollama + reset time)."""
+    return _fallback_state()
+
+
 def available() -> dict:
     """Frontend gate: is the console wired up, and which AI provider is active?
 
