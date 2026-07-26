@@ -4,6 +4,7 @@ import { useFetch } from "../hooks";
 import { Badge, Dot, Empty, Spinner } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { Markdown } from "../components/Markdown";
+import { getTask, setTask, clearTask } from "../taskStore";
 
 // The in-UI Claude co-pilot. Each turn spawns a backend task that runs
 // `recon_claude_console.sh` and streams stream-json events over the task WS.
@@ -163,6 +164,7 @@ export default function Console() {
       });
       if (r.session_id && r.session_id !== sid) setSid(r.session_id);
       setTid(r.id);
+      setTask(`console:${r.session_id || sid}`, r.id);  // persist so returning reconnects the live turn
       openStream(r.id);
     } catch (e: any) {
       toast("err", e.message);
@@ -182,6 +184,7 @@ export default function Console() {
         if (m.type === "line") { try { handleEvent(JSON.parse(m.data)); } catch {} }
         else if (m.type === "end") {
           setBusy(false);
+          clearTask(`console:${sid}`);
           setTurns((ts) => ts.map((t) => (t.live ? { ...t, live: false } : t)));
         }
       } catch {}
@@ -194,6 +197,15 @@ export default function Console() {
       setTurns((ts) => ts.map((t) => (t.live ? { ...t, live: false } : t)));
     };
   };
+
+  // On mount, if a turn was still running when we navigated away, RECONNECT its live stream —
+  // the backend kept it running and replays the buffered output — instead of losing it (and
+  // tempting a wasteful re-send). Cleared on the turn's `end`.
+  useEffect(() => {
+    const t = getTask(`console:${sid}`);
+    if (t != null) { setBusy(true); setTid(t); openStream(t); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const reset = () => {
     wsRef.current?.close();
@@ -217,6 +229,7 @@ export default function Console() {
         t.blocks.push({ kind: "note", text: "⏹ stopped — type a correction to redirect the co-pilot" });
       });
       setBusy(false);
+      clearTask(`console:${sid}`);
       wsRef.current?.close();
       toast("ok", "stopped — your next message steers it");
       inputRef.current?.focus();

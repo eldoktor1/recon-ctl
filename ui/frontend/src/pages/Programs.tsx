@@ -9,6 +9,7 @@ import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
 import { GuideStream } from "../components/GuideStream";
 import { AutoNote } from "../components/AutoNote";
+import { getTask, setTask, clearTask, getNum, setNum, claimDone } from "../taskStore";
 import { api, type WorkspacesResp, type WorkspaceSummary, type WorkspaceCandidate,
   type WorkspaceDetail, type WstgItem, type StrideThreat, type WsHost,
   type WstgReference } from "../api";
@@ -64,7 +65,11 @@ export default function Programs() {
   const qc = useQueryClient();
   const toast = useToast();
   const [sel, setSel] = useState<string | null>(null);
-  const [openTask, setOpenTask] = useState<number | null>(null);
+  // the bottom task drawer persists across navigation: reopen the same task on return (it keeps
+  // running server-side + replays) instead of losing the view. Cleared when explicitly closed.
+  const [openTask, setOpenTask] = useState<number | null>(() => getTask("drawer:programs"));
+  const openTaskConsole = useCallback((tid: number) => { setOpenTask(tid); setTask("drawer:programs", tid); }, []);
+  const closeTaskConsole = useCallback(() => { setOpenTask(null); clearTask("drawer:programs"); }, []);
   const [sp, setSp] = useSearchParams();
 
   // Deep-link from the Target Board (/programs?key=…): select that workspace once,
@@ -110,11 +115,12 @@ export default function Programs() {
         ) : wsLoading && !ws ? <Spinner /> : !ws ? (
           <Panel><Empty>workspace failed to load</Empty></Panel>
         ) : (
-          <WorkspaceView ws={ws} onChanged={refresh} onTask={setOpenTask} />
+          <WorkspaceView ws={ws} onChanged={refresh} onTask={openTaskConsole} />
         )}
       </div>
 
-      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} onChanged={refresh} />}
+      {openTask != null && <TaskConsole tid={openTask} onClose={closeTaskConsole}
+        onChanged={() => { clearTask("drawer:programs"); refresh(); }} />}
     </div>
   );
 }
@@ -468,11 +474,15 @@ function GuidedTab({ ws, onChanged, onTask }:
   const hostActions = useHostActions();
   const { data: ref } = useFetch<WstgReference>("/api/wstg/reference");
   const enc = encodeURIComponent(ws.key);
-  const [idx, setIdx] = useState(0);
+  // resume the step the operator was last on for THIS program (survives navigation/reload)
+  const [idx, setIdx] = useState(() => getNum(`guided-idx:${ws.key}`, 0));
   const [host, setHost] = useState("");
   const [canned, setCanned] = useState<string | null>(null);
-  // tid of the guidance task streaming into the current step's GuideBox (rendered as markdown)
+  // tid of the guidance task streaming into the current step's GuideBox (rendered as markdown).
+  // Persisted per (program, phase, step) so navigating away and back RECONNECTS to the still-
+  // running/finished task instead of re-spawning it (which would waste tokens).
   const [guideTid, setGuideTid] = useState<number | null>(null);
+  const guideKey = useCallback((phase: string, key: string) => `guide:${ws.key}:${phase}:${key}`, [ws.key]);
   const [showMap, setShowMap] = useState(false);
   const [auto, setAuto] = useState(false);
   // legible auto-drive status: which step + which stage of the pick→guide→mark→advance cycle
@@ -497,7 +507,14 @@ function GuidedTab({ ws, onChanged, onTask }:
 
   // reset per-step scratch when the focus changes (auto-drive re-arms `working` after the
   // guide task spawns, so clearing here doesn't fight it)
-  useEffect(() => { setHost(""); setCanned(null); setWorking(null); setGuideTid(null); }, [idx]);
+  useEffect(() => {
+    setHost(""); setCanned(null); setWorking(null);
+    // reconnect to this step's persisted guide task (if any) instead of clearing the box
+    const s = steps[Math.min(idx, Math.max(0, steps.length - 1))];
+    setGuideTid(s ? getTask(guideKey(s.phase, s.key)) : null);
+  }, [idx, steps, guideKey]);
+  // remember the current step per program so returning resumes here
+  useEffect(() => { setNum(`guided-idx:${ws.key}`, idx); }, [idx, ws.key]);
 
   const clamped = Math.min(idx, Math.max(0, steps.length - 1));
   const step = steps[clamped];
@@ -531,6 +548,7 @@ function GuidedTab({ ws, onChanged, onTask }:
         { phase, id, host: h || undefined });
       toast("ok", `Claude guidance #${t.id} — streaming below`);
       setGuideTid(t.id);                         // stream+render it inline in this step's GuideBox
+      setTask(guideKey(phase, id), t.id);        // persist so navigating away + back reconnects
       setWorking(`${phase}:${id}`);              // pulse this step while its guidance streams
       if (phase === "wstg") markWstgInProgress(id);  // FIX 1: show it as in-progress immediately
     } catch (e: any) { toast("err", e.message); }
@@ -580,7 +598,7 @@ function GuidedTab({ ws, onChanged, onTask }:
         const b: any = { phase: s.phase, id: s.key };
         if (s.phase === "wstg" && hostRef.current) b.host = hostRef.current;
         const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`, b);
-        tid = t.id; setGuideTid(t.id);   // stream inline (readable markdown) in the focused step
+        tid = t.id; setGuideTid(t.id); setTask(guideKey(s.phase, s.key), t.id);   // stream inline + persist for reconnect
       } catch (e: any) { return { pause: true, reason: `guide spawn failed: ${e.message}`, err: true }; }
       if (!alive()) return { pause: false };
 
@@ -647,6 +665,11 @@ function GuidedTab({ ws, onChanged, onTask }:
     () => (working ? steps.findIndex((s) => `${s.phase}:${s.key}` === working) : -1),
     [working, steps]);
   const focusActive = working === `${step?.phase}:${step?.key}`;
+  // a persisted guide task that no longer exists server-side (backend restart / pruned) — drop it
+  const onGuideDead = useCallback(() => {
+    if (step) clearTask(guideKey(step.phase, step.key));
+    setGuideTid(null);
+  }, [step, guideKey]);
   const STAGE_LABEL: Record<DriveStage, string> = {
     spawning: "spawning guide", "in-progress": "marked in-progress",
     streaming: "streaming", marked: "marked", error: "error — paused",
@@ -705,6 +728,7 @@ function GuidedTab({ ws, onChanged, onTask }:
             hint={strideCovered === STRIDE_COLS.length && wstgCovered === ws.wstg.length
               ? "coverage complete → auto-draft the engagement summary"
               : "jot a note while working, or auto-draft where the engagement stands"}
+            storeKey={`autonote:prog:${ws.key}`}
             spawn={() => api.action<any>(`/api/workspaces/${enc}/autonote`)}
             onSave={async (text) => { const r = await api.action(`/api/workspaces/${enc}/note`, { text }); onChanged(); return r; }} />
         </div>
@@ -728,11 +752,11 @@ function GuidedTab({ ws, onChanged, onTask }:
       {step.phase === "stride"
         ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
             onGuide={() => guide("stride", step.key)} canned={canned} guideTid={guideTid} auto={auto}
-            onNext={jumpNextUncovered} active={focusActive} />
+            onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
             onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid} auto={auto}
-            onNext={jumpNextUncovered} active={focusActive} />}
+            onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />}
     </div>
   );
 }
@@ -794,8 +818,9 @@ function guideSummary(text: string): string {
   return "";
 }
 
-function GuideBox({ canned, tid, onComplete }:
-  { canned: string | null; tid: number | null; onComplete?: (text: string) => void }) {
+function GuideBox({ canned, tid, onComplete, onDead }:
+  { canned: string | null; tid: number | null;
+    onComplete?: (text: string, tid: number) => void; onDead?: () => void }) {
   if (canned != null) {
     return (
       <div className="mt-2 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 p-3">
@@ -806,14 +831,14 @@ function GuideBox({ canned, tid, onComplete }:
       </div>
     );
   }
-  if (tid != null) return <GuideStream tid={tid} onComplete={onComplete} />;
+  if (tid != null) return <GuideStream tid={tid} onComplete={onComplete} onDead={onDead} />;
   return null;
 }
 
-function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, auto, onNext, active }:
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active }:
   { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
     onChanged: () => void; onGuide: () => void; canned: string | null; guideTid: number | null;
-    auto: boolean; onNext: () => void; active?: boolean }) {
+    auto: boolean; onDead?: () => void; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [val, setVal] = useState("");
   const threats = ws.stride[cat as keyof StrideBoardT] || [];
@@ -824,7 +849,8 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
   };
   // Manual "Guide me" leaves a trace: when the guidance stream finishes, record its summary as a
   // threat for this category (auto-drive already records its own, so only for the manual path).
-  const recordGuide = async (text: string) => {
+  const recordGuide = async (text: string, tid: number) => {
+    if (!claimDone(tid)) return;          // reconnecting to a finished task must not re-record
     const s = guideSummary(text);
     if (!s) return;
     if (threats.some((t) => t.threat.includes(s.slice(0, 40)))) return;   // don't duplicate
@@ -855,7 +881,7 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
         <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
         <span className="text-[10px] text-[var(--color-ink-faint)]">program-specific threats for this category → streams below</span>
       </div>
-      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} />
+      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead} />
       <div className="mt-3 space-y-1">
         {threats.map((t, i) => (
           <div key={t.id || i} className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
@@ -879,11 +905,11 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
 // alternate outcomes; the primary "done · next" CTA handles the common finish path
 const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
-function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onNext, active }:
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
     actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
     onGuide: () => void; canned: string | null; guideTid: number | null; auto: boolean;
-    onNext: () => void; active?: boolean }) {
+    onDead?: () => void; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [note, setNote] = useState(item.note || "");
   useEffect(() => { setNote(item.note || ""); }, [item.id]);
@@ -895,7 +921,8 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
   // Manual "Guide me" leaves a trace: when the guidance stream finishes, capture its summary as the
   // step note (persisted, in-progress) so it survives even without a status click — unless the
   // operator already wrote their own note, or it's a placeholder. Auto-drive records its own.
-  const recordGuide = async (text: string) => {
+  const recordGuide = async (text: string, tid: number) => {
+    if (!claimDone(tid)) return;          // reconnecting to a finished task must not re-record
     const s = guideSummary(text);
     if (!s) return;
     const cur = note.trim();
@@ -940,7 +967,7 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
         <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
         <span className="text-[10px] text-[var(--color-ink-faint)]">comprehensive, program-specific steps for this test → streams below</span>
       </div>
-      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} />
+      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead} />
 
       {/* inline testing on a chosen host */}
       <div className="mt-3 border-t border-[var(--color-border)] pt-3">

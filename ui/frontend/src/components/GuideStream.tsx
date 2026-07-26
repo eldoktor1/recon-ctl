@@ -21,12 +21,14 @@ type GuideSeg = { kind: "text"; text: string } | { kind: "tool"; label: string }
 // the Co-Pilot renders) and shows it as readable markdown — instead of raw JSON in a generic console.
 // Fires onComplete with the full assistant text when the task ends, so the caller can capture it
 // (record a trace, prefill a note draft, …). Reused by the Guided walkthrough and Auto-note.
-export function GuideStream({ tid, onComplete }: { tid: number; onComplete?: (text: string) => void }) {
+export function GuideStream({ tid, onComplete, onDead }:
+  { tid: number; onComplete?: (text: string, tid: number) => void; onDead?: () => void }) {
   const [segs, setSegs] = useState<GuideSeg[]>([]);
   const [running, setRunning] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onComplete); cbRef.current = onComplete;
+  const deadRef = useRef(onDead); deadRef.current = onDead;
 
   useEffect(() => {
     setSegs([]); setRunning(true); setErr(null);
@@ -36,7 +38,7 @@ export function GuideStream({ tid, onComplete }: { tid: number; onComplete?: (te
     const finish = () => {
       if (done) return; done = true;
       setRunning(false);
-      cbRef.current?.((text || resultText).trim());
+      cbRef.current?.((text || resultText).trim(), tid);
     };
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/tasks/${tid}/output?token=${encodeURIComponent(getToken())}`);
@@ -58,7 +60,12 @@ export function GuideStream({ tid, onComplete }: { tid: number; onComplete?: (te
           if (e.is_error && e.subtype !== "success") setErr(e.subtype || "error");
         }
       } else if (m.type === "end") { finish(); }
-      else if (m.type === "error") { setErr((x) => x || m.error || "stream error"); finish(); }
+      else if (m.type === "error") {
+        // a pruned/expired task (backend restart or >60 tasks later) reports "task not found";
+        // tell the caller so it can drop the stale reference instead of showing this every revisit.
+        if (/not found/i.test(m.error || "")) deadRef.current?.();
+        setErr((x) => x || m.error || "stream error"); finish();
+      }
     };
     ws.onerror = () => setErr((x) => x || "connection error");
     ws.onclose = () => finish();

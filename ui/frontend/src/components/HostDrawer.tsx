@@ -119,6 +119,7 @@ export function HostDrawer({ host, onClose, onChanged }:
           <div className="border-t border-[var(--color-border)] pt-4">
             <AutoNote title="host note"
               hint="end of testing → auto-draft where this host stands"
+              storeKey={`autonote:host:${host}`}
               spawn={() => api.action<any>(`/api/hosts/${encodeURIComponent(host)}/autonote`)}
               onSave={async (text) => { const r = await api.action(`/api/hosts/${encodeURIComponent(host)}/note`, { text }); qc.invalidateQueries(); onChanged?.(); return r; }} />
           </div>

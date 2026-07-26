@@ -1,22 +1,28 @@
 import { useState } from "react";
 import { Btn, useToast } from "./controls";
 import { GuideStream } from "./GuideStream";
+import { getTask, setTask, clearTask } from "../taskStore";
 
 // Reusable note affordance for the workspace: an always-available OPTIONAL note (type + save)
 // PLUS a Claude "auto-draft" that summarizes where testing stands and fills the box for you to
 // confirm/edit before saving. Used for per-host notes (end of testing a host) and per-program
 // engagement notes. Nothing is written until you click save — the draft is a suggestion.
-export function AutoNote({ title, hint, spawn, onSave, rows = 3 }:
+//
+// `storeKey` persists the draft task across navigation (e.g. closing the host drawer): returning
+// RECONNECTS to the still-running/finished draft instead of re-spawning it (which wastes tokens).
+export function AutoNote({ title, hint, spawn, onSave, storeKey, rows = 3 }:
   { title: string; hint?: string;
     spawn: () => Promise<{ task_id?: number; id?: number }>;
     onSave: (text: string) => Promise<any>;
-    rows?: number }) {
+    storeKey?: string; rows?: number }) {
   const toast = useToast();
   const [draft, setDraft] = useState("");
-  const [tid, setTid] = useState<number | null>(null);
-  const [gen, setGen] = useState(false);
+  const [tid, setTid] = useState<number | null>(() => (storeKey ? getTask(storeKey) : null));
+  const [gen, setGen] = useState(() => !!(storeKey && getTask(storeKey)));  // reconnecting?
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  const dropTask = () => { if (storeKey) clearTask(storeKey); setTid(null); setGen(false); };
 
   const autoDraft = async () => {
     setGen(true); setSaved(false); setTid(null);
@@ -25,6 +31,7 @@ export function AutoNote({ title, hint, spawn, onSave, rows = 3 }:
       const id = t.task_id ?? t.id;
       if (id == null) throw new Error("no task id returned");
       setTid(id);
+      if (storeKey) setTask(storeKey, id);   // persist for reconnect-on-return
     } catch (e: any) { toast("err", e.message); setGen(false); }
   };
 
@@ -38,7 +45,7 @@ export function AutoNote({ title, hint, spawn, onSave, rows = 3 }:
     const text = draft.trim();
     if (!text) { toast("err", "note is empty"); return; }
     setSaving(true);
-    try { await onSave(text); toast("ok", `${title} saved`); setSaved(true); setDraft(""); setTid(null); }
+    try { await onSave(text); toast("ok", `${title} saved`); setSaved(true); setDraft(""); dropTask(); }
     catch (e: any) { toast("err", e.message); }
     finally { setSaving(false); }
   };
