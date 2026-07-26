@@ -3,8 +3,8 @@ import { Panel, Stat, Badge, Empty, Spinner } from "../components/ui";
 import { fmtNum } from "../format";
 
 export default function Digest() {
-  const { data } = useFetch<any>("/api/digest");
-  if (!data) return <Spinner />;
+  const { data, error } = useFetch<any>("/api/digest");
+  if (!data) return error ? <Empty hint={error}>couldn't load the digest</Empty> : <Spinner />;
   if (data.error) return <Empty>{data.error}</Empty>;
 
   // fields can be counts OR lists-of-objects depending on the pipeline version

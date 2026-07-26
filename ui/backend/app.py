@@ -635,6 +635,56 @@ async def api_workspace_guide(key: str, body: dict = Depends(safety.require_conf
     return {**t.snapshot(), "session_id": sid, "task_id": t.id}
 
 
+@app.post("/api/hosts/{host}/autonote")
+async def api_host_autonote(host: str, body: dict = Depends(safety.require_confirm)):
+    """Draft a concise host note (where testing of this host stands) via Claude.
+
+    Off-target by construction (reasoning over ES/findings/existing-notes context, no target
+    packets, no tool-driving) so no VPN gate — streams like the co-pilot. The frontend confirms/
+    edits the draft, then persists it via POST /api/hosts/{host}/note."""
+    if any(c in host for c in " ;|&$`\n\t'\"\\"):
+        raise HTTPException(400, "bad host")
+    try:
+        doc = await es.host_detail(host)
+    except Exception:
+        doc = None
+    try:
+        fnd = findings.list_findings(q=host, limit=25).get("items", [])
+    except Exception:
+        fnd = []
+    notes = (doc or {}).get("host_notes") or []
+    prompt = workspace.build_host_note_prompt(host, doc, fnd, notes)
+    sid = claude_console.new_session_id()
+    argv = claude_console.build_argv(sid, prompt, body.get("model"))
+    t = await manager.spawn(f"autonote:host:{host[:24]}", argv)
+    return {**t.snapshot(), "session_id": sid, "task_id": t.id}
+
+
+@app.post("/api/workspaces/{key}/autonote")
+async def api_workspace_autonote(key: str, body: dict = Depends(safety.require_confirm)):
+    """Draft a concise engagement-summary note for the program via Claude. Off-target (reasoning
+    over ES/findings/coverage context) so no VPN gate; streams like the co-pilot. The frontend
+    confirms/edits the draft, then persists it via POST /api/workspaces/{key}/note."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    name = ws.get("name") or ws.get("key")
+    try:
+        hosts = (await es.search(program=name, limit=25)).get("items", [])
+    except Exception:
+        hosts = []
+    try:
+        fnd = findings.list_findings(program=name, limit=30).get("items", [])
+    except Exception:
+        fnd = []
+    endpoints = files.program_endpoints([h.get("host") for h in hosts])
+    prompt = workspace.build_program_note_prompt(ws, hosts, endpoints, fnd)
+    sid = claude_console.new_session_id()
+    argv = claude_console.build_argv(sid, prompt, body.get("model"))
+    t = await manager.spawn(f"autonote:prog:{key[:24]}", argv)
+    return {**t.snapshot(), "session_id": sid, "task_id": t.id}
+
+
 @app.post("/api/workspaces/{key}/wstg")
 async def api_workspace_wstg(key: str, body: dict = Depends(safety.require_confirm)):
     wid = (body.get("id") or "").strip()

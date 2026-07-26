@@ -124,13 +124,16 @@ export default function Assets() {
         )}
       </Panel>
 
-      {data && data.total > 60 && offset + 120 <= Math.min(data.total, 10000) && (
-        <div className="flex items-center justify-center gap-3">
-          <Btn size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 60))}>← prev</Btn>
-          <span className="text-xs text-[var(--color-ink-faint)]">{offset + 1}–{offset + 60}</span>
-          <Btn size="sm" onClick={() => setOffset(offset + 60)}>next →</Btn>
-        </div>
-      )}
+      {data && data.total > 60 && (() => {
+        const cap = Math.min(data.total, 10000);   // ES result-window ceiling
+        return (
+          <div className="flex items-center justify-center gap-3">
+            <Btn size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 60))}>← prev</Btn>
+            <span className="text-xs text-[var(--color-ink-faint)]">{offset + 1}–{Math.min(offset + 60, data.total)} of {data.total}</span>
+            <Btn size="sm" disabled={offset + 60 >= cap} onClick={() => setOffset(offset + 60)}>next →</Btn>
+          </div>
+        );
+      })()}
 
       {selected && <HostDrawer host={selected} onClose={() => setSelected(null)} />}
     </div>

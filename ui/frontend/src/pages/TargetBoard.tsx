@@ -12,7 +12,7 @@ interface Program {
 interface Board { generated?: string; count?: number; programs: Program[]; error?: string }
 
 export default function TargetBoard() {
-  const { data } = useFetch<Board>("/api/targets");
+  const { data, error } = useFetch<Board>("/api/targets");
   const [sp] = useSearchParams();
   const [q, setQ] = useState(sp.get("q") || "");
   const [confirm, setConfirm] = useState<Program | null>(null);
@@ -51,7 +51,7 @@ export default function TargetBoard() {
         className="mono w-72 rounded-md border border-[var(--color-border-bright)] bg-[var(--color-panel)] px-3 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
 
       <Panel className="!p-0">
-        {!data ? <Spinner /> : data.error ? <Empty>{data.error}</Empty> : !progs.length ? <Empty>no programs</Empty> : (
+        {!data ? (error ? <Empty hint={error}>couldn't load the target board</Empty> : <Spinner />) : data.error ? <Empty>{data.error}</Empty> : !progs.length ? <Empty>no programs</Empty> : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">

@@ -1054,3 +1054,68 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
             "test first.\n\n"
             f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
     return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_DOCTRINE}\n\n{_STEP_RESULT}"
+
+
+# --- Auto-note prompts (summarize where testing stands into a worked-knowledge note) ----------
+# Reasoning over the provided context only (no target packets, no tool-driving) — off-target by
+# construction, so the autonote endpoints need no VPN gate. The frontend confirms/edits the draft
+# before it is persisted.
+_NOTE_STYLE = (
+    "Write the note as the operator's worked-knowledge: 1-4 tight sentences, PLAIN TEXT (no markdown "
+    "headings, no bullet list, no preamble, no sign-off). Capture what was TESTED, what was FOUND "
+    "(confirmed findings or leads, with the class), what was CLEARED and WHY (FP / by-design / "
+    "out-of-scope / version-safe), and what is LEFT to test. Be specific to the real hosts/endpoints/"
+    "classes below; never overclaim. If little was done, say exactly that. Reply with ONLY the note text."
+)
+
+
+def build_host_note_prompt(host: str, host_doc: dict[str, Any] | None,
+                           findings: list[dict[str, Any]], notes: list[dict[str, Any]]) -> str:
+    """Grounded prompt asking Claude to draft a concise HOST note (where testing of `host` stands)."""
+    d = host_doc or {}
+    tech = ", ".join((d.get("tech") or [])[:6]) if isinstance(d.get("tech"), list) else ""
+    cls = ", ".join((d.get("triage_classes") or [])[:6]) if isinstance(d.get("triage_classes"), list) else ""
+    lines = [f"HOST: {host}"]
+    if tech:
+        lines.append(f"  tech: {tech}")
+    if cls:
+        lines.append(f"  candidate classes: {cls}")
+    if d.get("triage_program"):
+        lines.append(f"  program: {d.get('triage_program')}")
+    if findings:
+        lines.append("Findings recorded on this host (state — class — verdict — url):")
+        for f in findings[:15]:
+            lines.append(f"  - {f.get('state')} — {f.get('vuln_class') or '?'} — "
+                         f"{f.get('ai_verdict') or '?'}  {f.get('url') or ''}".rstrip())
+    else:
+        lines.append("No findings recorded on this host.")
+    if notes:
+        lines.append("Existing host notes (synthesize + add what's new; don't just repeat):")
+        for n in notes[:12]:
+            txt = n.get("note") if isinstance(n, dict) else str(n)
+            if txt:
+                lines.append(f"  - {txt}")
+    ctx = "\n".join(lines)
+    head = ("You are the operator's co-pilot writing a concise HOST NOTE that captures where testing of "
+            f"{host} stands — so re-visiting it later starts informed, not from scratch.")
+    return f"{head}\n\n{ctx}\n\n{_DOCTRINE}\n\n{_NOTE_STYLE}"
+
+
+def build_program_note_prompt(ws: dict[str, Any], hosts: list[dict[str, Any]],
+                              endpoints: list[str], findings: list[dict[str, Any]]) -> str:
+    """Grounded prompt asking Claude to draft a concise ENGAGEMENT-SUMMARY note for the program."""
+    ctx = _program_context(ws, hosts, endpoints)
+    wstg = ws.get("wstg") or []
+    worked = sum(1 for w in wstg if (w.get("status") or "todo") in ("done", "finding", "na"))
+    stride = ws.get("stride") or {}
+    stride_done = sum(1 for k in ("S", "T", "R", "I", "D", "E") if (stride.get(k) or []))
+    extra = [f"Coverage: WSTG {worked}/{len(wstg)} worked; STRIDE {stride_done}/6 categories modeled."]
+    if findings:
+        extra.append("Findings on this program (state — class — verdict — host):")
+        for f in findings[:20]:
+            extra.append(f"  - {f.get('state')} — {f.get('vuln_class') or '?'} — "
+                         f"{f.get('ai_verdict') or '?'} — {f.get('host')}")
+    tail = "\n".join(extra)
+    head = ("You are the operator's co-pilot writing a concise ENGAGEMENT-SUMMARY note for this program "
+            "— where the testing stands overall and what to pick up next session.")
+    return f"{head}\n\n{ctx}\n\n{tail}\n\n{_DOCTRINE}\n\n{_NOTE_STYLE}"

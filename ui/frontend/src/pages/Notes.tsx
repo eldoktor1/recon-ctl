@@ -5,7 +5,6 @@ import { useFetch } from "../hooks";
 import { Panel, Stat, Badge, Empty, Spinner } from "../components/ui";
 import { Btn, useToast } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
-import { fmtAgo } from "../format";
 
 interface Note { host: string; note: string; source?: string; program?: string; created_at?: string; root_domain?: string }
 interface NotesResp { stats: { total: number; hosts: number; by_source: Record<string, number> }; items: Note[] }
@@ -55,7 +54,7 @@ export default function Notes() {
                     <span className="mono truncate text-xs text-[var(--color-ink)]" title={n.host}>{n.host}</span>
                     {n.source && <Badge>{n.source}</Badge>}
                     {n.program && <span className="text-[10px] text-[var(--color-ink-faint)]">{n.program}</span>}
-                    <span className="ml-auto text-[10px] text-[var(--color-ink-faint)]">{n.created_at?.slice(0, 10) || fmtAgo(0)}</span>
+                    <span className="ml-auto text-[10px] text-[var(--color-ink-faint)]">{n.created_at?.slice(0, 10) || "—"}</span>
                   </div>
                   <div className="mt-1 text-xs text-[var(--color-ink-dim)]">{n.note}</div>
                 </div>

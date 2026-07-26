@@ -4,7 +4,7 @@ import { Panel, Badge, Empty, Spinner } from "../components/ui";
 import { Drawer } from "../components/controls";
 
 export default function Reports() {
-  const { data } = useFetch<any[]>("/api/reports");
+  const { data, error } = useFetch<any[]>("/api/reports");
   const [sel, setSel] = useState<any | null>(null);
 
   return (
@@ -15,7 +15,7 @@ export default function Reports() {
       </div>
 
       <Panel className="!p-0">
-        {!data ? <Spinner /> : !data.length ? <Empty>report review queue is empty</Empty> : (
+        {!data ? (error ? <Empty hint={error}>couldn't load reports</Empty> : <Spinner />) : !data.length ? <Empty>report review queue is empty</Empty> : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">

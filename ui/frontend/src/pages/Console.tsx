@@ -187,6 +187,12 @@ export default function Console() {
       } catch {}
     };
     ws.onerror = () => setBusy(false);
+    // fallback: if the socket closes without a terminal `end` (WSL/VPN flap), don't
+    // wedge the composer as busy — clear it and end any live turn.
+    ws.onclose = () => {
+      setBusy(false);
+      setTurns((ts) => ts.map((t) => (t.live ? { ...t, live: false } : t)));
+    };
   };
 
   const reset = () => {

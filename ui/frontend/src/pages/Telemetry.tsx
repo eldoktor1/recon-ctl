@@ -3,8 +3,8 @@ import { Panel, Stat, Badge, Empty, Spinner, Dot } from "../components/ui";
 import { verdictColor, fmtNum } from "../format";
 
 export default function Telemetry() {
-  const { data: acc } = useFetch<any>("/api/telemetry/ai-accuracy");
-  const { data: subs } = useFetch<any[]>("/api/submissions");
+  const { data: acc, error: accErr } = useFetch<any>("/api/telemetry/ai-accuracy");
+  const { data: subs, error: subsErr } = useFetch<any[]>("/api/submissions");
 
   const vd = acc?.verdict_distribution || {};
   const outcomes = acc?.submission_outcomes || {};
@@ -24,7 +24,7 @@ export default function Telemetry() {
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Panel title="verdict distribution">
-          {!acc ? <Spinner /> : (
+          {!acc ? (accErr ? <Empty hint={accErr}>couldn't load AI accuracy</Empty> : <Spinner />) : (
             <div className="space-y-2">
               {Object.entries(vd).map(([k, raw]: [string, any]) => {
                 const v = raw || {};
@@ -62,7 +62,7 @@ export default function Telemetry() {
       </div>
 
       <Panel title="submissions ledger" right={<Badge>{subs?.length ?? 0}</Badge>}>
-        {!subs ? <Spinner /> : !subs.length ? <Empty>no submissions logged</Empty> : (
+        {!subs ? (subsErr ? <Empty hint={subsErr}>couldn't load submissions</Empty> : <Spinner />) : !subs.length ? <Empty>no submissions logged</Empty> : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-ink-faint)]">

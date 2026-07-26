@@ -5,6 +5,7 @@ import { useFetch } from "../hooks";
 import { Empty, Spinner, Badge } from "./ui";
 import { Drawer, Btn, useToast, ConfirmModal } from "./controls";
 import { TaskConsole } from "./TaskConsole";
+import { AutoNote } from "./AutoNote";
 import { priorityColor, asArr } from "../format";
 
 interface HostAction { action: string; target: boolean; desc: string }
@@ -115,6 +116,12 @@ export function HostDrawer({ host, onClose, onChanged }:
             <Btn size="sm" variant="danger" onClick={() => { const r = prompt(`Mark ${host} not-actionable / FP.\nOptional reason:`, "") ?? undefined; if (r !== undefined) setConfirm({ title: `Not actionable: ${host}?`, body: "Records a DEAD verdict — stops re-serving this host in the worklist + nightly briefing until a later 'resume' note re-arms it.", run: () => api.action(`/api/hosts/${encodeURIComponent(host)}/dismiss`, { kind: "not-actionable", reason: r }) }); }}>not actionable</Btn>
           </div>
           {testRow}
+          <div className="border-t border-[var(--color-border)] pt-4">
+            <AutoNote title="host note"
+              hint="end of testing → auto-draft where this host stands"
+              spawn={() => api.action<any>(`/api/hosts/${encodeURIComponent(host)}/autonote`)}
+              onSave={async (text) => { const r = await api.action(`/api/hosts/${encodeURIComponent(host)}/note`, { text }); qc.invalidateQueries(); onChanged?.(); return r; }} />
+          </div>
           {scopeOut && <pre className="mono max-h-56 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-bg)] p-3 text-[11px] text-[var(--color-ink-dim)]">{scopeOut}</pre>}
         </div>
       )}

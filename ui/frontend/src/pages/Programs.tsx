@@ -7,6 +7,8 @@ import { Btn, useToast } from "../components/controls";
 import { TaskConsole } from "../components/TaskConsole";
 import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
+import { GuideStream } from "../components/GuideStream";
+import { AutoNote } from "../components/AutoNote";
 import { api, type WorkspacesResp, type WorkspaceSummary, type WorkspaceCandidate,
   type WorkspaceDetail, type WstgItem, type StrideThreat, type WsHost,
   type WstgReference } from "../api";
@@ -469,6 +471,8 @@ function GuidedTab({ ws, onChanged, onTask }:
   const [idx, setIdx] = useState(0);
   const [host, setHost] = useState("");
   const [canned, setCanned] = useState<string | null>(null);
+  // tid of the guidance task streaming into the current step's GuideBox (rendered as markdown)
+  const [guideTid, setGuideTid] = useState<number | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [auto, setAuto] = useState(false);
   // legible auto-drive status: which step + which stage of the pick→guide→mark→advance cycle
@@ -493,7 +497,7 @@ function GuidedTab({ ws, onChanged, onTask }:
 
   // reset per-step scratch when the focus changes (auto-drive re-arms `working` after the
   // guide task spawns, so clearing here doesn't fight it)
-  useEffect(() => { setHost(""); setCanned(null); setWorking(null); }, [idx]);
+  useEffect(() => { setHost(""); setCanned(null); setWorking(null); setGuideTid(null); }, [idx]);
 
   const clamped = Math.min(idx, Math.max(0, steps.length - 1));
   const step = steps[clamped];
@@ -526,7 +530,7 @@ function GuidedTab({ ws, onChanged, onTask }:
       const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`,
         { phase, id, host: h || undefined });
       toast("ok", `Claude guidance #${t.id} — streaming below`);
-      onTask(t.id);
+      setGuideTid(t.id);                         // stream+render it inline in this step's GuideBox
       setWorking(`${phase}:${id}`);              // pulse this step while its guidance streams
       if (phase === "wstg") markWstgInProgress(id);  // FIX 1: show it as in-progress immediately
     } catch (e: any) { toast("err", e.message); }
@@ -576,7 +580,7 @@ function GuidedTab({ ws, onChanged, onTask }:
         const b: any = { phase: s.phase, id: s.key };
         if (s.phase === "wstg" && hostRef.current) b.host = hostRef.current;
         const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`, b);
-        tid = t.id; onTask(t.id);
+        tid = t.id; setGuideTid(t.id);   // stream inline (readable markdown) in the focused step
       } catch (e: any) { return { pause: true, reason: `guide spawn failed: ${e.message}`, err: true }; }
       if (!alive()) return { pause: false };
 
@@ -696,6 +700,14 @@ function GuidedTab({ ws, onChanged, onTask }:
           </div>
         )}
         {showMap && <StepMap ws={ws} steps={steps} focus={clamped} working={workingIdx} isCovered={isCovered} onPick={setIdx} />}
+        <div className="mt-3 border-t border-[var(--color-border)] pt-3">
+          <AutoNote title="engagement note"
+            hint={strideCovered === STRIDE_COLS.length && wstgCovered === ws.wstg.length
+              ? "coverage complete → auto-draft the engagement summary"
+              : "jot a note while working, or auto-draft where the engagement stands"}
+            spawn={() => api.action<any>(`/api/workspaces/${enc}/autonote`)}
+            onSave={async (text) => { const r = await api.action(`/api/workspaces/${enc}/note`, { text }); onChanged(); return r; }} />
+        </div>
       </Panel>
 
       {/* step nav */}
@@ -715,10 +727,12 @@ function GuidedTab({ ws, onChanged, onTask }:
 
       {step.phase === "stride"
         ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
-            onGuide={() => guide("stride", step.key)} canned={canned} onNext={jumpNextUncovered} active={focusActive} />
+            onGuide={() => guide("stride", step.key)} canned={canned} guideTid={guideTid} auto={auto}
+            onNext={jumpNextUncovered} active={focusActive} />
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
-            onGuide={() => guide("wstg", step.key, host)} canned={canned} onNext={jumpNextUncovered} active={focusActive} />}
+            onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid} auto={auto}
+            onNext={jumpNextUncovered} active={focusActive} />}
     </div>
   );
 }
@@ -768,21 +782,38 @@ function StepMap({ ws, steps, focus, working, isCovered, onPick }:
   );
 }
 
-function GuideBox({ canned }: { canned: string | null }) {
-  if (canned == null) return null;
-  return (
-    <div className="mt-2 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 p-3">
-      <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-[var(--color-accent)]">
-        <span>◎</span> Claude guidance <span className="text-[var(--color-ink-faint)]">(demo · canned)</span>
-      </div>
-      <div className="mono whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--color-ink-dim)]">{canned}</div>
-    </div>
-  );
+// Distil a short, human summary from a guide task's full text for the recorded trace:
+// prefer the STEP-RESULT sentinel; else the first substantive line.
+function guideSummary(text: string): string {
+  const { summary } = parseStepResult(text);
+  if (summary) return summary;
+  for (const raw of text.split("\n")) {
+    const l = raw.replace(/^[#>*\-\s]+/, "").trim();
+    if (l.length > 8) return l.slice(0, 240);
+  }
+  return "";
 }
 
-function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext, active }:
+function GuideBox({ canned, tid, onComplete }:
+  { canned: string | null; tid: number | null; onComplete?: (text: string) => void }) {
+  if (canned != null) {
+    return (
+      <div className="mt-2 rounded-md border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/5 p-3">
+        <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-[var(--color-accent)]">
+          <span>◎</span> Claude guidance <span className="text-[var(--color-ink-faint)]">(demo · canned)</span>
+        </div>
+        <div className="mono whitespace-pre-wrap text-[11px] leading-relaxed text-[var(--color-ink-dim)]">{canned}</div>
+      </div>
+    );
+  }
+  if (tid != null) return <GuideStream tid={tid} onComplete={onComplete} />;
+  return null;
+}
+
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, auto, onNext, active }:
   { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
-    onChanged: () => void; onGuide: () => void; canned: string | null; onNext: () => void; active?: boolean }) {
+    onChanged: () => void; onGuide: () => void; canned: string | null; guideTid: number | null;
+    auto: boolean; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [val, setVal] = useState("");
   const threats = ws.stride[cat as keyof StrideBoardT] || [];
@@ -790,6 +821,16 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
     if (!val.trim()) return;
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, threat: val.trim() }); setVal(""); toast("ok", "threat added"); onChanged(); }
     catch (e: any) { toast("err", e.message); }
+  };
+  // Manual "Guide me" leaves a trace: when the guidance stream finishes, record its summary as a
+  // threat for this category (auto-drive already records its own, so only for the manual path).
+  const recordGuide = async (text: string) => {
+    const s = guideSummary(text);
+    if (!s) return;
+    if (threats.some((t) => t.threat.includes(s.slice(0, 40)))) return;   // don't duplicate
+    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`,
+      { cat, threat: `[guide] ${s}`.slice(0, 500) }); onChanged(); }
+    catch { /* non-fatal — the guidance still streamed */ }
   };
   const label = STRIDE_COLS.find((c) => c.cat === cat)?.label || guideCat?.name || cat;
   return (
@@ -814,7 +855,7 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
         <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
         <span className="text-[10px] text-[var(--color-ink-faint)]">program-specific threats for this category → streams below</span>
       </div>
-      <GuideBox canned={canned} />
+      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} />
       <div className="mt-3 space-y-1">
         {threats.map((t, i) => (
           <div key={t.id || i} className="flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
@@ -838,10 +879,11 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, onNext
 // alternate outcomes; the primary "done · next" CTA handles the common finish path
 const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
-function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, onNext, active }:
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onNext, active }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
     actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
-    onGuide: () => void; canned: string | null; onNext: () => void; active?: boolean }) {
+    onGuide: () => void; canned: string | null; guideTid: number | null; auto: boolean;
+    onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [note, setNote] = useState(item.note || "");
   useEffect(() => { setNote(item.note || ""); }, [item.id]);
@@ -850,6 +892,23 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
     catch (e: any) { toast("err", e.message); }
   };
   const mark = async (status: string) => { await post(status); onNext(); };
+  // Manual "Guide me" leaves a trace: when the guidance stream finishes, capture its summary as the
+  // step note (persisted, in-progress) so it survives even without a status click — unless the
+  // operator already wrote their own note, or it's a placeholder. Auto-drive records its own.
+  const recordGuide = async (text: string) => {
+    const s = guideSummary(text);
+    if (!s) return;
+    const cur = note.trim();
+    const isOwn = cur && cur !== (item.note || "").trim() && !/^\[(guide|auto-drive)\b/.test(cur);
+    if (isOwn) return;                                   // don't clobber the operator's own note
+    const filled = `[guide] ${s}`.slice(0, 1900);
+    setNote(filled);
+    try {
+      const st = item.status === "todo" ? "in-progress" : item.status;
+      await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/wstg`, { id: item.id, status: st, note: filled });
+      onChanged();
+    } catch { /* non-fatal — the guidance still streamed */ }
+  };
 
   return (
     <Panel className={active ? "working-ring" : ""}
@@ -881,7 +940,7 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
         <Btn size="sm" variant="primary" onClick={onGuide}>◎ Guide me (Claude)</Btn>
         <span className="text-[10px] text-[var(--color-ink-faint)]">comprehensive, program-specific steps for this test → streams below</span>
       </div>
-      <GuideBox canned={canned} />
+      <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} />
 
       {/* inline testing on a chosen host */}
       <div className="mt-3 border-t border-[var(--color-border)] pt-3">
