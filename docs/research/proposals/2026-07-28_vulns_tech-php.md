@@ -1,8 +1,16 @@
 # PROPOSAL (proposal) for docs/knowledge/tech-php.md — vulns 2026-07-28
 _Review and apply manually; not auto-merged into the KB._
 
-## 2026-07-28 update — CVE-2026-12184 / CVE-2026-14355 (July 6 coordinated patch, all 4 branches)
-- **CVE-2026-12184** (CVSS 8.2): HTTP stream-wrapper TLS-handshake-failure use-after-free/null-deref — a malicious or MITM'd remote server the PHP app connects to (outbound HTTPS) can crash the whole PHP-FPM pool. Affected <8.3.32, <8.4.21, <8.5.6 (8.2.x unaffected). Not remotely triggerable *against* a target from our side — it's the target acting as a TLS client; relevant only as a patch-lag/version signal, not a probe.
-- **CVE-2026-14355** (CVSS 4.8): heap corruption in `openssl_encrypt()` w/ AES-WRAP-PAD. Affected <8.2.32, <8.3.32, <8.4.23, <8.5.8. Narrow (specific cipher mode), low recon value.
-- Detect version via `X-Powered-By` / error banners / `phpinfo` leaks (many hosts suppress — absence = unknown, not clean).
-- Sources: https://securityonline.info/php-remote-dos-cve-2026-12184/ , https://www.josephcharnin.com/cybersecurity/php-fpm-tls-handshake-dos-cve-2026-12184/
+## CVE-2026-7261 — SoapServer SOAP_PERSISTENCE_SESSION UAF (CVSS 9.8)
+Companion bug to CVE-2026-6722 (apache:Map object-dedup UAF), same PHP security release.
+- Root cause: SoapServer frees the persisted handler object on an erroring SOAP request but
+  retains a dangling pointer; a follow-up request reuses freed memory → corruption/info-leak/crash,
+  RCE-capable.
+- Affected: PHP 8.2.x < 8.2.31, 8.3.x < 8.3.31, 8.4.x < 8.4.21, 8.5.x < 8.5.6 (any app with
+  SoapServer + SOAP_PERSISTENCE_SESSION enabled).
+- Detect unauth: `?wsdl`, `Content-Type: text/xml`/`application/soap+xml`, `SOAPAction` header,
+  or WSDL file in jsintel/fulltext corpus + PHP version disclosure. Persistence-mode config isn't
+  remotely fingerprintable → SOAP endpoint + in-range version = LEAD, not confirmed.
+- Note: internet-wide scanning for this class spiked within 72h of the 2026-07 patch release
+  (BitNinja) — treat any hit as time-sensitive.
+- Source: https://www.sentinelone.com/vulnerability-database/cve-2026-7261/
