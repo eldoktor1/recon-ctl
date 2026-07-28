@@ -1,27 +1,36 @@
 # Research digest — detect-tune — 2026-07-28
 
-# Detection & Verification Tuning — Digest (2026-07-28)
+# Detection & Verification Tuning — Digest (2026-07-28, supplemental)
 
-Checked existing KB first: Nginx off-by-slash alias traversal, all four active Nginx CVEs (Rift/HTTP3-UAF/njs/HPACK), GraphQL introspection-bypass techniques, wp2shell WordPress core RCE, and origin-IP-discovery-via-DNS-history are already documented — not re-surfaced. Two genuinely new, actionable WordPress plugin CVEs found this run (both unpatched-population still material, both map directly to our existing safe confirm primitives).
+Checked against the last 30 days: Avada Builder SQLi, Ignition RCE, Varnish PURGE, GraphQL introspection-bypass techniques, and dalfox v3 are already documented — skipped. This pass found two live, high-severity, unauth WordPress plugin CVEs directly on our top-tech surface (WordPress/PHP) with exact HTTP requests and safe version-fingerprints, plus a takeover-fingerprint refresh for non-classic SaaS providers.
 
-## 1. Avada Builder ≤3.15.1 — Unauth Time-Based SQLi (CVE-2026-4798) — narrow but real precondition, good FP filter
+## 1. Kirki plugin ≤6.0.6 — Unauth account takeover via password-reset email hijack (CVE-2026-8206, CVSS 9.8) — HIGH PRIORITY
+- **Plugin:** Kirki – Freeform Page Builder/Customizer (WordPress) — ~500k+ installs, matches our WordPress top-tech.
+- **Bug:** `handle_forgot_password` (`CompLibFormHandler.php`) accepts an attacker-supplied `email` alongside a known `username` and sends the reset link there instead of the account's real address — no auth, no permission check.
+- **Request:** `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` with `username`, `email` (attacker's inbox), `emailBody` (JSON containing the `reset_link` chip). Success = HTTP 200 + "Email sent".
+- **Safe detect (no exploitation needed):** `curl -s https://<host>/wp-content/plugins/kirki/readme.txt` (also try `kirki-test`) → `Stable tag` ≤ 6.0.6, or the `ver=` query param on `kirki.min.css`. Fixed in **6.0.7** (released 2026-05-18).
+- **Note:** this is a full unauthenticated account-takeover primitive (username enumeration + the reset-email redirect) — the version match alone is a LEAD per KEV-doctrine; the confirm step is a benign reset request against **our own test account username only**, never a real user's.
+- Sources: [ZeroPath writeup](https://zeropath.com/blog/cve-2026-8206-kirki-wordpress-privilege-escalation), [Threat-Modeling.com](https://threat-modeling.com/kirki-wordpress-plugin-account-takeover-cve-2026-8206/), [Bleeping Computer](https://www.bleepingcomputer.com/news/security/critical-kirki-flaw-exploited-to-hijack-wordpress-admin-accounts/), [PoC detection method](https://github.com/Jenderal92/CVE-2026-8206)
 
-- **Plugin:** Avada Builder (Theme Fusion) — ~1M active installs, matches our in-scope-top-tech WordPress surface.
-- **Param:** `product_order` — `sanitize_text_field()` is applied but does **not** stop SQLi; value is concatenated straight into an `ORDER BY` clause (bypasses WP's `$wpdb->prepare()`).
-- **Critical precondition (the FP filter):** only exploitable on sites where **WooCommerce was previously installed and later deactivated** — the vulnerable query path is dead code unless that history exists. Don't flag every Avada site; this cuts the false-positive rate hard.
-- **Fixed:** 3.15.2 (Apr 13, partial) → fully fixed 3.15.3 (May 12, 2026). Version ≤3.15.1 = in-range.
-- **Detect (unauth, safe):** `curl -s https://<host>/wp-content/plugins/avada-builder/readme.txt | grep 'Stable tag'` (or theme `style.css` version header if bundled with the Avada theme) → ≤3.15.1. Confirm exploitability signal (not exploit) via our existing `'` vs `''` differential on `product_order` — time-based, so use response-time delta not error-diff.
-- **Impact if real:** password-hash / DB extraction — high severity, worth a P1/P2 report once confirmed.
-- Sources: [Kenet CVE-2026-4798](https://cert.kenet.or.ke/cve-2026-4798-avada-builder), [mySites.guru patch notes](https://mysites.guru/blog/avada-builder-cve-2026-4782-4798/), [BleepingComputer](https://www.bleepingcomputer.com/news/security/avada-builder-wordpress-plugin-flaws-allow-site-credential-theft/)
+## 2. Ninja Forms File Uploads ≤3.3.26 — Unauth arbitrary file upload → RCE (CVE-2026-0740, CVSS 9.8)
+- **Bug:** `NF_FU_AJAX_Controllers_Uploads::handle_upload` validates the extension of the *source* filename but writes to an attacker-controlled *destination* filename — an extra POST param renames the upload past the allowlist (e.g. source `image.jpg`, destination param `image_jpg=shell.php`).
+- **Exact request chain (unauth):**
+  1. `POST /wp-admin/admin-ajax.php` `action=nf_fu_get_new_nonce&field_id=<id>` → harvest nonce
+  2. `POST /wp-admin/admin-ajax.php` `action=nf_fu_upload&nonce=<nonce>&form_id=<id>&field_id=<id>&<slugified_filename>=<malicious_dest>` + `files-<field_id>=@<file>`
+- **Safe detect (no upload attempt):** `httpx`/grep page source for `nfpluginsettings\.js\?ver=[\d.]+` → version ≤3.3.26 = in-range. Fixed in **3.3.27** (2026-03-19); confirmed actively exploited in the wild since 2026-04-16 (Wordfence).
+- Confirming beyond version-match means an actual file write — that crosses into exploitation (RCE), so per our doctrine this stays **version-match LEAD**, not an auto-fired primitive; a confirm would need an explicit benign non-PHP marker upload, operator-gated.
+- Sources: [Lexfo technical writeup + exact requests](https://blog.lexfo.fr/ninja-forms-uploads_rce.html), [SentinelOne](https://www.sentinelone.com/vulnerability-database/cve-2026-0740/), [PoC](https://github.com/whattheslime/CVE-2026-0740), [U of Toronto advisory](https://security.utoronto.ca/advisories/ninja-forms-file-uploads-unauthenticated-remote-code-execution/)
 
-## 2. Ninja Forms – File Uploads ≤3.3.26 — Unauth Arbitrary File Upload → RCE (CVE-2026-0740)
+## 3. Subdomain-takeover fingerprints — non-classic SaaS providers (addendum, feeds `class-takeover.md`)
+Exact error-string/header fingerprints for providers less commonly covered by the classic can-i-take-over-xyz list:
 
-- **Mechanism:** `NF_FU_AJAX_Controllers_Uploads::handle_upload` validates file type on the *source* filename but never checks the *destination* filename or sanitizes it — attacker uploads a `.php` file and path-traverses it into the webroot. No auth required.
-- **Scale:** ~50k active installs; mass-exploited in the wild Apr 9–13, 2026 (118k+ blocked attempts per Wordfence) — old enough that unpatched stragglers are the realistic remaining population, but that population is still real (patch lag on WP plugins routinely runs 6+ months).
-- **Fixed:** 3.3.27 (Mar 19, 2026). ≤3.3.26 = in-range.
-- **Detect (unauth, safe, non-destructive):** `curl -s https://<host>/wp-content/plugins/ninja-forms-uploads/readme.txt | grep 'Stable tag'` (or plugin slug `ninja-forms-file-uploads` depending on listing) → ≤3.3.26 = LEAD. **Do not** send an actual upload PoC — that's the destructive trigger; version-detect only, same discipline as our existing WP plugin CVE entries.
-- Sources: [ZeroPath analysis](https://zeropath.com/blog/cve-2026-0740-ninja-forms-file-uploads-arbitrary-file-upload), [SentinelOne CVE-2026-0740](https://www.sentinelone.com/vulnerability-database/cve-2026-0740/), [Truesec](https://www.truesec.com/hub/blog/critical-vulnerability-in-ninja-forms-file-upload-wordpress-plugin-cve-2026-07409)
+| Provider | CNAME pattern | Fingerprint | Claimable via |
+|---|---|---|---|
+| Vercel | `cname.vercel-dns.com` | `"DEPLOYMENT_NOT_FOUND"` + `x-vercel-id` header | bind orphaned hostname to attacker's Vercel project |
+| Netlify | `*.netlify.app`/`*.netlify.com` | `"Not Found - Request ID:"` + `x-served-by: cache-...netlify` | bind Netlify site to hostname |
+| Webflow | `proxy.webflow.com`/`proxy-ssl.webflow.com` | `"The page you are looking for doesn't exist"` | bind new Webflow project (note: 2023 patches narrowed but didn't eliminate) |
+| Tilda | `*.tilda.ws` | `"Please renew your subscription"` / `"Domain has been assigned"` | re-bind after subscription lapse |
+| Pantheon | `*.pantheonsite.io` | `"The gods are wise, but do not know of the site which you seek."` | bind Pantheon site to hostname |
 
-## Note (not actioned): origin-IP-behind-CDN discovery
-
-Searched this as a possible detect-tuning lane (relevant given our heavy Cloudflare/CloudFront top-tech) but decided against a KB write: standard techniques (DNS-history via SecurityTrails/ViewDNS, Shodan/Censys cert-match, split-DNS apex-vs-www gaps) are well-worn and, more importantly, testing an origin server directly (bypassing the program's CDN/WAF) is frequently an explicit **out-of-scope carve-out** in program policy — this needs a Phase-0 scope read per host, not a blanket detection rule. Flagging only in case a specific program's policy explicitly allows it.
+Same discipline as our existing takeover doctrine applies: CNAME/fingerprint match alone is a LEAD; claim requires the provider-specific unclaimed-state proof before minting CONFIRMED.
+Source: [Vulnsy Subdomain Takeover Cheat Sheet](https://www.vulnsy.com/cheat-sheets/subdomain-takeover)
