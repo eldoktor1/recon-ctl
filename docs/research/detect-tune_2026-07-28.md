@@ -1,36 +1,26 @@
 # Research digest — detect-tune — 2026-07-28
 
-# Detection & Verification Tuning — Digest (2026-07-28, supplemental)
+# Detection & Verification Tuning — Digest (2026-07-28, second pass)
 
-Checked against the last 30 days: Avada Builder SQLi, Ignition RCE, Varnish PURGE, GraphQL introspection-bypass techniques, and dalfox v3 are already documented — skipped. This pass found two live, high-severity, unauth WordPress plugin CVEs directly on our top-tech surface (WordPress/PHP) with exact HTTP requests and safe version-fingerprints, plus a takeover-fingerprint refresh for non-classic SaaS providers.
+## 1. Origin-IP discovery turns our suppressed "CDN-fronted critical port" signal into a real, payable WAF-bypass finding (HIGH PRIORITY, actionable now)
 
-## 1. Kirki plugin ≤6.0.6 — Unauth account takeover via password-reset email hijack (CVE-2026-8206, CVSS 9.8) — HIGH PRIORITY
-- **Plugin:** Kirki – Freeform Page Builder/Customizer (WordPress) — ~500k+ installs, matches our WordPress top-tech.
-- **Bug:** `handle_forgot_password` (`CompLibFormHandler.php`) accepts an attacker-supplied `email` alongside a known `username` and sends the reset link there instead of the account's real address — no auth, no permission check.
-- **Request:** `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` with `username`, `email` (attacker's inbox), `emailBody` (JSON containing the `reset_link` chip). Success = HTTP 200 + "Email sent".
-- **Safe detect (no exploitation needed):** `curl -s https://<host>/wp-content/plugins/kirki/readme.txt` (also try `kirki-test`) → `Stable tag` ≤ 6.0.6, or the `ver=` query param on `kirki.min.css`. Fixed in **6.0.7** (released 2026-05-18).
-- **Note:** this is a full unauthenticated account-takeover primitive (username enumeration + the reset-email redirect) — the version match alone is a LEAD per KEV-doctrine; the confirm step is a benign reset request against **our own test account username only**, never a real user's.
-- Sources: [ZeroPath writeup](https://zeropath.com/blog/cve-2026-8206-kirki-wordpress-privilege-escalation), [Threat-Modeling.com](https://threat-modeling.com/kirki-wordpress-plugin-account-takeover-cve-2026-8206/), [Bleeping Computer](https://www.bleepingcomputer.com/news/security/critical-kirki-flaw-exploited-to-hijack-wordpress-admin-accounts/), [PoC detection method](https://github.com/Jenderal92/CVE-2026-8206)
+Our current doctrine (`CLAUDE.md` FP list) treats *any* critical port behind a CDN as noise ("CDNs ACK every port"). That's correct as a blind heuristic, but it throws away a genuinely payable bug class: **WAF/CDN bypass via exposed origin IP** — confirmed real report pattern (e.g. [SMTP2GO H1 #1536299 — "Origin IP found, WAF Cloudflare Bypass"](https://hackerone.com/reports/1536299)). If we can independently *find* the real origin IP and prove the app is directly reachable there (bypassing Cloudflare/Akamai/Fastly/CloudFront), the "meaningless" port scan becomes a confirmed, reportable exposure.
 
-## 2. Ninja Forms File Uploads ≤3.3.26 — Unauth arbitrary file upload → RCE (CVE-2026-0740, CVSS 9.8)
-- **Bug:** `NF_FU_AJAX_Controllers_Uploads::handle_upload` validates the extension of the *source* filename but writes to an attacker-controlled *destination* filename — an extra POST param renames the upload past the allowlist (e.g. source `image.jpg`, destination param `image_jpg=shell.php`).
-- **Exact request chain (unauth):**
-  1. `POST /wp-admin/admin-ajax.php` `action=nf_fu_get_new_nonce&field_id=<id>` → harvest nonce
-  2. `POST /wp-admin/admin-ajax.php` `action=nf_fu_upload&nonce=<nonce>&form_id=<id>&field_id=<id>&<slugified_filename>=<malicious_dest>` + `files-<field_id>=@<file>`
-- **Safe detect (no upload attempt):** `httpx`/grep page source for `nfpluginsettings\.js\?ver=[\d.]+` → version ≤3.3.26 = in-range. Fixed in **3.3.27** (2026-03-19); confirmed actively exploited in the wild since 2026-04-16 (Wordfence).
-- Confirming beyond version-match means an actual file write — that crosses into exploitation (RCE), so per our doctrine this stays **version-match LEAD**, not an auto-fired primitive; a confirm would need an explicit benign non-PHP marker upload, operator-gated.
-- Sources: [Lexfo technical writeup + exact requests](https://blog.lexfo.fr/ninja-forms-uploads_rce.html), [SentinelOne](https://www.sentinelone.com/vulnerability-database/cve-2026-0740/), [PoC](https://github.com/whattheslime/CVE-2026-0740), [U of Toronto advisory](https://security.utoronto.ca/advisories/ninja-forms-file-uploads-unauthenticated-remote-code-execution/)
+**Discovery techniques** (all passive/OSINT, no target traffic, safe to run as `d0k` like our other research/enum steps — [Intigriti: Identifying a server's origin IP](https://www.intigriti.com/researchers/blog/hacking-tools/identifying-servers-origin-ip)):
+- **crt.sh / CT history** (we already pull CT) — certs issued *before* CDN adoption, or SANs listing raw IPs/internal hostnames, often survive in the log even after the CDN migration.
+- **Favicon-hash pivot**: `curl -s '<url>/favicon.ico' | base64 | python3 -c 'import mmh3,sys;print(mmh3.hash(sys.stdin.buffer.read()))'` → Shodan `http.favicon.hash:<hash>` (budget-gated per our Shodan cap) or Censys favicon match — surfaces non-CDN hosts serving the identical app.
+- **Grey-cloud subdomains**: subfinder/CT output that resolves to a non-CDN IP (an unproxied `dev`/`staging`/`mail`/`direct` label) is frequently the same origin as the proxied apex.
+- **Email headers**: any app email we trigger via our own test account (password reset, notification) has `Received:` headers — legitimate under our existing own-account PoC doctrine.
+- **Unique-string dork**: footer/copyright string or a custom header value as a Shodan/Censys `services.http.response.body:` query to find the string served off-CDN.
 
-## 3. Subdomain-takeover fingerprints — non-classic SaaS providers (addendum, feeds `class-takeover.md`)
-Exact error-string/header fingerprints for providers less commonly covered by the classic can-i-take-over-xyz list:
+**Verification primitive (the part that matters for precision):** a candidate IP is NOT confirmed just by being non-CDN — send a direct GET/HEAD to the candidate IP with `Host: <target-domain>` (unauthenticated, our existing `recon_safe_probe.sh` primitive, just pointed at an IP instead of the hostname) and diff the response body/title against the real site. Match = confirmed origin; CloudFlair's own verification loop does exactly this (reject 404/timeout candidates, confirm on identical HTML — [christophetd/CloudFlair](https://github.com/christophetd/CloudFlair)). This is a same-class primitive to our existing safe-probe gate — no new safety review needed, just a new target selection (candidate IP, Host header spoof) inside the same GET/HEAD/OPTIONS-only, scope+pays-gated harness.
 
-| Provider | CNAME pattern | Fingerprint | Claimable via |
-|---|---|---|---|
-| Vercel | `cname.vercel-dns.com` | `"DEPLOYMENT_NOT_FOUND"` + `x-vercel-id` header | bind orphaned hostname to attacker's Vercel project |
-| Netlify | `*.netlify.app`/`*.netlify.com` | `"Not Found - Request ID:"` + `x-served-by: cache-...netlify` | bind Netlify site to hostname |
-| Webflow | `proxy.webflow.com`/`proxy-ssl.webflow.com` | `"The page you are looking for doesn't exist"` | bind new Webflow project (note: 2023 patches narrowed but didn't eliminate) |
-| Tilda | `*.tilda.ws` | `"Please renew your subscription"` / `"Domain has been assigned"` | re-bind after subscription lapse |
-| Pantheon | `*.pantheonsite.io` | `"The gods are wise, but do not know of the site which you seek."` | bind Pantheon site to hostname |
+**Precision upgrade for the existing FP filter:** replace the "6+ open critical ports = scan artifact" heuristic with an actual CDN-range membership check. Daily-updated CIDR datasets exist for exactly this (Cloudflare's own [official IP list](https://www.cloudflare.com/ips/), plus aggregated multi-provider feeds — [rezmoss/cloud-provider-ip-addresses](https://github.com/rezmoss/cloud-provider-ip-addresses) (60+ providers incl. Cloudflare/Fastly/CloudFront/Akamai, JSON+CIDR, daily refresh), [mansourjabin/cdn-ip-database](https://github.com/mansourjabin/cdn-ip-database)). A portscan result is only a scan-artifact if the scanned IP is *actually inside* a current CDN CIDR block — check membership directly instead of counting ports. Any host whose portscan IP resolves OUTSIDE all known CDN ranges keeps its critical-port signal as real.
 
-Same discipline as our existing takeover doctrine applies: CNAME/fingerprint match alone is a LEAD; claim requires the provider-specific unclaimed-state proof before minting CONFIRMED.
-Source: [Vulnsy Subdomain Takeover Cheat Sheet](https://www.vulnsy.com/cheat-sheets/subdomain-takeover)
+**Net effect:** hosts we currently blanket-suppress as "CDN-fronted, ignore" become a two-step lane: (1) CDN-range-confirm the scanned IP really is CDN, (2) if so, run the origin-IP discovery above — a hit converts a dead lead into a confirmable WAF-bypass finding. This is dup-resistant (requires OSINT effort most hunters skip) and fits the MOTTO directly.
+
+
+
+---
+
+No other new detect-tune items cleared the bar this run — checked GraphQL bypass techniques, dalfox tuning, subdomain-takeover fingerprints (`can-i-take-over-xyz`), and nuclei-templates FP-reduction PRs against the last 30 days of digests; all already covered or too incremental to action (nuclei's recent FP fixes were template-specific PRs for panels/CVEs not in our top-tech list).
