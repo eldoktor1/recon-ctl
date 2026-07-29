@@ -1,26 +1,29 @@
 # Research digest — detect-tune — 2026-07-28
 
-# Detection & Verification Tuning — Digest (2026-07-28, second pass)
+Now composing the digest.
 
-## 1. Origin-IP discovery turns our suppressed "CDN-fronted critical port" signal into a real, payable WAF-bypass finding (HIGH PRIORITY, actionable now)
+# Research digest — detect-tune — 2026-07-28 (third pass)
 
-Our current doctrine (`CLAUDE.md` FP list) treats *any* critical port behind a CDN as noise ("CDNs ACK every port"). That's correct as a blind heuristic, but it throws away a genuinely payable bug class: **WAF/CDN bypass via exposed origin IP** — confirmed real report pattern (e.g. [SMTP2GO H1 #1536299 — "Origin IP found, WAF Cloudflare Bypass"](https://hackerone.com/reports/1536299)). If we can independently *find* the real origin IP and prove the app is directly reachable there (bypassing Cloudflare/Akamai/Fastly/CloudFront), the "meaningless" port scan becomes a confirmed, reportable exposure.
+## 1. CVE-2026-44575 / CVE-2026-45109 — Next.js middleware bypass, NEW variant beyond the CVE-2025-29927 we already track (HIGH PRIORITY, unauth-safe, feeds `tech-nextjs.md`)
 
-**Discovery techniques** (all passive/OSINT, no target traffic, safe to run as `d0k` like our other research/enum steps — [Intigriti: Identifying a server's origin IP](https://www.intigriti.com/researchers/blog/hacking-tools/identifying-servers-origin-ip)):
-- **crt.sh / CT history** (we already pull CT) — certs issued *before* CDN adoption, or SANs listing raw IPs/internal hostnames, often survive in the log even after the CDN migration.
-- **Favicon-hash pivot**: `curl -s '<url>/favicon.ico' | base64 | python3 -c 'import mmh3,sys;print(mmh3.hash(sys.stdin.buffer.read()))'` → Shodan `http.favicon.hash:<hash>` (budget-gated per our Shodan cap) or Censys favicon match — surfaces non-CDN hosts serving the identical app.
-- **Grey-cloud subdomains**: subfinder/CT output that resolves to a non-CDN IP (an unproxied `dev`/`staging`/`mail`/`direct` label) is frequently the same origin as the proxied apex.
-- **Email headers**: any app email we trigger via our own test account (password reset, notification) has `Received:` headers — legitimate under our existing own-account PoC doctrine.
-- **Unique-string dork**: footer/copyright string or a custom header value as a Shodan/Censys `services.http.response.body:` query to find the string served off-CDN.
+Our KB (`tech-nextjs.md` §4) only documents the 2025 `x-middleware-subrequest` header bypass. Two **distinct, newer** middleware-bypass CVEs exist and aren't covered:
 
-**Verification primitive (the part that matters for precision):** a candidate IP is NOT confirmed just by being non-CDN — send a direct GET/HEAD to the candidate IP with `Host: <target-domain>` (unauthenticated, our existing `recon_safe_probe.sh` primitive, just pointed at an IP instead of the hostname) and diff the response body/title against the real site. Match = confirmed origin; CloudFlair's own verification loop does exactly this (reject 404/timeout candidates, confirm on identical HTML — [christophetd/CloudFlair](https://github.com/christophetd/CloudFlair)). This is a same-class primitive to our existing safe-probe gate — no new safety review needed, just a new target selection (candidate IP, Host header spoof) inside the same GET/HEAD/OPTIONS-only, scope+pays-gated harness.
+- **CVE-2026-44575** (App Router, Next.js 15.2.0–15.5.15 and 16.0.0–16.2.4; fixed 15.5.16/16.2.5): middleware-based authorization is enforced on the normal route path but **not on the `.rsc` transport variant or segment-prefetch requests**. `GET /dashboard` correctly redirects to login; `GET /dashboard.rsc` or `GET /dashboard.segments/$c$children/__PAGE__.segment.rsc` serves the protected React Server Component payload with **HTTP 200, no auth**. Not affected: Pages Router, Vercel-managed deployments (self-hosted only).
+- **CVE-2026-45109**: same bypass class, specific to `middleware.ts` builds compiled with **Turbopack**; fixed in 15.5.18 / 16.2.6 (note the *Turbopack* fix version trails the general fix — a host patched to 15.5.16 but still on 15.5.17 w/ Turbopack may remain exposed).
 
-**Precision upgrade for the existing FP filter:** replace the "6+ open critical ports = scan artifact" heuristic with an actual CDN-range membership check. Daily-updated CIDR datasets exist for exactly this (Cloudflare's own [official IP list](https://www.cloudflare.com/ips/), plus aggregated multi-provider feeds — [rezmoss/cloud-provider-ip-addresses](https://github.com/rezmoss/cloud-provider-ip-addresses) (60+ providers incl. Cloudflare/Fastly/CloudFront/Akamai, JSON+CIDR, daily refresh), [mansourjabin/cdn-ip-database](https://github.com/mansourjabin/cdn-ip-database)). A portscan result is only a scan-artifact if the scanned IP is *actually inside* a current CDN CIDR block — check membership directly instead of counting ports. Any host whose portscan IP resolves OUTSIDE all known CDN ranges keeps its critical-port signal as real.
-
-**Net effect:** hosts we currently blanket-suppress as "CDN-fronted, ignore" become a two-step lane: (1) CDN-range-confirm the scanned IP really is CDN, (2) if so, run the origin-IP discovery above — a hit converts a dead lead into a confirmable WAF-bypass finding. This is dup-resistant (requires OSINT effort most hunters skip) and fits the MOTTO directly.
+**Confirm primitive (safe, matches our doctrine exactly):** identify a route that 401/403/redirects unauthenticated on its normal path, then request the same path with `.rsc` appended (and the segment-prefetch variant). 200 + RSC payload = bypass confirmed; this is GET-only, unauthenticated, non-destructive — fits `recon_safe_probe.sh` directly, no probe-harness change needed, just a version/path check to add to the Next.js n-day version table.
 
 
 
----
+## 2. vBulletin CVE-2026-61511 — pre-auth RCE via `ajax/render/pagenav`, public PoC (LEAD-not-P0, watch-list add for `class-nday.md`)
 
-No other new detect-tune items cleared the bar this run — checked GraphQL bypass techniques, dalfox tuning, subdomain-takeover fingerprints (`can-i-take-over-xyz`), and nuclei-templates FP-reduction PRs against the last 30 days of digests; all already covered or too incremental to action (nuclei's recent FP fixes were template-specific PRs for panels/CVEs not in our top-tech list).
+vBulletin 5.x ≤5.7.5 / 6.x ≤6.2.1: unsanitized input reaches `runMaths()` → PHP `eval()` via the `ajax/render/[template]` endpoint (`pagenav` template is the known-vulnerable route). Public PoC exists, actively getting scanned. Not in our current top-tech list, but PHP-forum software shows up incidentally on programs — worth a version-fingerprint-only check (banner/generator meta), never firing the actual payload per our n-day version-gate discipline (a real trigger is destructive/RCE, out of our safe-probe primitive set — this stays LEAD/version-match only, never auto-confirmed).
+
+
+
+## Checked, nothing new to add
+- **Subdomain-takeover provider fingerprints** (Cargo Collective, Tilda, Pantheon, Strikingly, Surge.sh, Anima, LaunchRock, Readme.io, Help Scout) — verified against `scripts/data/takeover_fingerprints.tsv`: **all already present** (94 entries). No gap here.
+- **IDOR/BOLA OpenAPI-based detection research** — academic approach (rank params by object-ref semantics + type from spec) matches what `recon_idor_candidates.py` already does; no new actionable heuristic surfaced.
+- Origin-IP/CDN-bypass, GraphQL introspection-bypass, dalfox v3, JWT alg-confusion — already covered in the last 4 digests, confirmed still current, not re-surfaced.
+
+Sources: [CVE-2026-44575 analysis](https://securityboulevard.com/2026/05/cve-2026-44575-middleware-authorization-bypass-in-next-js-app-router/), [CVE-2026-45109](https://www.sentinelone.com/vulnerability-database/cve-2026-45109/), [vBulletin CVE-2026-61511](https://www.bleepingcomputer.com/news/security/vbulletin-fixes-critical-pre-auth-rce-flaw-with-public-exploit/), [vulnsy takeover cheat sheet](https://www.vulnsy.com/cheat-sheets/subdomain-takeover)
