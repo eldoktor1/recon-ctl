@@ -1,16 +1,27 @@
 # PROPOSAL (proposal) for docs/knowledge/class-ssrf.md — kb-enrich 2026-07-28
 _Review and apply manually; not auto-merged into the KB._
 
-## Second disclosed DNS-rebinding/TOCTOU instance (added 2026-07-28)
+## Redirect-chain confirm-primitive bypass (added 2026-07-28)
 
-Reinforces the DNS-rebinding/TOCTOU section already in this doc (2026-07-14, Craft CMS instance). A
-second, independently-disclosed 2026 case: **MCP Atlassian, CVE-2026-27826 (GHSA-489g-7rxv-6c8q)** — the
-SSRF guard resolved the hostname once, validated the IP was public, then discarded the resolved IP
-("returns a string verdict, not a pinned IP") and let the actual HTTP client re-resolve the raw hostname
-at connect time. An attacker-controlled DNS-rebinding domain answers with a public IP on the validation
-lookup and `169.254.169.254` on the connection lookup — identical root cause to the Craft CMS case, now
-confirmed in an unrelated stack. Strengthens confidence this is a **systemic pattern class** (validate
-hostname → discard result → reconnect via raw hostname) worth checking on ANY target whose SSRF guard is
-implemented as "resolve + check" middleware in front of a generic HTTP client, not a one-off bug.
+When a sink validates the literal input URL against an allowlist/blocklist but the underlying HTTP
+client follows redirects, a direct interactsh canary URL will get rejected while a **redirect chain**
+still lands. Point the sink at an allowed-looking URL (or a URL on a domain the validator accepts) that
+302-redirects to the interactsh canary, instead of the canary directly. The confirm primitive is
+unchanged (OOB callback = proof) — this just routes around hostname-level input validation that doesn't
+also constrain where the client is allowed to *end up*. Try this as the second pass on any sink that
+outright rejects/400s the direct canary URL before marking it not-vulnerable.
 
-Source: https://github.com/advisories/GHSA-489g-7rxv-6c8q
+## Protocol-smuggling impact note — severity reasoning only, never autonomous (added 2026-07-28)
+
+`gopher://`/`dict://` schemes deliver raw bytes (including CRLF) to the target port. Because
+Redis/Memcached/SMTP/FastCGI are text/line-based protocols, a confirmed SSRF that can reach one of these
+internal services on its native port is a materially higher-severity finding than one that only reaches
+an HTTP metadata endpoint or a generic internal web app — the same primitive that gives an OOB ping can,
+in the hands of an authorized full exploit, write Redis keys or hit FastCGI. This is a **write-up
+severity signal only**: never issue the gopher/dict payload autonomously or chase actual internal writes
+— the interactsh OOB callback remains the sole confirm primitive; this just informs how to *describe*
+impact once a human is doing the authorized manual escalation.
+
+### Sources (added 2026-07-28)
+- portswigger.net/research (Orange Tsai "A New Era of SSRF" cited via secondary sources) — parser-discrepancy bypass class
+- intruderlabs.com.br/en/blog/ssrf-bypass-techniques (gopher/dict payload mechanics)
