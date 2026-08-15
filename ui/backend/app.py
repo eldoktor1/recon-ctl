@@ -719,6 +719,122 @@ async def api_workspace_guide(key: str, body: dict = Depends(safety.require_conf
     return {**t.snapshot(), "session_id": sid, "task_id": t.id}
 
 
+@app.post("/api/workspaces/{key}/generate")
+async def api_workspace_generate(key: str, body: dict = Depends(safety.require_confirm)):
+    """DERIVE the STRIDE model + WSTG relevance ranking from this program's real surface.
+
+    Off-target by construction (reasoning over ES hosts / jsintel endpoints / worked-knowledge,
+    no target packets) so no VPN gate — streams like the co-pilot. The frontend reviews the draft
+    and applies it via POST /api/workspaces/{key}/model, so a generation never silently rewrites
+    the operator's checklist."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    name = ws.get("name") or ws.get("key")
+    try:
+        hosts = (await es.search(program=name, limit=40)).get("items", [])
+    except Exception:
+        hosts = []
+    endpoints = files.program_endpoints([h.get("host") for h in hosts])
+    try:
+        host_set = {(x.get("host") or "") for x in hosts}
+        killed = {h: c for h, c in files.killed_host_classes().items() if h in host_set}
+    except Exception:
+        killed = {}
+    prompt = workspace.build_model_prompt(ws, hosts, endpoints, killed)
+    sid = claude_console.new_session_id()
+    argv = claude_console.build_argv(sid, prompt, body.get("model"))
+    t = await manager.spawn(f"model:{key[:20]}", argv)
+    return {**t.snapshot(), "session_id": sid, "task_id": t.id,
+            "surface": {"hosts": len(hosts), "endpoints": len(endpoints), "killed": len(killed)}}
+
+
+@app.post("/api/workspaces/{key}/model")
+async def api_workspace_model(key: str, body: dict = Depends(safety.require_confirm)):
+    """Apply a reviewed generated model. Accepts either the parsed object (`model`) or the raw
+    Claude reply (`text`) to parse. Additive: settled WSTG items are never re-decided."""
+    raw = body.get("model")
+    try:
+        model = raw if isinstance(raw, dict) else workspace.parse_model(body.get("text") or "")
+        if not (model.get("stride") or model.get("wstg")):
+            raise ValueError("model contained no usable stride or wstg rows")
+        return workspace.apply_model(key, model)
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/followup")
+async def api_workspace_followup(key: str, body: dict = Depends(safety.require_confirm)):
+    """PICK a pursue-item into the follow-up queue, bound to the step that surfaced it.
+
+    Deliberately does not run or navigate anywhere: picking parks the lead so the STRIDE/WSTG
+    walk continues uninterrupted, and the queue becomes the record of what the walk turned up
+    but has not done yet."""
+    try:
+        return workspace.add_followup(key, body.get("wid"), body.get("item") or {})
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/followup/status")
+async def api_workspace_followup_status(key: str, body: dict = Depends(safety.require_confirm)):
+    try:
+        return workspace.set_followup(key, str(body.get("id") or ""), str(body.get("status") or ""))
+    except KeyError as e:
+        raise HTTPException(404, f"not found: {e}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{key}/step-card")
+async def api_workspace_step_card(key: str, body: dict = Depends(safety.require_confirm)):
+    """Parse a guide reply into its step card (found / record / pursue).
+
+    Pure parsing — no mutation. Lives server-side so action ids are validated against the same
+    lane table the runner uses; a reply with no card returns {"card": null} rather than an error."""
+    return {"card": workspace.parse_step_card(body.get("text") or "")}
+
+
+@app.get("/api/workspaces/{key}/actions")
+async def api_workspace_actions(key: str, id: str = ""):
+    """Runnable lanes for a WSTG test, with the generated targets pre-bound. Read-only."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    wid = (id or "").strip().upper()
+    if wid:
+        item = next((w for w in (ws.get("wstg") or []) if w.get("id") == wid), None)
+        return {"id": wid, "actions": workspace.wstg_actions(wid, item)}
+    out: dict[str, Any] = {}
+    for w in (ws.get("wstg") or []):
+        acts = workspace.wstg_actions(w.get("id"), w)
+        if acts:
+            out[w["id"]] = acts
+    return {"actions": out}
+
+
+@app.post("/api/workspaces/{key}/action")
+async def api_workspace_action(key: str, body: dict = Depends(safety.require_confirm)):
+    """RUN one of a test's offered lanes. Target-facing, so it is VPN fail-closed; the argv is
+    rebuilt server-side from the action id (the client never supplies a command)."""
+    ws = workspace.load(key)
+    if not ws:
+        raise HTTPException(404, "workspace not found")
+    wid = (body.get("id") or "").strip().upper()
+    try:
+        sub = workspace.resolve_action(wid, (body.get("action") or "").strip(), body.get("target"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    safety.require_vpn_up()  # fail-closed for target-facing lanes
+    argv = ["bash", str(config.RECON_CTL), *sub]
+    t = await manager.spawn(f"wstg:{wid[-6:]}:{sub[0]}", argv)
+    return {**t.snapshot(), "task_id": t.id, "cmd": " ".join(sub)}
+
+
 @app.post("/api/hosts/{host}/autonote")
 async def api_host_autonote(host: str, body: dict = Depends(safety.require_confirm)):
     """Draft a concise host note (where testing of this host stands) via Claude.
@@ -903,6 +1019,26 @@ async def api_hunter_class(cls: str, limit: int = 60):
         raise HTTPException(404, "unknown class")
     r = await es.search(cls=cls, pays=True, limit=min(limit, 200), sort="triage_score", order="desc")
     return {"meta": meta, "total": r.get("total", 0), "items": r.get("items", [])}
+
+
+# lane-level "start" command per class — a dedicated recon lane where a real one exists, else the
+# universal `mood <cls>` worklist generator (broad match over tech/classes/notes/title → ranked
+# scope+paying targets). Only confirmed dispatcher subcommands go here; everything else uses mood.
+_HUNTER_START = {
+    "bucket": ["buckets"],
+}
+
+
+@app.post("/api/hunter/{cls}/run")
+async def api_hunter_run(cls: str, body: dict = Depends(safety.require_confirm)):
+    """START hunting a class: run its lane (bucket/nday/blindxss/graphql) or the `mood <cls>`
+    worklist generator. Streams to the task console."""
+    if not next((c for c in HUNTER_CLASSES if c["cls"] == cls), None):
+        raise HTTPException(404, "unknown class")
+    sub = _HUNTER_START.get(cls, ["mood", cls])
+    argv = ["bash", str(config.RECON_CTL), *sub]
+    t = await manager.spawn(f"hunt:{cls}", argv)
+    return {**t.snapshot(), "task_id": t.id}
 
 
 @app.post("/api/workspaces/{key}/status")

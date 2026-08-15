@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useFetch } from "../hooks";
+import { api } from "../api";
 import { Panel, Badge, Empty, Spinner } from "../components/ui";
+import { Btn, useToast } from "../components/controls";
 import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
 import { TaskConsole } from "../components/TaskConsole";
@@ -18,10 +20,19 @@ export default function Hunter() {
   const [drawer, setDrawer] = useState<string | null>(null);
   const [openTask, setOpenTask] = useState<number | null>(() => getTask("drawer:hunter"));
   const actions = useHostActions();
+  const toast = useToast();
   const { data: targets, loading, refetch } = useFetch<HTargets>(sel ? `/api/hunter/${sel}` : null, [sel]);
 
   const onTask = (tid: number) => { setOpenTask(tid); setTask("drawer:hunter", tid); };
   const closeTask = () => { setOpenTask(null); clearTask("drawer:hunter"); };
+  // START hunting a class: run its lane / mood worklist generator, stream into the task console
+  const runClass = async (cls: string) => {
+    try {
+      const t = await api.action<{ id: number }>(`/api/hunter/${cls}/run`);
+      toast("ok", `started ${cls} hunt — streaming below`);
+      onTask(t.id);
+    } catch (e: any) { toast("err", e.message); }
+  };
 
   return (
     <div className="fade-in space-y-4">
@@ -50,7 +61,10 @@ export default function Hunter() {
       {sel && targets?.meta && (
         <Panel
           title={<span className="flex items-center gap-2">{targets.meta.label}<Badge color={classColor[sel] || "var(--color-ink-dim)"}>{sel}</Badge></span>}
-          right={<Badge color="var(--color-accent)">{targets.total} targets</Badge>}>
+          right={<div className="flex items-center gap-2">
+            <Btn size="sm" variant="primary" onClick={() => runClass(sel)}>▶ start hunting</Btn>
+            <Badge color="var(--color-accent)">{targets.total} targets</Badge>
+          </div>}>
           <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-2">
             <div className="rounded border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
               <div className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">safe confirm primitive</div>
@@ -66,7 +80,7 @@ export default function Hunter() {
             </div>
           </div>
           {loading && !targets.items.length ? <Spinner /> : !targets.items.length ? (
-            <Empty hint="widen recon for this class, or it isn't present on the current in-scope+paying surface">no targets for this class yet</Empty>
+            <Empty hint="click ▶ start hunting above to run this class's lane / worklist generator — it broad-matches the surface and produces the ranked targets">no targets tagged in ES for this class yet</Empty>
           ) : (
             <div className="space-y-1">
               {targets.items.map((h) => (

@@ -751,9 +751,11 @@ def load(key: str) -> dict[str, Any] | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        ws = json.loads(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
+    ws.setdefault("followups", [])   # added later; older workspaces load without it
+    return ws
 
 
 def list_all() -> list[dict[str, Any]]:
@@ -908,6 +910,52 @@ def delete_note(key: str, index: int) -> dict[str, Any]:
         ws["history"].append({"ts": _now(), "event": "note deleted"})
         return save(ws)
     return ws
+
+
+# --- test-account credentials (LOCAL ONLY — never committed/mirrored) ------
+# Per-program login/creds for authed testing live under ~/recon/state/private_programs/,
+# chmod 600, OUTSIDE the repo. Doctrine: I save creds locally; the operator does the final
+# submit. Two owned accounts (a/b) enable the 2-account IDOR swap.
+def _accounts_path(key: str) -> Path:
+    d = config.STATE_DIR / "private_programs"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except Exception:
+        pass
+    return d / f"{_slug(key)}_accounts.json"
+
+
+def get_accounts(key: str) -> list[dict[str, Any]]:
+    """Read the saved test accounts for a program (local-only). Never raises."""
+    p = _accounts_path(key)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def set_accounts(key: str, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist test accounts for a program to the local, 600-perm creds file."""
+    clean: list[dict[str, Any]] = []
+    for a in (accounts or [])[:6]:
+        if not isinstance(a, dict):
+            continue
+        row = {k: str(a.get(k, ""))[:400] for k in ("label", "email", "username", "password", "url", "notes")}
+        if any(row.values()):
+            clean.append(row)
+    p = _accounts_path(key)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, p)
+    try:
+        p.chmod(0o600)
+    except Exception:
+        pass
+    return clean
 
 
 def set_status(key: str, status: str | None = None,
@@ -1077,6 +1125,34 @@ _STEP_RESULT = (
     "`done`."
 )
 
+# The STEP-RESULT line above tells the auto-driver what happened; this card is what makes the step
+# a DECISION SURFACE instead of a wall of prose to read. Three questions, answered with real values
+# the UI can act on: what did we FIND, what do we RECORD, what do we PURSUE next.
+_STEP_CARD = (
+    "AFTER the STEP-RESULT line, append EXACTLY ONE fenced ```json block — the step card. It is what "
+    "the operator acts on, so every value must be concrete and copied from THIS engagement:\n"
+    "{\n"
+    '  "found":  [{"what":"<the specific thing observed>", "evidence":"<real host/url/param/response>",\n'
+    '              "why":"<why it matters for THIS test>"}],\n'
+    '  "record": {"status":"done|finding|na|manual",\n'
+    '             "note":"<1-3 plain sentences of worked-knowledge: what was tested, what was found or\n'
+    '                      cleared and WHY, what is left — this is persisted verbatim>"},\n'
+    '  "pursue": [{"label":"<the next move, imperative>", "why":"<what it would prove>",\n'
+    '              "priority":"high|medium|low", "action":"<lane id or null>",\n'
+    '              "target":"<bare host or null>", "cmd":"<exact command when the operator runs it>"}]\n'
+    "}\n"
+    "RULES:\n"
+    "- `found` carries EVIDENCE, not narration. Nothing observed ⇒ empty list, and say so in the note.\n"
+    "- `record.note` is written to the checklist verbatim — no markdown, no preamble, never overclaim. "
+    "A clean pass is worked-knowledge too: say what was cleared and why, so it is not re-walked.\n"
+    "- `pursue` is ranked, most valuable first, and each entry must be a REAL next move — the authed "
+    "2-owned-account swap, a specific param to confirm, a host to crawl. No filler.\n"
+    "- Set `action` ONLY to a lane that genuinely applies, from exactly: crawl-host, confirm-xss, "
+    "confirm-sqli, graphql, buckets, wcd, kr, blindxss, permute, uncover, verify, scope, tech, kev — "
+    "and set `target` to the bare host it runs against. Otherwise `action` is null and `cmd` carries "
+    "the exact thing for the operator to run or do."
+)
+
 
 def _program_context(ws: dict[str, Any], hosts: list[dict[str, Any]],
                      endpoints: list[str]) -> str:
@@ -1144,7 +1220,8 @@ def build_guide_prompt(ws: dict[str, Any], phase: str, ident: str, host: str,
             "it now (read-only, in-scope+paying). Rank by likely payout/impact and end with the 2-3 to "
             "test first.\n\n"
             f"{_ACCOUNTS}\n\n{_DRIVE_TOOLS}")
-    return f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_EXHAUSTIVE}\n\n{_DOCTRINE}\n\n{_STEP_RESULT}"
+    return (f"{head}\n\n{ctx}{focus_host}\n\n{body}\n\n{_EXHAUSTIVE}\n\n{_DOCTRINE}\n\n"
+            f"{_STEP_RESULT}\n\n{_STEP_CARD}")
 
 
 # --- Auto-note prompts (summarize where testing stands into a worked-knowledge note) ----------
@@ -1210,3 +1287,396 @@ def build_program_note_prompt(ws: dict[str, Any], hosts: list[dict[str, Any]],
     head = ("You are the operator's co-pilot writing a concise ENGAGEMENT-SUMMARY note for this program "
             "— where the testing stands overall and what to pick up next session.")
     return f"{head}\n\n{ctx}\n\n{tail}\n\n{_DOCTRINE}\n\n{_NOTE_STYLE}"
+
+
+# --- generated model: STRIDE + WSTG derived from the REAL surface -----------
+# A seeded workspace is a TEMPLATE, not an engagement: _seed_wstg() stamps the same ~120
+# item checklist onto every program and `stride` starts as six empty buckets. The evidence
+# we already hold (in-scope+paying ES hosts, tech fingerprints, triage classes, jsintel
+# endpoints, worked-knowledge) only ever reached the per-step guide prompt — never the model
+# itself. These build the model FROM that evidence, so the threat model is specific to THIS
+# app and the WSTG walk is aimed by it instead of walked alphabetically.
+
+MODEL_STATUS = {"open", "testing", "confirmed", "killed"}
+
+_MODEL_CONTRACT = (
+    "OUTPUT CONTRACT — reply with ONE fenced ```json block and nothing else after it:\n"
+    "{\n"
+    '  "stride": [\n'
+    '    {"cat":"S|T|R|I|D|E", "threat":"<specific to THIS app, names the real asset/role/flow>",\n'
+    '     "rationale":"<the evidence that makes it credible>", "hosts":["<host from the surface>"],\n'
+    '     "severity":"high|medium|low"}\n'
+    "  ],\n"
+    '  "wstg": [\n'
+    '    {"id":"WSTG-XXXX-NN", "relevance":"high|medium|low|na",\n'
+    '     "reason":"<why it matters here, or why it cannot apply>",\n'
+    '     "targets":["<host/endpoint/param this test should be run against>"]}\n'
+    "  ]\n"
+    "}\n"
+    "RULES:\n"
+    "- Ground EVERY stride threat in the surface above. No generic textbook threats — if the "
+    "evidence does not support it, leave it out. Prefer few, sharp, testable threats over many vague ones.\n"
+    "- `hosts` and `targets` must be real values copied from the surface, never invented.\n"
+    "- relevance=na REQUIRES a concrete reason the test cannot apply to this stack (e.g. no SOAP "
+    "service, no file upload surface). 'Not interesting' is NOT a reason — that is a judgement the "
+    "operator makes after testing, and marking it na would erase work that was never done.\n"
+    "- Rank by what actually PAYS and is DUP-RESISTANT (the motto: be unique or get duplicated). "
+    "A test that everyone runs against a product-class endpoint is low relevance even when applicable; "
+    "per-app logic, object references, and auth boundaries are high.\n"
+    "- Only emit WSTG ids that exist in the checklist. Omit an id entirely if you have nothing to say."
+)
+
+
+def build_model_prompt(ws: dict[str, Any], hosts: list[dict[str, Any]], endpoints: list[str],
+                       killed: dict[str, set[str]] | None = None) -> str:
+    """Grounded prompt asking Claude to DERIVE the STRIDE threat model + WSTG relevance
+    ranking from this program's actual surface (not the generic seed)."""
+    ctx = _program_context(ws, hosts, endpoints)
+    lines: list[str] = []
+    wstg = ws.get("wstg") or []
+    worked = [w for w in wstg if (w.get("status") or "todo") != "todo"]
+    if worked:
+        lines.append("ALREADY WORKED — do not re-rank or overwrite these, they are settled:")
+        for w in worked[:25]:
+            lines.append(f"  - {w.get('id')} [{w.get('status')}] {w.get('name')}"
+                         + (f" — {w.get('note')}" if w.get("note") else ""))
+    existing = ws.get("stride") or {}
+    have = [f"{c}:{len(existing.get(c) or [])}" for c in ("S", "T", "R", "I", "D", "E")]
+    lines.append(f"Existing STRIDE threats per category: {', '.join(have)} "
+                 "(add what the evidence supports; do not duplicate an existing threat).")
+    if killed:
+        rows = [f"  - {h}: {', '.join(sorted(c)[:6])}" for h, c in list(killed.items())[:15] if c]
+        if rows:
+            lines.append("WORKED-KNOWLEDGE — classes already KILLED on these hosts "
+                         "(do not resurface an angle a note already killed):")
+            lines.extend(rows)
+    ids = ", ".join(sorted(wstg_reference().keys()))
+    lines.append(f"VALID WSTG IDS (use these exactly): {ids}")
+    tail = "\n".join(lines)
+    head = ("You are threat-modelling a bug-bounty program for its dedicated workspace. Derive the "
+            "STRIDE model from the REAL attack surface below — this app's actual assets, roles and "
+            "data flows — then use that model to rank which WSTG tests are worth the operator's "
+            "evening and which cannot apply. The output aims the engagement; be specific or be silent.")
+    return f"{head}\n\n{ctx}\n\n{tail}\n\n{_DOCTRINE}\n\n{_MODEL_CONTRACT}"
+
+
+def parse_model(text: str) -> dict[str, Any]:
+    """Extract the generated model from a Claude reply. Tolerant of prose around the JSON;
+    raises ValueError when nothing parseable is present (never returns a partial model)."""
+    if not text:
+        raise ValueError("empty response")
+    blob = None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    if fence:
+        blob = fence.group(1)
+    else:
+        i, j = text.find("{"), text.rfind("}")
+        if i != -1 and j > i:
+            blob = text[i:j + 1]
+    if not blob:
+        raise ValueError("no JSON object in response")
+    try:
+        data = json.loads(blob)
+    except Exception as e:
+        raise ValueError(f"unparseable JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError("model must be a JSON object")
+    out: dict[str, Any] = {"stride": [], "wstg": []}
+    for row in (data.get("stride") or []):
+        if not isinstance(row, dict):
+            continue
+        cat = str(row.get("cat") or "").strip().upper()[:1]
+        threat = str(row.get("threat") or "").strip()
+        if cat not in _STRIDE_CATS or not threat:
+            continue
+        out["stride"].append({
+            "cat": cat, "threat": threat[:500],
+            "rationale": str(row.get("rationale") or "")[:2000],
+            "hosts": [str(h)[:255] for h in (row.get("hosts") or [])][:50],
+            "severity": str(row.get("severity") or "").strip().lower()[:10],
+        })
+    ref = wstg_reference()
+    for row in (data.get("wstg") or []):
+        if not isinstance(row, dict):
+            continue
+        wid = str(row.get("id") or "").strip().upper()
+        rel = str(row.get("relevance") or "").strip().lower()
+        if wid not in ref or rel not in ("high", "medium", "low", "na"):
+            continue
+        out["wstg"].append({
+            "id": wid, "relevance": rel,
+            "reason": str(row.get("reason") or "")[:2000],
+            "targets": [str(t)[:255] for t in (row.get("targets") or [])][:25],
+        })
+    if not out["stride"] and not out["wstg"]:
+        raise ValueError("model contained no usable stride or wstg rows")
+    return out
+
+
+# --- follow-up queue --------------------------------------------------------
+# A step surfaces leads worth pursuing, but chasing one immediately is how a systematic walk turns
+# into a rabbit hole and coverage silently stops. PICKING a lead parks it here — bound to the step
+# that produced it — so the STRIDE/WSTG walk continues and nothing is lost. The queue is the
+# worked-vs-left record for everything the walk turned up but did not do yet.
+
+FOLLOWUP_STATUS = {"open", "done", "dropped"}
+
+
+def add_followup(key: str, wid: str | None, row: dict[str, Any]) -> dict[str, Any]:
+    """Pick a pursue-item into the queue. Deduped on (origin, label) so re-running a step and
+    picking the same lead twice does not stack duplicates."""
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    label = str(row.get("label") or "").strip()
+    if not label:
+        raise ValueError("label required")
+    origin = (wid or "").strip().upper() or "stride"
+    q = ws.setdefault("followups", [])
+    if any(f.get("origin") == origin and (f.get("label") or "").strip().lower() == label.lower()
+           and f.get("status") == "open" for f in q):
+        return {**save(ws), "duplicate": True}
+    pri = str(row.get("priority") or "medium").strip().lower()
+    act = str(row.get("action") or "").strip()
+    tgt = _clean_target(str(row.get("target") or ""))
+    ts = _now()
+    q.append({
+        "id": f"F{len(q) + 1}", "origin": origin, "label": label[:200],
+        "why": str(row.get("why") or "")[:300],
+        "priority": pri if pri in ("high", "medium", "low") else "medium",
+        "action": act if (act in {r[1] for r in _ACTION_MAP} and tgt) else None,
+        "target": tgt, "cmd": str(row.get("cmd") or "")[:400],
+        "status": "open", "created_at": ts,
+    })
+    ws["history"].append({"ts": ts, "event": f"picked follow-up from {origin}: {label[:60]}"})
+    return {**save(ws), "duplicate": False}
+
+
+def set_followup(key: str, fid: str, status: str) -> dict[str, Any]:
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    if status not in FOLLOWUP_STATUS:
+        raise ValueError(f"invalid status: {status} (allowed: {sorted(FOLLOWUP_STATUS)})")
+    row = next((f for f in ws.get("followups") or [] if f.get("id") == fid), None)
+    if not row:
+        raise KeyError(fid)
+    row["status"] = status
+    ts = _now()
+    row["updated_at"] = ts
+    ws["history"].append({"ts": ts, "event": f"follow-up {fid} → {status}"})
+    return save(ws)
+
+
+def parse_step_card(text: str) -> dict[str, Any] | None:
+    """Extract the step card from a guide reply. Returns None (never raises) when the reply has
+    no card — an older/prose-only answer must still render, just without the action surface."""
+    if not text:
+        return None
+    blob = None
+    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S):
+        blob = m.group(1)                      # last fenced block wins (the card is appended last)
+    if not blob:
+        return None
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not any(k in data for k in ("found", "record", "pursue")):
+        return None
+    valid_actions = {r[1] for r in _ACTION_MAP}
+    found: list[dict[str, str]] = []
+    for row in (data.get("found") or []):
+        if not isinstance(row, dict):
+            continue
+        what = str(row.get("what") or "").strip()
+        if not what:
+            continue
+        found.append({"what": what[:300],
+                      "evidence": str(row.get("evidence") or "")[:500],
+                      "why": str(row.get("why") or "")[:300]})
+    rec = data.get("record") if isinstance(data.get("record"), dict) else {}
+    status = str(rec.get("status") or "").strip().lower()
+    record = {"status": status if status in WSTG_STATUS or status == "manual" else "",
+              "note": str(rec.get("note") or "").strip()[:2000]}
+    pursue: list[dict[str, Any]] = []
+    for row in (data.get("pursue") or []):
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        if not label:
+            continue
+        act = str(row.get("action") or "").strip()
+        tgt = _clean_target(str(row.get("target") or ""))
+        pri = str(row.get("priority") or "").strip().lower()
+        pursue.append({
+            "label": label[:200], "why": str(row.get("why") or "")[:300],
+            "priority": pri if pri in ("high", "medium", "low") else "medium",
+            # only a lane that exists AND has a usable host survives as a one-click run
+            "action": act if (act in valid_actions and tgt) else None,
+            "target": tgt, "cmd": str(row.get("cmd") or "")[:400],
+        })
+    order = {"high": 0, "medium": 1, "low": 2}
+    pursue.sort(key=lambda p: order.get(p["priority"], 1))
+    if not found and not pursue and not record["note"]:
+        return None
+    return {"found": found[:12], "record": record, "pursue": pursue[:8]}
+
+
+def apply_model(key: str, model: dict[str, Any]) -> dict[str, Any]:
+    """Persist a generated model onto the workspace.
+
+    Additive and non-destructive by construction: an item the operator has already moved off
+    `todo` is NEVER touched (a generated na must not erase work that was actually done), and a
+    generated na only lands on a `todo` item when it carries a reason. Relevance/targets are
+    stored alongside the item so the checklist can rank by them without losing the WSTG ids."""
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    ts = _now()
+    added_s = skipped_s = 0
+    for row in (model.get("stride") or []):
+        bucket = ws["stride"].setdefault(row["cat"], [])
+        if any((t.get("threat") or "").strip().lower() == row["threat"].strip().lower()
+               for t in bucket):
+            skipped_s += 1
+            continue
+        bucket.append({
+            "id": f"{row['cat']}{len(bucket) + 1}", "threat": row["threat"],
+            "note": row.get("rationale") or "", "status": "open",
+            "hosts": row.get("hosts") or [], "severity": row.get("severity") or "",
+            "source": "generated", "created_at": ts,
+        })
+        added_s += 1
+    ranked = na_set = 0
+    by_id = {w["id"]: w for w in (ws.get("wstg") or [])}
+    for row in (model.get("wstg") or []):
+        item = by_id.get(row["id"])
+        if not item:
+            continue
+        settled = (item.get("status") or "todo") != "todo"
+        # A settled item keeps its verdict AND its ranking: recording relevance=na on a test the
+        # operator already turned into a finding would let a relevance filter hide real work.
+        if not (settled and row["relevance"] == "na"):
+            item["relevance"] = row["relevance"]
+        item["targets"] = row.get("targets") or []
+        item["rationale"] = row.get("reason") or ""
+        ranked += 1
+        if settled:
+            continue          # settled work is never re-decided by a generation pass
+        if row["relevance"] == "na" and row.get("reason"):
+            item["status"] = "na"
+            if not item.get("note"):
+                item["note"] = f"[generated] {row['reason']}"[:2000]
+            item["updated_at"] = ts
+            na_set += 1
+    ws["model_generated_at"] = ts
+    ws["history"].append({
+        "ts": ts,
+        "event": (f"model generated from surface: +{added_s} STRIDE ({skipped_s} dup), "
+                  f"{ranked} WSTG ranked, {na_set} auto-na"),
+    })
+    saved = save(ws)
+    return {**saved, "applied": {"stride_added": added_s, "stride_duplicate": skipped_s,
+                                 "wstg_ranked": ranked, "wstg_na": na_set}}
+
+
+# --- runnable actions per WSTG test ----------------------------------------
+# _WSTG_REF already names the lane for every test ("recon-params crawl-host", "recon-graphql",
+# …) but only as prose in the guide. This turns that prose into things the operator can RUN
+# from the row. The argv is ALWAYS rebuilt server-side from this table — the frontend posts an
+# action id, never a command — so a workspace row can never become an arbitrary-exec sink.
+# Only subcommands that exist in recon_ctl.sh are listed; a lane without one simply has no button.
+
+# token in _WSTG_REF.tools -> (action id, label, argv template, needs a host)
+_ACTION_MAP: list[tuple[str, str, str, list[str], bool]] = [
+    ("recon-params crawl-host", "crawl-host", "Crawl host (katana+gau→gf→catalog)",
+     ["params", "crawl-host", "{host}"], True),
+    ("recon-params confirm", "confirm-xss", "Confirm XSS (dalfox — must EXECUTE)",
+     ["params", "confirm", "xss", "{host}"], True),
+    ("recon-confirm", "confirm-sqli", "Confirm SQLi (' vs '' differential)",
+     ["params", "confirm", "sqli", "{host}"], True),
+    ("recon-graphql", "graphql", "GraphQL schema → worklist",
+     ["graphql", "{host}"], True),
+    ("recon-buckets", "buckets", "Bucket exposure (read-only ACL grading)",
+     ["buckets", "{host}"], True),
+    ("recon-wcd", "wcd", "Web-cache deception probe (cache-buster safe)",
+     ["wcd", "{host}"], True),
+    ("recon-kr", "kr", "API-route discovery (kiterunner)",
+     ["kr", "{host}"], True),
+    ("recon-blindxss", "blindxss", "Blind/stored-XSS plant",
+     ["blindxss", "{host}"], True),
+    ("recon-permute", "permute", "Permutation-DNS (public resolvers)",
+     ["permute"], False),
+    ("recon-uncover", "uncover", "Surface expansion (Shodan/Censys, budgeted)",
+     ["uncover"], False),
+    ("recon-verify", "verify", "Claude verify (multimodal + safe probes)",
+     ["verify", "{host}"], True),
+    ("recon-scope", "scope", "Scope + per-asset pays check",
+     ["scope", "{host}"], True),
+    ("recon-tech", "tech", "Tech fingerprint rollup", ["tech"], False),
+    ("recon-kev", "kev", "KEV/CVE matches", ["kev"], False),
+]
+
+_BAD_HOST_CHARS = set(" ;|&$`\n\t'\"\\")
+
+
+def _clean_target(t: str) -> str | None:
+    """A target is only usable as an argv token if it is a bare hostname."""
+    t = (t or "").strip()
+    if t.startswith(("http://", "https://")):
+        t = t.split("//", 1)[1]
+    t = t.split("/", 1)[0].split("?", 1)[0]
+    if not t or len(t) > 253 or any(c in _BAD_HOST_CHARS for c in t):
+        return None
+    return t if re.fullmatch(r"[A-Za-z0-9._:-]+", t) else None
+
+
+def wstg_actions(wid: str, item: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Runnable lanes for a WSTG test, with the item's generated targets pre-bound.
+
+    Derived from the test's own `tools` grounding, so the buttons track the reference rather
+    than a second hand-maintained list. Host-scoped lanes appear once per distinct target."""
+    ref = wstg_reference().get(wid)
+    if not ref:
+        return []
+    tools = (ref.get("tools") or "").lower()
+    targets = [c for c in (_clean_target(t) for t in ((item or {}).get("targets") or [])) if c]
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for token, aid, label, tmpl, needs_host in _ACTION_MAP:
+        if token.lower() not in tools:
+            continue
+        if needs_host:
+            for host in targets[:6]:
+                k = f"{aid}:{host}"
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append({"id": aid, "label": label, "target": host,
+                            "cmd": " ".join(t.replace("{host}", host) for t in tmpl)})
+        else:
+            if aid in seen:
+                continue
+            seen.add(aid)
+            out.append({"id": aid, "label": label, "target": None, "cmd": " ".join(tmpl)})
+    return out
+
+
+def resolve_action(wid: str, action_id: str, target: str | None) -> list[str]:
+    """Rebuild the argv for an action server-side. Raises ValueError unless the action is
+    genuinely offered by this test (never trusts a client-supplied command)."""
+    ref = wstg_reference().get(wid)
+    if not ref:
+        raise ValueError(f"unknown WSTG id: {wid}")
+    tools = (ref.get("tools") or "").lower()
+    row = next((r for r in _ACTION_MAP if r[1] == action_id and r[0].lower() in tools), None)
+    if not row:
+        raise ValueError(f"action '{action_id}' is not offered by {wid}")
+    _, _, _, tmpl, needs_host = row
+    if not needs_host:
+        return list(tmpl)
+    host = _clean_target(target or "")
+    if not host:
+        raise ValueError("this action needs a valid host target")
+    return [t.replace("{host}", host) for t in tmpl]

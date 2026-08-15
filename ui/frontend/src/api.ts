@@ -128,7 +128,13 @@ export interface WstgItem {
   id: string; category: string; cat_name: string; name: string;
   status: string; note?: string; updated_at?: string;
   objective?: string; how_to?: string; tools?: string; wstg_url?: string;
+  // Set by POST /api/workspaces/{key}/model: a ranking DERIVED server-side from the program's
+  // real surface. Supersedes the client-side category heuristic wherever it is present.
+  relevance?: "high" | "medium" | "low" | "na"; targets?: string[]; rationale?: string;
 }
+// A runnable lane offered by a WSTG test (GET /api/workspaces/{key}/actions). `cmd` is for
+// display only — running posts {id, action, target} and the backend rebuilds the argv itself.
+export interface WstgAction { id: string; label: string; target: string | null; cmd: string }
 export interface WstgRefItem {
   id: string; category: string; cat_name: string; name: string;
   objective: string; how_to: string; tools: string; wstg_url: string;
@@ -145,6 +151,13 @@ export interface StrideBoard {
   S: StrideThreat[]; T: StrideThreat[]; R: StrideThreat[];
   I: StrideThreat[]; D: StrideThreat[]; E: StrideThreat[];
 }
+// A pursue-item the operator PICKED. Bound to the step that surfaced it (`origin`) so the walk
+// continues and the queue records what was turned up but not yet done.
+export interface Followup {
+  id: string; origin: string; label: string; why?: string; priority: string;
+  action: string | null; target: string | null; cmd?: string;
+  status: "open" | "done" | "dropped"; created_at?: string; updated_at?: string;
+}
 export interface ClassProgress { cls: string; status: string }
 export interface WsNote { ts: string; text: string }
 export interface WsEvent { ts: string; event: string }
@@ -159,4 +172,5 @@ export interface WorkspaceDetail {
   key: string; name: string; platform?: string; status: string; current: boolean; added_at?: string;
   wstg: WstgItem[]; stride: StrideBoard; classes: ClassProgress[];
   notes: WsNote[]; history: WsEvent[]; hosts: WsHost[]; findings: Finding[];
+  followups?: Followup[];
 }
