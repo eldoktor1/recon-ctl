@@ -49,10 +49,10 @@ queues so old matches do not pollute a clean restart.
 ## Commands
 
 ```bash
-~/recon-pipeline/scripts/recon_ctl.sh vuln status
-~/recon-pipeline/scripts/recon_ctl.sh vuln top
-~/recon-pipeline/scripts/recon_ctl.sh v2 refresh-vuln
-~/recon-pipeline/scripts/recon_ctl.sh health
+~/recon-ctl/scripts/recon_ctl.sh vuln status
+~/recon-ctl/scripts/recon_ctl.sh vuln top
+~/recon-ctl/scripts/recon_ctl.sh v2 refresh-vuln
+~/recon-ctl/scripts/recon_ctl.sh health
 ```
 
 Discord:

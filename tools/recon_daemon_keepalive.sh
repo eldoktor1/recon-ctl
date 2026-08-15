@@ -9,7 +9,7 @@
 # start_recon_safe (preserving the VPN fail-closed gate). Respects
 # state/daemon_disabled (set by recon-stop) and state/maintenance.
 set -uo pipefail
-REPO_DIR="/home/d0k/recon-pipeline"
+REPO_DIR="/home/d0k/recon-ctl"
 HOME="${HOME:-/home/d0k}"
 STATE_DIR="${STATE_DIR:-$HOME/recon/state}"
 LOG_DIR="${LOG_DIR:-$HOME/recon/logs}"

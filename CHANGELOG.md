@@ -1218,7 +1218,7 @@ program rises to the top automatically.
 ### Deploy checklist
 - [ ] `cp docker/.env.example docker/.env` and fill in `ELASTIC_PASSWORD` and `KIBANA_PASSWORD`
 - [ ] Remove home-dir compat symlinks: `rm -f ~/recon_*.sh ~/triage.sh`
-- [ ] Verify `recon-start` alias in `~/.zshrc`: `alias recon-start='~/recon-pipeline/tools/start_recon_safe.sh'`
+- [ ] Verify `recon-start` alias in `~/.zshrc`: `alias recon-start='~/recon-ctl/tools/start_recon_safe.sh'`
 - [ ] Update `C:\recon\start_recon_hidden.vbs` content (see RUNBOOK.md)
 - [ ] Verify preflight at `/usr/local/sbin/recon-safe-preflight` and sudoers rule
 - [ ] `tools/enable_recon_killswitch.sh` then `tools/check_recon_killswitch.sh`
@@ -1524,9 +1524,9 @@ v2 scan-now            One-shot nuclei pass
 ## [repo] — Git repository migration
 
 **Changes:**
-- All scripts moved from `~/` flat layout into `~/recon-pipeline/` git repository
+- All scripts moved from `~/` flat layout into `~/recon-ctl/` git repository
 - Structure: `scripts/`, `docker/`, `CHANGELOG.md`, `RUNBOOK.md`, `.gitignore`, `README.md`
-- `ReconWatchdog` Task Scheduler updated to launch from repo: `~/recon-pipeline/scripts/recon_daemon.sh`
+- `ReconWatchdog` Task Scheduler updated to launch from repo: `~/recon-ctl/scripts/recon_daemon.sh`
 - `.gitignore` covers: secrets (`~/.recon_es_pass`, `~/.recon_discord`), runtime state, lock/pid/epoch files, `*:Zone.Identifier` files
 - Proxychains support added to `recon_daemon.sh`:
   - `USE_PROXYCHAINS=1` env var routes all external scan traffic through proxychains4

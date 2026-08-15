@@ -137,7 +137,7 @@ if ($WhatIfRemediate) {
 Log 'REMEDIATING: wsl --shutdown + safe relaunch (bounces the whole WSL2 VM)'
 try { & wsl.exe --shutdown 2>$null } catch { }
 Start-Sleep -Seconds 8
-$relaunch = Invoke-WslTimed 'cd ~/recon-pipeline && timeout 120 bash tools/start_recon_safe.sh 2>&1 | tail -4' 150
+$relaunch = Invoke-WslTimed 'cd ~/recon-ctl && timeout 120 bash tools/start_recon_safe.sh 2>&1 | tail -4' 150
 if ($null -eq $relaunch) { $relaunch = '(relaunch timed out)' }
 Log ('relaunch: ' + ($relaunch -replace "`r?`n", ' | '))
 

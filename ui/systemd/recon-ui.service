@@ -1,6 +1,6 @@
 [Unit]
 Description=recon-ui local control plane (FastAPI + SPA, loopback only)
-Documentation=https://github.com/eldoktor1/recon-pipeline
+Documentation=https://github.com/eldoktor1/recon-ctl
 # HARD crash-loop guard: if it dies >5x in 5min, systemd leaves it FAILED (alertable)
 # instead of thrashing. A lightweight web server should never hit this.
 StartLimitIntervalSec=300
@@ -8,13 +8,13 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-WorkingDirectory=/home/d0k/recon-pipeline
+WorkingDirectory=/home/d0k/recon-ctl
 Environment=RECON_UI_HOST=127.0.0.1
 Environment=RECON_UI_PORT=8787
 Environment=ES_URL=http://127.0.0.1:9200
 # uvicorn is the main process — systemd supervises it directly (no wrapper/backgrounding).
-ExecStart=/home/d0k/recon-pipeline/ui/backend/.venv/bin/python -m uvicorn ui.backend.app:app \
-  --host 127.0.0.1 --port 8787 --app-dir /home/d0k/recon-pipeline
+ExecStart=/home/d0k/recon-ctl/ui/backend/.venv/bin/python -m uvicorn ui.backend.app:app \
+  --host 127.0.0.1 --port 8787 --app-dir /home/d0k/recon-ctl
 Restart=always
 RestartSec=5
 TimeoutStopSec=15

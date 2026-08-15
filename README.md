@@ -76,7 +76,7 @@ web-cache deception, active param discovery (arjun), and GitHub-leak hunting. Fu
 ## Quickstart
 
 ```bash
-git clone https://github.com/eldoktor1/recon-ctl.git ~/recon-pipeline && cd ~/recon-pipeline
+git clone https://github.com/eldoktor1/recon-ctl.git ~/recon-ctl && cd ~/recon-ctl
 
 # 1. Bootstrap (idempotent — safe to re-run; installs go tools, Autoswagger,
 #    Playwright, the UI, and creates ~/recon runtime dirs)

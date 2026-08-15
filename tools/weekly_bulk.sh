@@ -10,7 +10,7 @@ set -uo pipefail
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 LOG_DIR="$BASE_DIR/logs"
 STATE_DIR="$BASE_DIR/state"
-CTL="/home/d0k/recon-pipeline/scripts/recon_ctl.sh"
+CTL="/home/d0k/recon-ctl/scripts/recon_ctl.sh"
 BULK_LOG="$LOG_DIR/bulk_weekly.log"
 LOCK_FILE="$STATE_DIR/bulk_weekly.running"
 

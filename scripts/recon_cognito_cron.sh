@@ -4,7 +4,7 @@
 # Fully reversible: `crontab -e` remove the line, or `touch ~/recon/cognito/STOP*`.
 export HOME=/home/d0k
 export PATH="/home/d0k/.cargo/bin:/home/d0k/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-DIR="$HOME/recon/cognito"; S="$HOME/recon-pipeline/scripts"
+DIR="$HOME/recon/cognito"; S="$HOME/recon-ctl/scripts"
 mkdir -p "$DIR"
 exec 9>"$DIR/cron.lock"; flock -n 9 || exit 0     # no overlapping runs
 

@@ -34,7 +34,7 @@ Features:
         -> runs hidden through wscript.exe
         -> calls C:\recon\start_recon_hidden.vbs
         -> starts WSL as d0k
-        -> runs /home/d0k/recon-pipeline/tools/start_recon_safe.sh
+        -> runs /home/d0k/recon-ctl/tools/start_recon_safe.sh
         -> runs /usr/local/sbin/recon-safe-preflight
         -> verifies VPN egress and local ES
         -> starts recon daemon safely
@@ -58,7 +58,7 @@ Do not start target-facing recon without preflight. Only use:
 
 or:
 
-    ~/recon-pipeline/tools/start_recon_safe.sh
+    ~/recon-ctl/tools/start_recon_safe.sh
 
 or let the hidden Windows task `ReconWatchdog` start it.
 
@@ -73,12 +73,12 @@ Preferred manual startup:
 
 The `recon-start` alias should point to:
 
-    alias recon-start='~/recon-pipeline/tools/start_recon_safe.sh'
+    alias recon-start='~/recon-ctl/tools/start_recon_safe.sh'
 
 The safe startup script does this:
 
     sudo -n /usr/local/sbin/recon-safe-preflight
-    SCANNER_USER=reconrun ~/recon-pipeline/scripts/recon_ctl.sh start
+    SCANNER_USER=reconrun ~/recon-ctl/scripts/recon_ctl.sh start
 
 The preflight script:
 
@@ -167,7 +167,7 @@ Expected action:
 
 The VBS wrapper runs:
 
-    C:\Windows\System32\wsl.exe -d kali-linux -u d0k bash /home/d0k/recon-pipeline/tools/recon_watchdog.sh
+    C:\Windows\System32\wsl.exe -d kali-linux -u d0k bash /home/d0k/recon-ctl/tools/recon_watchdog.sh
 
 `recon_watchdog.sh` checks daemon/VPN/ES/queue/disk health and, if the daemon is
 DOWN and VPN+ES are both OK, restarts it via `tools/start_recon_safe.sh`. The VBS
@@ -196,25 +196,25 @@ Safe start:
 
 Health and status:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh health
-    ~/recon-pipeline/scripts/recon_ctl.sh status
-    ~/recon-pipeline/scripts/recon_ctl.sh queue
-    ~/recon-pipeline/scripts/recon_ctl.sh vuln status
-    ~/recon-pipeline/scripts/recon_ctl.sh vuln top
-    ~/recon-pipeline/scripts/recon_ctl.sh ai
-    ~/recon-pipeline/scripts/recon_ctl.sh top 20
-    ~/recon-pipeline/scripts/recon_ctl.sh takeovers
-    ~/recon-pipeline/scripts/recon_ctl.sh watching
-    ~/recon-pipeline/scripts/recon_ctl.sh logs 100
-    ~/recon-pipeline/scripts/recon_ctl.sh space
+    ~/recon-ctl/scripts/recon_ctl.sh health
+    ~/recon-ctl/scripts/recon_ctl.sh status
+    ~/recon-ctl/scripts/recon_ctl.sh queue
+    ~/recon-ctl/scripts/recon_ctl.sh vuln status
+    ~/recon-ctl/scripts/recon_ctl.sh vuln top
+    ~/recon-ctl/scripts/recon_ctl.sh ai
+    ~/recon-ctl/scripts/recon_ctl.sh top 20
+    ~/recon-ctl/scripts/recon_ctl.sh takeovers
+    ~/recon-ctl/scripts/recon_ctl.sh watching
+    ~/recon-ctl/scripts/recon_ctl.sh logs 100
+    ~/recon-ctl/scripts/recon_ctl.sh space
 
 Stop:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh stop
+    ~/recon-ctl/scripts/recon_ctl.sh stop
 
 Clean:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh clean
+    ~/recon-ctl/scripts/recon_ctl.sh clean
 
 ## Passive Vuln Intelligence
 
@@ -235,9 +235,9 @@ Outputs:
 
 Commands:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh vuln status
-    ~/recon-pipeline/scripts/recon_ctl.sh vuln top
-    ~/recon-pipeline/scripts/recon_ctl.sh v2 refresh-vuln
+    ~/recon-ctl/scripts/recon_ctl.sh vuln status
+    ~/recon-ctl/scripts/recon_ctl.sh vuln top
+    ~/recon-ctl/scripts/recon_ctl.sh v2 refresh-vuln
 
 Daemon behavior:
 
@@ -277,10 +277,10 @@ Useful commands:
 
 Run:
 
-    cd ~/recon-pipeline
+    cd ~/recon-ctl
     git status --short
     tools/check_recon_killswitch.sh
-    ~/recon-pipeline/scripts/recon_ctl.sh health
+    ~/recon-ctl/scripts/recon_ctl.sh health
 
 Confirm no scanner-heavy processes are owned by `d0k`:
 
@@ -341,19 +341,19 @@ Priority prefixes:
 
 Check queue:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh queue
+    ~/recon-ctl/scripts/recon_ctl.sh queue
 
 If inbox reaches the cap, discovery may pause. That is expected behavior.
 
 If processing is stuck for a long time:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh stop
+    ~/recon-ctl/scripts/recon_ctl.sh stop
     recon-start
 
 Nuclear reset:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh stop
-    ~/recon-pipeline/scripts/recon_ctl.sh reset-queue
+    ~/recon-ctl/scripts/recon_ctl.sh stop
+    ~/recon-ctl/scripts/recon_ctl.sh reset-queue
     recon-start
 
 ## Takeover Hunter
@@ -372,7 +372,7 @@ It runs in two modes:
 
 Manual check:
 
-    ~/recon-pipeline/scripts/recon_takeover_hunter.sh check api.example.com
+    ~/recon-ctl/scripts/recon_takeover_hunter.sh check api.example.com
 
 Files:
 
@@ -389,15 +389,15 @@ When HIGH or CRITICAL appears:
 5. Submit quickly.
 6. Mark submission:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh submit <host> takeover pending
+    ~/recon-ctl/scripts/recon_ctl.sh submit <host> takeover pending
 
 ## Submission Dedup
 
 After submitting a finding:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh submit www.example.com xss accepted
-    ~/recon-pipeline/scripts/recon_ctl.sh submit api.foo.com sqli pending
-    ~/recon-pipeline/scripts/recon_ctl.sh submit grafana.bar.io rce duplicate
+    ~/recon-ctl/scripts/recon_ctl.sh submit www.example.com xss accepted
+    ~/recon-ctl/scripts/recon_ctl.sh submit api.foo.com sqli pending
+    ~/recon-ctl/scripts/recon_ctl.sh submit grafana.bar.io rce duplicate
 
 This appends to:
 
@@ -411,17 +411,17 @@ Effects:
 
 Inspect:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh dupes
-    ~/recon-pipeline/scripts/recon_ctl.sh dupes example.com
+    ~/recon-ctl/scripts/recon_ctl.sh dupes
+    ~/recon-ctl/scripts/recon_ctl.sh dupes example.com
 
 ## Files and Locations
 
 | Path | Purpose |
 |---|---|
-| `~/recon-pipeline/scripts/` | Repo-managed scripts (single source of truth) |
-| `~/recon-pipeline/tools/start_recon_safe.sh` | Safe manual/Windows startup wrapper |
-| `~/recon-pipeline/tools/enable_recon_killswitch.sh` | Manual nft kill switch restore helper |
-| `~/recon-pipeline/tools/check_recon_killswitch.sh` | Manual kill switch sanity check |
+| `~/recon-ctl/scripts/` | Repo-managed scripts (single source of truth) |
+| `~/recon-ctl/tools/start_recon_safe.sh` | Safe manual/Windows startup wrapper |
+| `~/recon-ctl/tools/enable_recon_killswitch.sh` | Manual nft kill switch restore helper |
+| `~/recon-ctl/tools/check_recon_killswitch.sh` | Manual kill switch sanity check |
 | `/usr/local/sbin/recon-safe-preflight` | Root-owned secure startup preflight |
 | `/etc/sudoers.d/recon-safe-preflight` | Narrow NOPASSWD rule for preflight only |
 | `C:\recon\start_recon_hidden.vbs` | Hidden Windows WSL startup wrapper |
@@ -450,7 +450,7 @@ Inspect:
 
 Check:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh logs 200
+    ~/recon-ctl/scripts/recon_ctl.sh logs 200
 
 Look for:
 
@@ -462,7 +462,7 @@ Look for:
 
 Run:
 
-    cd ~/recon-pipeline
+    cd ~/recon-ctl
     tools/check_recon_killswitch.sh
 
 Then start safely:
@@ -509,7 +509,7 @@ This is bad for target-facing scanner-heavy processes.
 
 Stop recon:
 
-    ~/recon-pipeline/scripts/recon_ctl.sh stop
+    ~/recon-ctl/scripts/recon_ctl.sh stop
 
 Kill leftovers:
 

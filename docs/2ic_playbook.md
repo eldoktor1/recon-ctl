@@ -40,7 +40,7 @@ Bash tool, WSL, AND browser tools (VERIFIED 2026-06-08: MINGW and WSL both exit 
 So you may VERIFY HOWEVER IS MOST EFFECTIVE — direct curl from the Bash tool, the WSL confirmer workers,
 the pipeline scripts, browser tools — you are NOT restricted to the pipeline scripts.
 UNIVERSAL FAIL-CLOSED GUARD (the operator must NEVER be exposed on their real IP): BEFORE any
-target-facing traffic, run the CACHED checker `bash /home/d0k/recon-pipeline/scripts/recon_vpn_check.sh
+target-facing traffic, run the CACHED checker `bash /home/d0k/recon-ctl/scripts/recon_vpn_check.sh
 --cached` (exit 0 = Mullvad-confirmed · 1 = leak · 2 = unknown), or read `~/recon/state/vpn_status.json`
 (`.mullvad==true`). **Do NOT curl am.i.mullvad directly — it rate-limits**; the checker hits it ONLY on a
 NEW exit IP, then caches (the rest is local). Also confirm no `~/recon/state/vpn_down` marker. If exit≠0 /
@@ -248,7 +248,7 @@ The operator WILL create accounts but needs it pre-scripted. For each BAC/IDOR l
 - OUTCOME FEEDBACK (feature 3): read what the operator submitted/won (worked_targets notes / any outcome
   field / findings.db reported rows) and bias ranking toward classes & programs that actually pay out.
 - SELF-MEASURED PRECISION (feature 10): pull the human-decided precision via
-  `MSYS_NO_PATHCONV=1 wsl.exe -d kali-linux -- python3 /home/d0k/recon-pipeline/engine/state.py ai-accuracy`
+  `MSYS_NO_PATHCONV=1 wsl.exe -d kali-linux -- python3 /home/d0k/recon-ctl/engine/state.py ai-accuracy`
   (accepted vs dismissed `real` verdicts) and include the recent hit-rate trend in the card, so we can see
   the agent improving. Be honest if precision is low.
 
@@ -272,7 +272,7 @@ C) REAL-TIME ESCALATION (feature 9): if during the run you CONFIRM a high-severi
 The daemon's Claude loops `ai_idor`, `ai_review`, `ai_monitor` are RETIRED — YOU own those roles. The
 daemon still COLLECTS data + runs the deterministic confirmers (xss/param/exposure via the evidence gate)
 and the cheap haiku `ai_analyze` triage; you consume that and provide ALL the Claude judgment. `state.py`
-= `/home/d0k/recon-pipeline/engine/state.py` (run via WSL).
+= `/home/d0k/recon-ctl/engine/state.py` (run via WSL).
 
 1. **VERIFY THE PENDING QUEUE (replaces ai_review).** Pull confirmed-but-unjudged findings:
    `python3 engine/state.py ai-pending 30` → JSON [{id,host,url,program,signal_class,vuln_class,confidence,

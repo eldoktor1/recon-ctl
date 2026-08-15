@@ -157,7 +157,7 @@ payload="$(jq -nc \
          value: $last_ingest,
          inline: false}
       ],
-      footer: {text: "recon-pipeline · run recon-health for full status"},
+      footer: {text: "recon-ctl · run recon-health for full status"},
       timestamp: $ts
     }]
   }')"

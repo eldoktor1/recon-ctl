@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 
 # --- fixed locations (see CLAUDE.md / operating guide) ---------------------
-REPO_DIR = Path(os.environ.get("RECON_REPO", "/home/d0k/recon-pipeline"))
+REPO_DIR = Path(os.environ.get("RECON_REPO", "/home/d0k/recon-ctl"))
 BASE_DIR = Path(os.environ.get("BASE_DIR", str(Path.home() / "recon")))
 STATE_DIR = BASE_DIR / "state"
 BRIEF_DIR = BASE_DIR / "briefings"
@@ -65,7 +65,7 @@ AI_PROVIDER = (os.environ.get("AI_PROVIDER", "claude").strip().lower() or "claud
 AI_PROVIDER_CMD = os.environ.get("AI_PROVIDER_CMD", "").strip()
 AI_PROVIDER_MODELS = [m.strip() for m in os.environ.get("AI_PROVIDER_MODELS", "").split(",") if m.strip()]
 # claude slugifies the cwd to name the project transcript dir:
-# /home/d0k/recon-pipeline -> ~/.claude/projects/-home-d0k-recon-pipeline/
+# /home/d0k/recon-ctl -> ~/.claude/projects/-home-d0k-recon-ctl/
 _PROJ_SLUG = "-" + str(REPO_DIR).strip("/").replace("/", "-")
 CLAUDE_PROJECT_DIR = Path.home() / ".claude" / "projects" / _PROJ_SLUG
 

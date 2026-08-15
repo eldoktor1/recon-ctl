@@ -343,7 +343,7 @@ try:
 except ImportError:
     print("000"); sys.exit(0)
 url, token, outfile, tmo = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
-hdrs = {"User-Agent": "recon-pipeline true-fresh"}
+hdrs = {"User-Agent": "recon-ctl true-fresh"}
 if token: hdrs["Authorization"] = "Bearer " + token
 try:
     r = req.get(url, headers=hdrs, timeout=(10, tmo))

@@ -53,7 +53,7 @@ $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunL
 
 Register-ScheduledTask -TaskName $TaskName -Action $action `
   -Trigger @($trigger, $atLogon) -Settings $settings -Principal $principal `
-  -Description 'Recovers a wedged WSL2 network stack (wsl --shutdown + safe relaunch) when Mullvad-on-Windows is up but WSL egress is dead. See recon-pipeline/tools/windows/wsl_vpn_watchdog.ps1.' `
+  -Description 'Recovers a wedged WSL2 network stack (wsl --shutdown + safe relaunch) when Mullvad-on-Windows is up but WSL egress is dead. See recon-ctl/tools/windows/wsl_vpn_watchdog.ps1.' `
   -Force | Out-Null
 
 Write-Host "Registered scheduled task '$TaskName' (every $IntervalMin min + at logon) as $me"

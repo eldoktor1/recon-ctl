@@ -9,8 +9,8 @@ set -uo pipefail
 BASE_DIR="${BASE_DIR:-$HOME/recon}"
 LOG_DIR="$BASE_DIR/logs"
 STATE_DIR="$BASE_DIR/state"
-CTL="/home/d0k/recon-pipeline/scripts/recon_ctl.sh"
-SAFE_START="/home/d0k/recon-pipeline/tools/start_recon_safe.sh"
+CTL="/home/d0k/recon-ctl/scripts/recon_ctl.sh"
+SAFE_START="/home/d0k/recon-ctl/tools/start_recon_safe.sh"
 WDOG_LOG="$LOG_DIR/watchdog.log"
 
 mkdir -p "$LOG_DIR"

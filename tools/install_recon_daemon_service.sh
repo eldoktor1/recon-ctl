@@ -10,7 +10,7 @@
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root: sudo bash $0"; exit 1; }
 
-REPO="/home/d0k/recon-pipeline"
+REPO="/home/d0k/recon-ctl"
 UNIT_SRC="$REPO/tools/systemd/recon-daemon.service"
 UNIT_DST="/etc/systemd/system/recon-daemon.service"
 SYSTEMCTL="$(command -v systemctl)"

@@ -18,7 +18,7 @@ Step-by-step from `git clone` to a running pipeline. For the one-command version
 ## 1. Clone + bootstrap
 
 ```bash
-git clone <this-repo> ~/recon-pipeline && cd ~/recon-pipeline
+git clone <this-repo> ~/recon-ctl && cd ~/recon-ctl
 ./install.sh
 ```
 

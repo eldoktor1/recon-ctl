@@ -4,7 +4,7 @@
 # Read-only w.r.t. the pipeline; never touches egress/daemon.
 set -uo pipefail
 
-REPO="/home/d0k/recon-pipeline"
+REPO="/home/d0k/recon-ctl"
 UI="$REPO/ui"
 BACKEND="$UI/backend"
 FRONTEND="$UI/frontend"

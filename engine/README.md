@@ -1,4 +1,4 @@
-# recon-pipeline v3 — detection → validation → report
+# recon-ctl v3 — detection → validation → report
 
 The v3 layer turns detection into **confirmed, reported, non-duplicate** findings
 and adds the safety scaffolding to run unattended for months. It does **not**

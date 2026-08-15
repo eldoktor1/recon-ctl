@@ -9,8 +9,8 @@ User=d0k
 Group=d0k
 Environment=HOME=/home/d0k
 Environment=PATH=/home/d0k/.local/bin:/home/d0k/go/bin:/home/d0k/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-WorkingDirectory=/home/d0k/recon-pipeline
-ExecStart=/usr/bin/env bash /home/d0k/recon-pipeline/tools/recon_daemon_keepalive.sh
+WorkingDirectory=/home/d0k/recon-ctl
+ExecStart=/usr/bin/env bash /home/d0k/recon-ctl/tools/recon_daemon_keepalive.sh
 Restart=always
 RestartSec=10
 KillMode=process

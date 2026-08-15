@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fix: discord webhook files not readable by reconrun + known_hosts not touchable by d0k
-# Run as d0k: bash ~/recon-pipeline/tools/fix_perms.sh
+# Run as d0k: bash ~/recon-ctl/tools/fix_perms.sh
 
 set -euo pipefail
 

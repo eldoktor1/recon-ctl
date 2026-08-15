@@ -1,6 +1,6 @@
 # CLAUDE_OPERATING_GUIDE — how the assistant works this pipeline without friction
 
-This is the assistant's own operating manual for the recon-pipeline. It exists so a session
+This is the assistant's own operating manual for the recon-ctl. It exists so a session
 never has to re-derive how to invoke things, what's safe to run, what's currently running, or
 which shell gotchas waste time. Keep it current; it is the single source of truth for *mechanics*
 (CLAUDE.md remains the source of truth for *doctrine/strategy*).
@@ -12,10 +12,10 @@ Last verified: 2026-07-11.
 ## 0. TL;DR — the three things that remove all friction
 
 1. **Run any pipeline feature via** `recon <sub> [args]` — a wrapper at `~/.cargo/bin/recon` (on the
-   login-shell PATH) that `exec`s `bash /home/d0k/recon-pipeline/scripts/recon_ctl.sh "$@"`. The
+   login-shell PATH) that `exec`s `bash /home/d0k/recon-ctl/scripts/recon_ctl.sh "$@"`. The
    `recon-<x>` aliases are **zsh-interactive-only** (defined in `~/.recon_aliases`) and 404 in the
    non-interactive `bash -lc` the Bash tool uses. Fallback that always works: `bash
-   /home/d0k/recon-pipeline/scripts/recon_ctl.sh <sub>`.
+   /home/d0k/recon-ctl/scripts/recon_ctl.sh <sub>`.
 2. **For any non-trivial shell, write a script file, don't inline it.** The `wsl.exe … bash -lc '…'`
    double-hop eats `$@`, mangles quotes, converts `/tmp`→`C:\…`, and the script's global
    `IFS=$'\n\t'` breaks space-splitting. Reliable recipe:

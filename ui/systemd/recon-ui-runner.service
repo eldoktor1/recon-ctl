@@ -1,12 +1,12 @@
 [Unit]
 Description=recon-ui hunt runner (executes lane jobs for the sandboxed UI)
-Documentation=https://github.com/eldoktor1/recon-pipeline
+Documentation=https://github.com/eldoktor1/recon-ctl
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
-WorkingDirectory=/home/d0k/recon-pipeline
+WorkingDirectory=/home/d0k/recon-ctl
 # Daemon-equivalent environment so lanes behave exactly as in the daemon. This
 # service is intentionally NOT sandboxed: target lanes sudo -> reconrun, which
 # NoNewPrivileges/cap-drop would block. Escalation is bounded by the reconrun
@@ -17,7 +17,7 @@ Environment=PATH=/home/d0k/.local/bin:/home/d0k/go/bin:/home/d0k/.cargo/bin:/usr
 Environment=ES_URL=http://127.0.0.1:9200
 Environment=INDEX_NAME=recon_alive
 Environment=SCANNER_USER=reconrun
-ExecStart=/home/d0k/recon-pipeline/ui/backend/.venv/bin/python -m ui.backend.hunt_runner
+ExecStart=/home/d0k/recon-ctl/ui/backend/.venv/bin/python -m ui.backend.hunt_runner
 Restart=always
 RestartSec=5
 KillMode=mixed

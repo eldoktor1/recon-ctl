@@ -1,4 +1,4 @@
-# recon-pipeline — standing operating doc
+# recon-ctl — standing operating doc
 
 Reference for every session. Established through a full session of manual
 verification. Keep it tight; update it when a principle changes.

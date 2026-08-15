@@ -10,7 +10,7 @@ responsible-use boundary and the trust model before you run anything.
 ## Getting set up
 
 ```bash
-git clone <this-repo> ~/recon-pipeline && cd ~/recon-pipeline
+git clone <this-repo> ~/recon-ctl && cd ~/recon-ctl
 ./install.sh            # idempotent bootstrap — safe to re-run
 ```
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=recon pipeline daemon (systemd-supervised, bounded restarts)
-Documentation=https://github.com/eldoktor1/recon-pipeline
+Documentation=https://github.com/eldoktor1/recon-ctl
 After=network-online.target
 Wants=network-online.target
 # HARD crash-loop guard: if the daemon dies more than StartLimitBurst times within
@@ -21,7 +21,7 @@ Environment=PATH=/home/d0k/.local/bin:/home/d0k/go/bin:/home/d0k/.cargo/bin:/usr
 Environment=ES_URL=http://127.0.0.1:9200
 Environment=INDEX_NAME=recon_alive
 Environment=SCANNER_USER=reconrun
-WorkingDirectory=/home/d0k/recon-pipeline
+WorkingDirectory=/home/d0k/recon-ctl
 # Preflight sets the reconrun sudoers rule + clears stale nft (passwordless rule
 # already installed). Non-fatal (leading '-') so a preflight hiccup doesn't wedge
 # startup; the daemon's own vpnguard loop + the per-loop vpn_down gate keep egress
@@ -29,7 +29,7 @@ WorkingDirectory=/home/d0k/recon-pipeline
 ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/recon-safe-preflight
 # The daemon's master housekeeping loop stays in the foreground, so systemd tracks
 # it as the main process and supervises it directly (no nohup, no shell keepalive).
-ExecStart=/usr/bin/env bash /home/d0k/recon-pipeline/scripts/recon_daemon.sh
+ExecStart=/usr/bin/env bash /home/d0k/recon-ctl/scripts/recon_daemon.sh
 # Restart ONLY on failure (crash/SIGKILL). A clean stop (systemctl stop -> SIGTERM ->
 # the daemon's trap -> exit 0) and a maintenance-lock exit 0 do NOT restart.
 Restart=on-failure

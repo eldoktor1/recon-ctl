@@ -884,7 +884,7 @@ def write_fixprompts(checks: list) -> str | None:
         L.append(f"> {c['detail']}")
         L.append("")
         L.append("```")
-        L.append(f"In the recon-pipeline repo, address self-audit finding `{c['id']}`:")
+        L.append(f"In the recon-ctl repo, address self-audit finding `{c['id']}`:")
         L.append(f"  {c['detail']}")
         if c.get("hits"):
             for name, refs in c["hits"].items():
