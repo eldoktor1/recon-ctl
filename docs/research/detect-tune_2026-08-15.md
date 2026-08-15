@@ -1,24 +1,3 @@
 # Research digest — detect-tune — 2026-08-15
 
-# Research digest — detect-tune — 2026-08-15
-
-## 1. CVE-2026-8457 — WooCommerce Social Login unauthenticated admin takeover (HIGH PRIORITY, unauth-safe, WordPress lane)
-Critical (CVSS 9.8) auth bypass in WPWeb's **WooCommerce – Social Login** plugin, ≤2.8.7, disclosed 2026-08-01. Plugin decodes the Apple `id_token`'s base64 payload only — **no signature verification against Apple's public keys, no iss/aud/exp check**. The security nonce needed to invoke the login flow is exposed to unauthenticated visitors via a localized JS object on the login page. Net effect: an unauthenticated attacker reads the leaked nonce, forges an `id_token` payload containing any target user's email, and gets an authenticated session as that user — including admin. Fixed in 2.8.8.
-- **Detection**: fingerprint plugin presence via `/wp-content/plugins/woocommerce-social-login/readme.txt` version header or the login-page JS bundle; flag any in-scope WordPress+WooCommerce host on ≤2.8.7. This is a genuine unauth CONFIRM candidate (not just version-match LEAD) since the whole primitive — nonce read → forged token → session — is unauthenticated and non-destructive to verify (log in as a throwaway/own test account's email, never a real admin's).
-- Sources: [IONIX threat center](https://www.ionix.io/threat-center/cve-2026-8457/), [GitHub Advisory GHSA-qwc9-q2f8-q72q](https://github.com/advisories/GHSA-qwc9-q2f8-q72q), [SearchEngineJournal writeup](https://www.searchenginejournal.com/woocommerce-social-login-wordpress-plugin-enables-full-site-takeover/584601/)
-
-## 2. CVE-2026-50052 — Varnish/Vinyl Cache HTTP/2 request smuggling, distinct from the CVE-2026-34475 we already track (feeds class-request-smuggling.md + class-nday.md)
-Vinyl Cache <9.0.1, Varnish Cache <9.0.3/8.0.2/6.0.18: deficient HTTP/2→HTTP/1.1 pseudo-header/framing conversion lets an attacker craft an H2 request the cache sees as one request but the backend parses as two → desync → cache poisoning/auth bypass/info disclosure. **Gate: only exploitable when the operator has explicitly enabled `+http2` in the `feature` param** (disabled by default) — so version-match alone is not enough, same discipline as our other KEV clamps.
-- **Detection tooling**: Detectify published a purpose-built PoC/scanner — [detectify/Varnish-H2-Request-Smuggling](https://github.com/detectify/Varnish-H2-Request-Smuggling) — worth wiring into the n-day lane for any in-scope Varnish host confirmed serving HTTP/2 (check `alt-svc`/ALPN h2 on the Varnish-fronted edge).
-- Passive tell: persistent mismatch between frontend HTTP/2 request count and backend HTTP/1.1 request count (not something we can measure externally, but useful if we ever get log access).
-- Sources: [SentinelOne CVE-2026-50052](https://www.sentinelone.com/vulnerability-database/cve-2026-50052/), [Vinyl-cache VSV00019](https://vinyl-cache.org/security/VSV00019.html), [detectify/Varnish-H2-Request-Smuggling](https://github.com/detectify/Varnish-H2-Request-Smuggling)
-
-## 3. CVE-2026-28139 — Ajax Search Lite unauthenticated PHP Object Injection (WATCH-LIST, LEAD-not-P0)
-Ajax Search Lite ≤4.14.4, disclosed 2026-08-04, CVSS 9.8, unauthenticated PHP Object Injection (patched 4.14.5). Public writeups do not disclose the vulnerable parameter/gadget chain. Per our own KEV-clamp doctrine: **PHP Object Injection without a demonstrated POP gadget chain in the target's actual plugin set is not remote code execution** — treat a version-match as LEAD only, confirm requires either a public gadget PoC (not yet published) or building one against the target's installed plugins. Fingerprint plugin presence (`/wp-content/plugins/ajax-search-lite/readme.txt`) and hold as watch-list until a gadget chain surfaces.
-- Sources: [Patchstack VDP listing](https://vdp.patchstack.com/database/Wordpress/Plugin/ajax-search-lite/vdp), [penligent WordPress 2026 CVE roundup](https://www.penligent.ai/hackinglabs/wordpress-vulnerabilities/)
-
-## 4. WAF bypass research reinforces our SQLi differential primitive needs a JSON-body variant (minor addendum, class-sqli.md)
-Academic/practitioner research (BWAFSQLi framework, tested against 11 WAFs incl. AWS/Cloudflare/F5/Imperva/Palo Alto) confirms **JSON-encoded injection payloads bypass signature-based WAF rules that a plain query-string `'`/`''` differential would otherwise trigger** — the WAF's regex rules are tuned for URL/form params, not JSON body values. Actionable for us: when our `'` vs `''` differential returns a clean/no-diff result on a JSON-API endpoint behind a WAF, don't conclude "not injectable" — retry the same differential with the payload placed inside a JSON body field before calling it dead (avoids a false-negative that masks a real SQLi).
-- Source: [BWAFSQLi (ACM TOSEM)](https://dl.acm.org/doi/10.1145/3788286)
-
----
+You've hit your session limit · resets 3:50pm (America/Los_Angeles)
