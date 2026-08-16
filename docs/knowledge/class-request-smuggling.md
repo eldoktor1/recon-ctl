@@ -70,7 +70,73 @@ Roblox staging, CrowdStrike Falcon, eToro stg) — the Expect-header 0.CL varian
 specifically the one that bypasses WAF TE/CL rules, and h2→h1 downgrade at those CDNs
 is exactly the substrate. Operator, residential, Burp + HTTP Request Smuggler v3.0.
 
+---
+
+# 2026 DELTA — the HTTP Terminator vectors (added 2026-08-15; research published 2026-08-07)
+
+James Kettle / PortSwigger, Black Hat USA 2026: an AI-assisted pipeline ("HTTP Terminator")
+generated ~30,000 candidate desync vectors, ran them against 30,000 BBP/VDP-authorized sites
+24/7, and confirmed **~700 vulnerable targets** — banks, government infra, security products,
+an airport. **Four vectors are NEW on top of the 2025 material above.** Treat these as the
+freshest desync surface available; they were public for days, not years.
+
+## N1 — Dual-matching Content-Length  ★ highest value
+**Trigger:** send `Content-Length` **twice with identical, valid values**. RFC-legal-looking,
+so WAF/TE-focused rules don't fire. Vulnerable front-ends treat the request as **zero-length**
+→ straight to response-queue poisoning.
+**Detect:** "clean request" analysis — an RFC-compliant request that draws **more than one
+response**. That multiple-response signal is the discriminator, not a timing blip.
+**Prevalence (Kettle):** popped "a juicy SSO server" and "most of the public infrastructure of
+a particular bank." This is the one to try first.
+
+## N2 — `Content-Type: multipart/byteranges`  ★ broadest hit-rate
+**Trigger:** standard **CL.0** payload structure carrying `Content-Type: multipart/byteranges`.
+Origin of the idea: RFC 2616 §19.2, which governs *response* processing — servers that reuse
+response-parsing logic on requests mis-handle it.
+**Prevalence:** worked across **multiple distinct server implementations**, exposed **200+
+websites** incl. a US bank. Highest breadth of the four → best fit for a sweep over our in-scope
+h2→h1-downgrade hosts.
+
+## N3 — Dangling-byte (RQP reliability primitive, not a new trigger)
+**What:** send the smuggled request **one byte short**. The back-end's second response isn't
+produced until a victim request supplies the missing byte — which **removes the race condition**
+that makes response-queue poisoning flaky. Survived as the only winner out of 16 tested
+RQP-enhancement hypotheses.
+**Prevalence:** "extremely effective on every target with a method-agnostic back-end."
+**Use:** this is what turns an unreliable RQP LEAD into a clean reproducible PoC. Note it is
+*more* invasive by design (it waits on a real victim request) — see the safety line below; use
+our own follow-up request as the trigger, off-peak, never a real user's.
+
+## N4 — Shared-Parser Confusion (the class, not a payload)
+**Concept:** servers that use the **same parsing code for requests and responses** let you reach
+*response-only* features via a crafted request (Kettle's example: a server processing `Set-Cookie`
+in a **request**). N2 is one instance of it. Kettle calls it "one of the most significant
+discoveries of this research"; at scale it is still **theoretical** — i.e. an open seam to mine,
+not a shipped payload. Reasoning lane, not a scan lane.
+
+## Tooling shipped alongside (2026-08)
+- **`HTTP Request Smuggler`** updated with the new vectors — works on Burp **Community, Pro and
+  DAST**. This is the cheap path: the vectors land in the extension we already run.
+- **Turbo Intruder** with an **MCP interface** (pairs with our Burp MCP setup, `tool-burp-pro.md`).
+- **Param Miner** updated with the protocol-ruler technique.
+- **`github.com/portswigger/http-terminator`** (AGPL-3.0) — 4 stages: `seeker` (Claude extracts
+  techniques from docs, py3.11+, API key), `flamer` (Claude generates malformed test cases, Java
+  21), `validator` (**Burp extension**, Java 21), `investigator` (**needs Claude Code** + MCP
+  simulator + Burp). Only seeker/flamer are self-contained; validator/investigator need Burp.
+- Community: `crlf-desyncs`, `crlf-powered-desync-scanner` (from PortSwigger's CRLF-powered
+  desync research).
+
+## Dup-risk read (the MOTTO applies)
+The **techniques** are days old, but Kettle's 30,000-site sweep is **already reported** — any host
+in that set is burned. Our edge is the complement: in-scope hosts that were **not** in a
+top-30k-style sweep — the deep/fresh CT surface, staging and regional hosts, the WAF-hardened DIG
+leads. Racing the same big-name targets everyone will now scan is the dup trap.
+
 ## Sources
 - PortSwigger Research — "HTTP/1.1 must die: the desync endgame" (2025)
 - PortSwigger Research — "Browser-Powered Desync Attacks" (client-side desync)
-- Burp ext: `HTTP Request Smuggler` v3.0 (parser-discrepancy detection)
+- PortSwigger Research — "Can AI do novel security research? Meet the HTTP Terminator" (2026-08-07)
+  <https://portswigger.net/research/http-terminator>
+- PortSwigger Research — "CRLF-Powered Desync Attacks: Beheading HTTP Streams"
+- The Hacker News — AI-Assisted HTTP Terminator … Apache Zero-Day (CVE-2026-63078, ATS), 2026-08-07
+- Burp ext: `HTTP Request Smuggler` v3.0 + 2026 vector update

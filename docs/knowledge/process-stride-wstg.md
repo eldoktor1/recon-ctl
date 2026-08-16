@@ -69,6 +69,14 @@ RULES:
   worklist; the WSTG walk is the coverage guarantee. Both run — they are not alternatives.
 
 ## Phase 3 — WSTG WALK  (category by category: INFO→CONF→IDNT→ATHN→ATHZ→SESS→INPV→ERRH→CRYP→BUSL→CLNT→APIT)
+
+> **HARD DOCTRINE — WALK THE CHECKLIST, DO NOT CHASE.** Work the categories IN ORDER and finish the category
+> you are in before starting the next. A hot lead found mid-walk is **recorded as a follow-up, never followed
+> immediately**. The ONLY permitted interrupt is an unavoidable prereq (owned accounts, a token, a registered
+> app) — and the moment it lands you return to the exact test you left. Skipping ahead to the interesting
+> class *feels* productive while leaving whole categories permanently unwalked; that is the failure mode this
+> SOP exists to prevent. Coverage is the deliverable — the interesting bug is a by-product of coverage.
+
 Walk in order. Per test, run this loop:
 
 1. **READ the KB methodology** for the category (mapping in `workspace._WSTG_KB`) and apply EVERY applicable
@@ -123,6 +131,39 @@ On pause: update `~/recon/state/hunt_cursor.md` with the current phase, the open
 in flight, so a comeback never loses the thread.
 
 ---
+
+## Standing rules of this workflow (operator-locked 2026-08-16)
+These bind every program walk, not just the one in front of you.
+1. **Walk the checklist, do not chase.** Categories in order; finish the one you are in. Hot lead ⇒ follow-up,
+   not a detour. Only an unavoidable prereq may interrupt, and you return to the exact test you left.
+2. **Every probe names its WSTG id.** If a request doesn't belong to a test on the checklist, you are chasing.
+3. **Summarise as a visual Artifact**, never a wall of terminal text, and never hand-written counts.
+   Generate it: `python3 tools/walk_report.py <workspace-key> <out.html>` renders EVERY sub-step with its
+   recorded outcome (each WSTG test + note, each STRIDE threat + note, accounts, recorded knowledge) straight
+   from the workspace. Publish that file, and republish the SAME path so the artifact keeps one stable URL.
+   The board is a drill-down record — "what did each test find?" — not a scoreboard.
+4. **Dev Brave only** (`brave-recon-debug`, CDP :9222, proxied into Burp) — never the daily browser, and never
+   a browser that is split-tunnelled out of Mullvad (`chrome.exe` is). See [[dev-brave-for-bug-bounty]].
+5. **Burp + dev Brave must be running BEFORE Claude starts** — MCP binds at session start and cannot reconnect.
+   Dedicated Burp project per program; in-scope hosts in Auto-Approved HTTP Targets.
+6. **Hunter tag first, and PROVE it lands.** Set the program's mandated UA (Burp Match&Replace for browser
+   traffic; written into the raw request for Repeater/MCP calls), then verify with a unique marker request
+   before any real testing. See [[ywh-hunter-tag]].
+7. **Read host_notes before ranking anything.** Prior worked-knowledge kills angles and prevents duplicate work.
+8. **Where bot management is present (Akamai etc.), drive forms BY HAND.** CDP-driven form filling trips the
+   sensor (`_abck` flips to `~-1~`) and produces misleading generic errors; the operator clicks, Claude reads Burp.
+9. **Burp proxy-history reads are oldest-first** (`offset 0`) — use a unique marker + regex to find recent
+   traffic, or you will analyse stale requests and draw the wrong conclusion.
+10. **Prefer offline oracles over live enumeration** — the app's own JS bundles and public reverse-engineering
+    clients map an internal API far more cheaply and quietly than probing, and stay inside scanner bans.
+11. **Keep step notes SHORT — verdict first.** A step note is 1-3 sentences: the verdict, the one piece of
+    evidence that proves it, and anything carried forward. Target under ~250 characters. Long-form context
+    belongs in a workspace note, not under every checklist row — at 97 tests the board becomes unreadable
+    and stops being used. Write it tight the first time.
+12. **Report each stage before moving on.** At the end of every phase AND every WSTG category, SHOW the
+    operator that stage's recorded notes and results — each test id, its status, and what it actually found
+    (or what was cleared and why). A count is not a report. Do not open the next category until the finished
+    one has been presented and the artifact regenerated.
 
 ## Hard lines (never overridden by any phase above)
 Only in-scope + paying assets. IDOR/BAC uses two OWNED accounts. Never harvest third-party data, move money,
