@@ -1134,7 +1134,9 @@ _STEP_CARD = (
     "the operator acts on, so every value must be concrete and copied from THIS engagement:\n"
     "{\n"
     '  "found":  [{"what":"<the specific thing observed>", "evidence":"<real host/url/param/response>",\n'
-    '              "why":"<why it matters for THIS test>"}],\n'
+    '              "why":"<why it matters for THIS test>",\n'
+    '              "technique":"<how it was established: the tool/method — burp-repeater, brave-dom,\n'
+    '                            recon-params confirm, manual request, ES/jsintel review, …>"}],\n'
     '  "record": {"status":"done|finding|na|manual",\n'
     '             "note":"<1-3 plain sentences of worked-knowledge: what was tested, what was found or\n'
     '                      cleared and WHY, what is left — this is persisted verbatim>"},\n'
@@ -1538,7 +1540,10 @@ def parse_step_card(text: str) -> dict[str, Any] | None:
             continue
         found.append({"what": what[:300],
                       "evidence": str(row.get("evidence") or "")[:500],
-                      "why": str(row.get("why") or "")[:300]})
+                      "why": str(row.get("why") or "")[:300],
+                      # WSTG requires the record to say HOW a finding was established, not just
+                      # what was found — otherwise it cannot be re-verified or reported.
+                      "technique": str(row.get("technique") or "")[:120]})
     rec = data.get("record") if isinstance(data.get("record"), dict) else {}
     status = str(rec.get("status") or "").strip().lower()
     record = {"status": status if status in WSTG_STATUS or status == "manual" else "",

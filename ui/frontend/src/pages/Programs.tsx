@@ -611,8 +611,10 @@ function GuidedTab({ ws, onChanged, onTask }:
   const hostActions = useHostActions();
   const { data: ref } = useFetch<WstgReference>("/api/wstg/reference");
   const enc = encodeURIComponent(ws.key);
-  // resume the step the operator was last on for THIS program (survives navigation/reload)
-  const [idx, setIdx] = useState(() => getNum(`guided-idx:${ws.key}`, 0));
+  // Resume the step the operator was last on for THIS program (survives navigation/reload).
+  // -1 means "never opened this program" — see the landing effect below, which picks a starting
+  // point instead of always dropping on step 1.
+  const [idx, setIdx] = useState(() => getNum(`guided-idx:${ws.key}`, -1));
   const [host, setHost] = useState("");
   const [canned, setCanned] = useState<string | null>(null);
   // tid of the guidance task streaming into the current step's GuideBox (rendered as markdown).
@@ -642,6 +644,30 @@ function GuidedTab({ ws, onChanged, onTask }:
     ...ws.wstg.map((w) => ({ phase: "wstg" as const, key: w.id })),
   ], [ws.wstg]);
 
+  const strideCount = useMemo(() => (["S", "T", "R", "I", "D", "E"] as const)
+    .reduce((n, c) => n + ((ws.stride?.[c] || []).length), 0), [ws.stride]);
+
+  // WHERE A PROGRAM OPENS. Landing on step 1/103 — an empty STRIDE box — is the checklist-driven
+  // opening WSTG argues against ("derive security-risk-driven test cases to validate the most
+  // likely attack scenarios"). So: no threat model yet ⇒ start at STRIDE, because modelling is
+  // genuinely the first job. Model exists ⇒ open on the highest-relevance test still untouched,
+  // which is what the model was FOR. Only applies on first open; an explicit position is kept.
+  useEffect(() => {
+    if (idx >= 0) return;
+    if (!strideCount) { setIdx(0); return; }
+    const rank: Record<string, number> = { high: 0, medium: 1, low: 3, na: 9 };
+    let best = -1, bestRank = 99;
+    ws.wstg.forEach((w) => {
+      if ((w.status || "todo") !== "todo") return;
+      const r = rank[w.relevance || ""] ?? 2;      // unranked sits between medium and low
+      if (r < bestRank) {
+        const i = steps.findIndex((s) => s.phase === "wstg" && s.key === w.id);
+        if (i >= 0) { best = i; bestRank = r; }
+      }
+    });
+    setIdx(best >= 0 ? best : 0);
+  }, [idx, strideCount, ws.wstg, steps]);
+
   const wstgById = useMemo(() => new Map(ws.wstg.map((w) => [w.id, w])), [ws.wstg]);
   // surface-aware relevance per WSTG test (hot = matches surface/findings, cold = likely N/A)
   const sig = useMemo(() => programSignals(ws), [ws.hosts, ws.findings]);
@@ -662,14 +688,14 @@ function GuidedTab({ ws, onChanged, onTask }:
   useEffect(() => {
     setHost(""); setCanned(null); setWorking(null);
     // reconnect to this step's persisted guide task (if any) instead of clearing the box
-    const s = steps[Math.min(idx, Math.max(0, steps.length - 1))];
+    const s = steps[Math.min(Math.max(0, idx), Math.max(0, steps.length - 1))];
     setGuideTid(s ? getTask(guideKey(s.phase, s.key)) : null);
     setGuideSid(s ? localStorage.getItem(sidKey(s.phase, s.key)) : null);
   }, [idx, steps, guideKey, sidKey]);
   // remember the current step per program so returning resumes here
-  useEffect(() => { setNum(`guided-idx:${ws.key}`, idx); }, [idx, ws.key]);
+  useEffect(() => { if (idx >= 0) setNum(`guided-idx:${ws.key}`, idx); }, [idx, ws.key]);
 
-  const clamped = Math.min(idx, Math.max(0, steps.length - 1));
+  const clamped = Math.min(Math.max(0, idx), Math.max(0, steps.length - 1));
   const step = steps[clamped];
 
   const wsRef = useRef(ws); wsRef.current = ws;
@@ -1093,7 +1119,7 @@ function GuidedIntel({ ws, onHost, relHosts = [] }:
 // The stream above is the reasoning; this is the part you act on. Parsed server-side so the lane
 // ids are validated against the same table the runner uses.
 type StepCardT = {
-  found: { what: string; evidence: string; why: string }[];
+  found: { what: string; evidence: string; why: string; technique?: string }[];
   record: { status: string; note: string };
   pursue: { label: string; why: string; priority: string; action: string | null; target: string | null; cmd: string }[];
 };
@@ -1195,7 +1221,13 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
                 <div className="min-w-0 flex-1">
                   <div className="text-[var(--color-ink)]">{f.what}</div>
                   {f.evidence && <div className="mono break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</div>}
-                  {f.why && <div className="text-[10px] text-[var(--color-ink-faint)]">{f.why}</div>}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {f.why && <span className="text-[10px] text-[var(--color-ink-faint)]">{f.why}</span>}
+                    {f.technique && (
+                      <span className="mono rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] text-[var(--color-ink-faint)]"
+                        title="how this was established">via {f.technique}</span>
+                    )}
+                  </div>
                 </div>
                 {isStride && (
                   <button onClick={() => addThreat(f, i)} disabled={logged[i]}
@@ -1715,7 +1747,7 @@ function StageFindings({ ws, onGoToStep }:
   { ws: WorkspaceDetail; onGoToStep: (phase: "wstg", id: string) => void }) {
   const stages = useMemo(() => {
     const out: { id: string; name: string; cat: string; status: string;
-                 found: { what: string; evidence: string; why: string }[]; at?: string }[] = [];
+                 found: { what: string; evidence: string; why: string; technique?: string }[]; at?: string }[] = [];
     for (const w of ws.wstg) {
       const f = w.card?.found || [];
       if (f.length) out.push({ id: w.id, name: w.name, cat: w.category, status: w.status, found: f, at: w.card?.at });

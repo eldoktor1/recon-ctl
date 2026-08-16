@@ -134,7 +134,7 @@ export interface WstgItem {
   // What the last run of this step FOUND, persisted so navigating away does not lose it.
   // `suggested` is what the step proposed; the accepted verdict is the item's own status/note.
   card?: {
-    found: { what: string; evidence: string; why: string }[];
+    found: { what: string; evidence: string; why: string; technique?: string }[];
     pursue: { label: string; why: string; priority: string; action: string | null; target: string | null; cmd: string }[];
     suggested?: { status?: string; note?: string };
     at?: string;
@@ -189,7 +189,7 @@ export interface WorkspaceDetail {
   // What each STRIDE category's last guided run found, kept so a worked category is not blank
   // on return. Keyed by category letter; threats themselves live in `stride`.
   stride_cards?: Record<string, {
-    found: { what: string; evidence: string; why: string }[];
+    found: { what: string; evidence: string; why: string; technique?: string }[];
     pursue: { label: string; why: string; priority: string; action: string | null; target: string | null; cmd: string }[];
     suggested?: { status?: string; note?: string };
     at?: string;
