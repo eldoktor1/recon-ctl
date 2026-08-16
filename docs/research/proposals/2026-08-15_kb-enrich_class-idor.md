@@ -1,42 +1,63 @@
 # PROPOSAL (proposal) for docs/knowledge/class-idor.md — kb-enrich 2026-08-15
 _Review and apply manually; not auto-merged into the KB._
 
-## 2026-08-15 addition — empirical BOLA taxonomy (source: arxiv.org/abs/2605.25865, 84 confirmed cases)
+## Presigned-URL generation endpoint as an object-ref IDOR surface (added 2026-08-15)
 
-### Six BOLA families (know all of them, not just direct-object-reference)
-1. **Action-Level Object BOLA (41.7%, MOST COMMON)** — unauthorized *state-changing* op, not read.
-   Pattern: attacker supplies victim's identifier (email/id) in a request BODY to a mutating endpoint
-   without the server cross-checking it against the authenticated session. Example (Mozilla real case):
-   `POST /v1/account/destroy` with victim's email in body, no session-email verification → account deleted.
-   **Implication for us: our IDOR ranker currently weights read/GET endpoints heavily — state-changing
-   POST/PUT/DELETE endpoints that accept an object-owner field in the BODY (not just the URL) are now the
-   single largest confirmed BOLA family and should be ranked at least as high.**
-2. **Direct Object Reference (36.7%)** — classic ID-in-URL swap. Still dominant; sequential integers are
-   36.9% of all identifier types even in 2023-2026 disclosures from *mature* programs.
-3. **Tenant Isolation BOLA (8.3%)** — arbitrary `organization_id`/`tenant_id`/`workspace_id` param lets
-   cross-org access (real case: HackerOne's own `POST /bugs.json` accepting arbitrary org_id).
-4. **Workflow-Context BOLA (6.0%)** — authorization checked at object CREATION time but never re-evaluated
-   as the object's lifecycle changes (deactivated user, archived record) — stale permission grants.
-5. **Chained Disclosure BOLA (4.8%)** — requires harvesting an identifier from one endpoint before it's
-   usable against a second, unrelated endpoint. Worth flagging endpoint PAIRS, not just singles.
-6. **Object Rebinding BOLA (2.4%)** — server trusts a client-supplied ownership field in the body
-   (`owner_id`, `msg.Sender`) instead of deriving ownership from the session.
+Distinct from the "where the id hides" swap-the-session-object pattern already in this doc: the
+**endpoint that MINTS a presigned S3/GCS URL** is itself an authz-critical resolver, and it's rarely
+tested as one — the crowd tests the resulting signed URL's expiry, not whether the server should have
+signed THAT key for THIS caller at all.
 
-### Identifier-type exploitation notes
-- GraphQL global IDs (9.6% of cases): base64 "opaque" IDs decode to `Gid://App/Model/<sequential-int>` —
-  decode/increment/re-encode. See [[class-graphql]] cross-ref below.
-- Non-sequential IDs (UUID/hash, 39.2%) are NOT automatically safe — the ID is usually leaked via a
-  *different* endpoint (listing/search/notification/webhook payload) even when the primary endpoint is
-  unguessable. Always check adjacent endpoints for ID leakage before writing off a UUID-keyed resource.
+### The test
+1. Find any endpoint returning a presigned URL (`getObject`/`get-pre-signed-url`/`generate-upload-url`/
+   `s3_key`/`document`/`filePath` params — grep jsintel endpoints for `presign`/`s3`/`signed-url`).
+2. As account A, capture the request; note the object-key parameter (often sequential/predictable:
+   `pdfs/<userId>/receipt.pdf`, `uploads/<accountId>/...`).
+3. Swap the key to account B's (owned) path — e.g. `pdfs/124/receipt.pdf` — while authenticated as A.
+   **If the server signs a URL for B's object without checking A owns that key = IDOR.** (Real case:
+   $20k payout, S3 bucket misconfig of presigned URLs leaking all users' attachments.)
+4. Root-path / empty-parameter probes (safe, read-only, worth trying before the swap):
+   - `key=/` or `filePath=/` → some implementations return a signed URL to the BUCKET ROOT →
+     `ListBucketResult` (full object enumeration) instead of one file.
+   - `bucketName=` / `objectKey=` (empty) → some signing wrappers fall back to listing all buckets
+     (`ListAllMyBucketsResult`) or a default/wrong bucket.
+   - Path traversal in a custom (non-AWS-SDK) signing wrapper: `?key=../../../` — malformed input to a
+     regex-based key extractor can normalize to the bucket root and sign a listing URL. Also try URL-
+     confusing input like `{"url":"https://.x./example-bucket"}` against custom URL-parsing signers.
+   These are provenance-confirmed the moment they return bucket-listing content instead of a 403/404 —
+   no swap needed, straight LEAD→CONFIRMED on read-only probe.
 
-### Severity signal
-- Horizontal (peer-to-peer) is 85.7% of cases but Vertical (priv-esc, standard-user→admin-object) is only
-  11.9% of cases yet disproportionately Critical severity — worth flagging vertical candidates for
-  priority even though they're rarer.
-- Action distribution: Read 52.4%, Modify 20.2%, Delete 15.5% (often irreversible + evades monitoring),
-  Trigger 10.7% (forced workflow initiation — e.g. re-sending a payment/notification as another user).
+### POST-policy condition fuzzing (upload direction — presigned POST, not GET)
+When the app hands back a presigned **POST** (browser-direct-upload pattern: `url` + `fields` incl.
+`policy`/`signature`), the policy document's conditions are client-visible (base64 in the `policy`
+field) and worth decoding + testing for bypass, independent of the IDOR angle above:
+- `["starts-with","$key",""]` (empty prefix) → key is fully attacker-controlled → can overwrite ANY
+  object in the bucket the policy is scoped to, not just upload to your own prefix.
+- `["starts-with","$key","acc_123"]` **without a trailing path separator** → attacker can still write
+  to `acc_123evil.html` etc. at the bucket root (sibling-prefix collision), not truly scoped to a subdir.
+- `["starts-with","$Content-Type","image/jpeg"]` bypass: send
+  `Content-Type: image/jpegz;text/html` — starts-with matches the substring, but browsers/CDNs serving
+  the object may render it as HTML → stored XSS on the bucket's origin if the bucket serves uploads
+  with `Content-Disposition: inline`.
+- `["starts-with","$Content-Type",""]` (unrestricted) → upload raw HTML, same stored-XSS chain if the
+  object is public-read + inline.
+- Vendor implementation bugs also happen at the framework level, not just app misconfig: CVE-2026-27607
+  (RustFS) shipped a presigned-POST implementation that didn't validate policy conditions AT ALL server-
+  side — `content-length-range`/`starts-with`/`Content-Type` were client-side-only, so ANY key/size/type
+  was accepted regardless of the stated policy. Worth a version check on any self-hosted S3-compatible
+  object-storage backend (MinIO, RustFS, SeaweedFS, Garage) fingerprinted in-scope.
 
-### Meta note (methodology caution)
-Only 42% of HackerOne reports *tagged* IDOR/IAC by researchers were confirmed genuine in-scope BOLA under
-rigorous review — i.e. self-tagging is noisy; don't trust a report's own IDOR label without re-deriving
-the primitive.
+### Scoring / FP notes
+- A presigned GET/PUT scoped to the caller's own account-prefix with a real server-side ownership check
+  before signing = clean (mirrors the existing "tenant-isolation enforced" FP entry in this doc).
+- Short expiry (`X-Amz-Expires=60`) is NOT a mitigating factor for the IDOR angle — the swap works the
+  instant the URL is minted, expiry only bounds a *stolen* URL's replay window.
+- Confirm PoC = one redacted object read via the swapped presigned URL, or a decoded-policy screenshot
+  showing the unrestricted condition + one benign own-account upload proving it — never bulk-enumerate
+  or overwrite a third party's object (same discipline as every other IDOR primitive in this doc).
+
+Sources:
+- https://research.ivision.com/signed-sealed-delivered-secure.html (object-key IDOR, root-path listing, empty-param enumeration — concrete payloads)
+- https://labs.detectify.com/writeups/bypassing-and-exploiting-bucket-upload-policies-and-signed-urls/ (POST-policy condition bypasses, Content-Type substring trick, path-traversal/URL-confusion signing-wrapper bugs)
+- https://www.bugbountyexplained.com/my-20000-s3-bug-that-leaked-everyones-attachments-s3-bucket-misconfig-of-pre-signed-urls/ ($20k real-world payout, sequential-key IDOR)
+- https://osv.dev/vulnerability/CVE-2026-27607 (RustFS presigned-POST policy-validation bypass — verify current patch status before citing in a report)
