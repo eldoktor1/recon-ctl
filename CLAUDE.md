@@ -580,6 +580,9 @@ checklist IS the plan and the worked-vs-left record — nothing is tested off-bo
 aims the WSTG effort. All tools (per-host verify/confirm/crawl/etc.) run from inside the workspace.
 Complements [[feedback_per_program_workflow_doctrine]] (Burp + deep recon/research FIRST) and the hunt
 flow; the PoC-OR-GTFO + scope/pays gates still apply to every WSTG test. See [[feedback_systematic_stride_wstg]].
+**Full SOP: `docs/knowledge/process-stride-wstg.md`** (6 phases, in order: COMMIT&GATE → RECON&APP-MODEL →
+STRIDE all-six → WSTG walk → CONFIRM&ESCALATE → COVERAGE&CLOSE; hands off to process-report-submission.md
+on a CONFIRMED finding).
 
 ## Operational notes
 - PYTHON IS WSL-ONLY: ALWAYS run python/pip via `wsl.exe -d kali-linux -- python3 …` (or inside a

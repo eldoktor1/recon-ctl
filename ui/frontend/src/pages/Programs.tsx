@@ -715,12 +715,30 @@ function GuidedTab({ ws, onChanged, onTask }:
     } catch { /* non-fatal — the guide still streams */ }
   }, [enc, onChanged]);
 
+  // Advance by RISK, not by position. Walking 1→103 in order is the checklist-driven approach
+  // WSTG argues against; once a model exists it has already said which tests matter for this app,
+  // so "next" should honour that. Without a ranking this falls back to the old sequential scan,
+  // and a model-declared `na` is never walked into (the operator can still reach it via the map).
   const jumpNextUncovered = () => {
+    const RANK: Record<string, number> = { high: 0, medium: 1, low: 3, na: 9 };
+    const ranked = ws.wstg.some((w) => w.relevance);
+    let best = -1, bestRank = 99, bestDist = Infinity;
     for (let i = 1; i <= steps.length; i++) {
       const j = (clamped + i) % steps.length;
-      if (!isCovered(steps[j])) { setIdx(j); return; }
+      const st = steps[j];
+      if (isCovered(st)) continue;
+      if (!ranked) { setIdx(j); return; }
+      let r = 2;                                  // STRIDE + unranked sit between medium and low
+      if (st.phase === "wstg") {
+        const rel = wstgById.get(st.key)?.relevance;
+        if (rel === "na") continue;
+        r = RANK[rel ?? ""] ?? 2;
+      }
+      if (r < bestRank || (r === bestRank && i < bestDist)) { best = j; bestRank = r; bestDist = i; }
     }
-    toast("ok", "every step is covered — nothing left uncovered");
+    if (best >= 0) { setIdx(best); return; }
+    toast("ok", ranked ? "nothing ranked left to work — check the map for skipped tests"
+                       : "every step is covered — nothing left uncovered");
   };
 
   const guide = async (phase: "stride" | "wstg", id: string, h?: string) => {
@@ -893,7 +911,12 @@ function GuidedTab({ ws, onChanged, onTask }:
             </div>
             <CoverageBar done={wstgCovered} total={ws.wstg.length} height={6} />
           </div>
-          <Btn size="sm" variant="primary" onClick={jumpNextUncovered}>next uncovered →</Btn>
+          <span title={ws.wstg.some((w) => w.relevance)
+            ? "jump to the highest-relevance test still untouched"
+            : "jump to the next step that has not been worked"}>
+            <Btn size="sm" variant="primary" onClick={jumpNextUncovered}>
+              {ws.wstg.some((w) => w.relevance) ? "next by risk →" : "next uncovered →"}</Btn>
+          </span>
           <button onClick={() => setAuto((v) => !v)} disabled={isDemo()} title="let Claude drive each uncovered step, mark it, and advance"
             className={`mono rounded border px-2 py-1 text-[11px] transition disabled:opacity-40 ${auto
               ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
