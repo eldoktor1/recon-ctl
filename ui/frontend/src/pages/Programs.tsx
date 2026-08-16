@@ -619,7 +619,11 @@ function GuidedTab({ ws, onChanged, onTask }:
   // Persisted per (program, phase, step) so navigating away and back RECONNECTS to the still-
   // running/finished task instead of re-spawning it (which would waste tokens).
   const [guideTid, setGuideTid] = useState<number | null>(null);
+  const [guideSid, setGuideSid] = useState<string | null>(null);
   const guideKey = useCallback((phase: string, key: string) => `guide:${ws.key}:${phase}:${key}`, [ws.key]);
+  // The step's Claude SESSION, kept alongside its task so a step stays a conversation across
+  // navigation — replying to it is how the operator reports back ("account A is created").
+  const sidKey = useCallback((phase: string, key: string) => `guidesid:${ws.key}:${phase}:${key}`, [ws.key]);
   // live "program intel" panel — the data + notes needed to make decisions while working a step
   const [showIntel, setShowIntel] = useState(() => getNum(`guided-intel:${ws.key}`, 0) === 1);
   useEffect(() => { setNum(`guided-intel:${ws.key}`, showIntel ? 1 : 0); }, [showIntel, ws.key]);
@@ -660,7 +664,8 @@ function GuidedTab({ ws, onChanged, onTask }:
     // reconnect to this step's persisted guide task (if any) instead of clearing the box
     const s = steps[Math.min(idx, Math.max(0, steps.length - 1))];
     setGuideTid(s ? getTask(guideKey(s.phase, s.key)) : null);
-  }, [idx, steps, guideKey]);
+    setGuideSid(s ? localStorage.getItem(sidKey(s.phase, s.key)) : null);
+  }, [idx, steps, guideKey, sidKey]);
   // remember the current step per program so returning resumes here
   useEffect(() => { setNum(`guided-idx:${ws.key}`, idx); }, [idx, ws.key]);
 
@@ -692,11 +697,14 @@ function GuidedTab({ ws, onChanged, onTask }:
     if (isDemo()) { setCanned(demoGuidance(phase, id)); return; }
     setCanned(null);
     try {
-      const t = await api.action<{ id: number }>(`/api/workspaces/${enc}/guide`,
+      const t = await api.action<{ id: number; session_id?: string }>(`/api/workspaces/${enc}/guide`,
         { phase, id, host: h || undefined });
       toast("ok", `Claude guidance #${t.id} — streaming below`);
       setGuideTid(t.id);                         // stream+render it inline in this step's GuideBox
       setTask(guideKey(phase, id), t.id);        // persist so navigating away + back reconnects
+      // Keep the SESSION, not just the task: without it a step is one-shot and the operator
+      // cannot tell it anything afterwards ("I signed up as account A — continue").
+      if (t.session_id) { setGuideSid(t.session_id); localStorage.setItem(sidKey(phase, id), t.session_id); }
       setWorking(`${phase}:${id}`);              // pulse this step while its guidance streams
       if (phase === "wstg") markWstgInProgress(id);  // FIX 1: show it as in-progress immediately
     } catch (e: any) { toast("err", e.message); }
@@ -909,11 +917,13 @@ function GuidedTab({ ws, onChanged, onTask }:
 
       {step.phase === "stride"
         ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
-            onGuide={() => guide("stride", step.key)} canned={canned} guideTid={guideTid} auto={auto}
+            onGuide={() => guide("stride", step.key)} canned={canned} guideTid={guideTid}
+            guideSid={guideSid} onReply={setGuideTid} auto={auto}
             onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
-            onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid} auto={auto}
+            onGuide={() => guide("wstg", step.key, host)} canned={canned} guideTid={guideTid}
+            guideSid={guideSid} onReply={setGuideTid} auto={auto}
             onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} rel={stepRel} />}
 
       {drawer && <HostDrawer host={drawer} onClose={() => setDrawer(null)} onChanged={onChanged} />}
@@ -1162,7 +1172,7 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
     try {
       const r = await api.action<any>(`/api/workspaces/${enc}/followup`, { wid: wid || null, item: p });
       setPicked((s) => ({ ...s, [i]: true }));
-      toast("ok", r?.duplicate ? "already in the queue" : "picked — queued, walk continues");
+      toast("ok", r?.duplicate ? "already on the to-do list" : "added to the to-do list");
       onChanged?.();
     } catch (e: any) { toast("err", e.message); }
   };
@@ -1222,9 +1232,9 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
           <div className="mb-1.5">
             <div className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">what to pursue next</div>
             <div className="mt-0.5 text-[10px] leading-snug text-[var(--color-ink-faint)]">
-              <span className="text-[var(--color-good)]">pick</span> queues it against this step and you keep walking —
-              that is the default. <span className="text-[var(--color-accent)]">run</span> executes the lane now.
-              Neither takes you off the checklist.
+              <span className="text-[var(--color-good)]">to-do</span> saves it to this program's list so you do not
+              lose it — nothing runs. <span className="text-[var(--color-accent)]">run</span> executes the lane
+              right now. Either way you stay on this step.
             </div>
           </div>
           <div className="space-y-1">
@@ -1248,11 +1258,11 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <button onClick={() => pick(p, i)} disabled={picked[i]}
-                      title="queue it against this step — nothing runs, nothing navigates"
+                      title="add to this program's to-do list — nothing runs, you stay on this step"
                       className={`mono rounded border px-2 py-0.5 text-[10px] ${picked[i]
                         ? "border-[var(--color-good)]/50 bg-[var(--color-good)]/10 text-[var(--color-good)]"
                         : "border-[var(--color-good)]/60 text-[var(--color-good)] hover:bg-[var(--color-good)]/10"}`}>
-                      {picked[i] ? "✓ queued" : "＋ pick"}
+                      {picked[i] ? "✓ on to-do" : "＋ to-do"}
                     </button>
                     {p.action && wid && (
                       <button onClick={() => run(p)} title={`run now: ${p.action} ${p.target || ""}`}
@@ -1286,10 +1296,11 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
   );
 }
 
-function GuideBox({ canned, tid, onComplete, onDead, wsKey, wid, onTask, onChanged }:
+function GuideBox({ canned, tid, onComplete, onDead, wsKey, wid, onTask, onChanged, sid, onReply }:
   { canned: string | null; tid: number | null;
     onComplete?: (text: string, tid: number) => void; onDead?: () => void;
-    wsKey?: string; wid?: string | null; onTask?: (tid: number) => void; onChanged?: () => void }) {
+    wsKey?: string; wid?: string | null; onTask?: (tid: number) => void; onChanged?: () => void;
+    sid?: string | null; onReply?: (tid: number) => void }) {
   const [done, setDone] = useState<string | null>(null);
   // Drop the previous step's card the moment the step changes. Without this the card is sticky:
   // GuideBox keeps its position in the tree across steps, so a finished WSTG card would render
@@ -1314,14 +1325,53 @@ function GuideBox({ canned, tid, onComplete, onDead, wsKey, wid, onTask, onChang
       {done && wsKey && (
         <StepCard wsKey={wsKey} wid={wid} text={done} onTask={onTask} onChanged={onChanged} />
       )}
+      {sid && onReply && <GuideReply sid={sid} onReply={onReply} />}
     </>
   );
   return null;
 }
 
-function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active }:
+// Reply into the step's OWN Claude session. Without this a step is a monologue: it hands back a
+// plan and the operator has no way to say "account A exists now", "that host 403s", "continue with
+// the swap" — the state of the engagement can never reach the thing directing it.
+function GuideReply({ sid, onReply }: { sid: string; onReply: (tid: number) => void }) {
+  const toast = useToast();
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    const text = msg.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    try {
+      const t = await api.action<{ id: number }>("/api/claude/message", { session_id: sid, message: text });
+      setMsg("");
+      onReply(t.id);          // stream the continuation in place of the previous turn
+    } catch (e: any) { toast("err", e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="mt-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+        reply to this step — it keeps the same session
+      </div>
+      <div className="flex items-end gap-1.5">
+        <textarea value={msg} onChange={(e) => setMsg(e.target.value)} rows={2}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
+          placeholder="e.g. account A is created and verified — continue with the 2-account swap"
+          className="mono min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)]" />
+        <Btn size="sm" variant="primary" onClick={send} disabled={busy || !msg.trim()}>
+          {busy ? "…" : "send"}
+        </Btn>
+      </div>
+      <div className="mt-1 text-[10px] text-[var(--color-ink-faint)]">⌘/ctrl+enter to send</div>
+    </div>
+  );
+}
+
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, guideSid, onReply, auto, onDead, onNext, active }:
   { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
     onChanged: () => void; onGuide: () => void; canned: string | null; guideTid: number | null;
+    guideSid?: string | null; onReply?: (tid: number) => void;
     auto: boolean; onDead?: () => void; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [val, setVal] = useState("");
@@ -1375,7 +1425,7 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
         <span className="text-[10px] text-[var(--color-ink-faint)]">program-specific threats for this category → streams below</span>
       </div>
       <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead}
-        wsKey={ws.key} wid={cat} onChanged={onChanged} />
+        wsKey={ws.key} wid={cat} onChanged={onChanged} sid={guideSid} onReply={onReply} />
 
       {/* What this category's last run found — so a worked category is never blank on return. */}
       {guideTid == null && ws.stride_cards?.[cat]?.found?.length ? (
@@ -1425,10 +1475,11 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
 // alternate outcomes; the primary "done · next" CTA handles the common finish path
 const GUIDE_STATUSES = ["finding", "na", "in-progress"];
 
-function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, auto, onDead, onNext, active, rel }:
+function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, onGuide, canned, guideTid, guideSid, onReply, auto, onDead, onNext, active, rel }:
   { ws: WorkspaceDetail; item: WstgItem; host: string; setHost: (h: string) => void;
     actions: any[]; onTask: (tid: number) => void; onChanged: () => void;
-    onGuide: () => void; canned: string | null; guideTid: number | null; auto: boolean;
+    onGuide: () => void; canned: string | null; guideTid: number | null;
+    guideSid?: string | null; onReply?: (tid: number) => void; auto: boolean;
     onDead?: () => void; onNext: () => void; active?: boolean; rel?: Relevance }) {
   const toast = useToast();
   const [note, setNote] = useState(item.note || "");
@@ -1512,7 +1563,7 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
         <span className="text-[10px] text-[var(--color-ink-faint)]">comprehensive, program-specific steps for this test → streams below</span>
       </div>
       <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead}
-        wsKey={ws.key} wid={item.id} onTask={onTask} onChanged={onChanged} />
+        wsKey={ws.key} wid={item.id} onTask={onTask} onChanged={onChanged} sid={guideSid} onReply={onReply} />
 
       {/* What the LAST run of this step found — shown when there is no live stream, so returning
           to a test does not require re-running it (and re-spending the tokens) to see the evidence. */}
@@ -1736,7 +1787,7 @@ function FollowupQueue({ ws, onChanged, onTask, onGoToStep }:
   };
 
   return (
-    <Panel title="picked follow-ups"
+    <Panel title="to-do list"
       right={
         <div className="flex items-center gap-2">
           <Badge color={open.length ? "var(--color-warn)" : "var(--color-good)"}>{open.length} open</Badge>
@@ -1747,7 +1798,7 @@ function FollowupQueue({ ws, onChanged, onTask, onGoToStep }:
         </div>
       }>
       <div className="mb-1.5 text-[10px] text-[var(--color-ink-faint)]">
-        Leads the walk surfaced, parked against the step that found them — so pursuing one never costs coverage.
+        Everything you saved while working the steps, with the step that surfaced it. Nothing here has run.
       </div>
       <div className="space-y-1">
         {rows.map((f) => (
@@ -1784,7 +1835,7 @@ function FollowupQueue({ ws, onChanged, onTask, onGoToStep }:
             </div>
           </div>
         ))}
-        {!rows.length && <Empty>nothing open — every picked lead is closed out</Empty>}
+        {!rows.length && <Empty>nothing outstanding — everything you saved is done or dropped</Empty>}
       </div>
     </Panel>
   );
@@ -1804,7 +1855,7 @@ function PersistedCard({ ws, item, onTask, onChanged }:
     try {
       const r = await api.action<any>(`/api/workspaces/${enc}/followup`, { wid: item.id, item: p });
       setPicked((s) => ({ ...s, [i]: true }));
-      toast("ok", r?.duplicate ? "already in the queue" : "picked — queued");
+      toast("ok", r?.duplicate ? "already on the to-do list" : "added to the to-do list");
       onChanged();
     } catch (e: any) { toast("err", e.message); }
   };
@@ -1846,7 +1897,7 @@ function PersistedCard({ ws, item, onTask, onChanged }:
                   className={`mono rounded border px-2 py-0.5 text-[10px] ${picked[i]
                     ? "border-[var(--color-good)]/50 text-[var(--color-good)]"
                     : "border-[var(--color-good)]/60 text-[var(--color-good)] hover:bg-[var(--color-good)]/10"}`}>
-                  {picked[i] ? "✓ queued" : "＋ pick"}
+                  {picked[i] ? "✓ on to-do" : "＋ to-do"}
                 </button>
                 {p.action && (
                   <button onClick={() => run(p)}

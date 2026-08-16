@@ -32,7 +32,7 @@
 #   recon-account list                         # show stored accounts (emails/usernames, NOT passwords)
 #   recon-account create ... --dry-run         # resolve alias + gen password + show plan, NO browser
 # =============================================================================
-import os, sys, json, argparse, secrets, string, datetime, re, subprocess
+import os, sys, json, argparse, secrets, string, datetime, re, subprocess, pathlib, base64
 
 HOME=os.path.expanduser("~")
 PRIV=os.path.join(HOME,"recon/state/private_programs")
@@ -99,6 +99,80 @@ def cmd_list():
             print(line.rstrip())
     print(f"\n(passwords are in {CREDS_F} — chmod 600, local only)")
     return 0
+
+def signup_via_brave(url, email, password):
+    """Open the signup in the Windows-side debug Brave, PROXIED THROUGH BURP.
+
+    Why not drive a browser from here: Burp runs on Windows and WSL cannot reach 127.0.0.1:8080
+    (no mirrored networking — ES is only reachable because it is a Docker-Desktop WSL distro). A
+    WSL-side Selenium browser therefore can NEVER be captured by Burp, which is the whole point of
+    doing the signup: the registration + login + token flow is the authed surface every later
+    BOLA/mass-assignment test builds on, and it has to be in Proxy history and the site map.
+
+    The operator fills the form (CAPTCHA is theirs anyway) — creds are printed here and stored."""
+    pwsh = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    if not os.path.exists(pwsh):
+        print("  ! powershell.exe not found — run scripts/launch_brave_debug.ps1 on Windows yourself.")
+        return False
+    if not re.match(r"^https?://[^\s\"'<>|]+$", url or ""):
+        print(f"  ! refusing to launch a browser at a non-http(s) url: {url!r}")
+        return False
+
+    # The launcher .ps1 lives in the WSL filesystem, and powershell.exe started FROM WSL cannot see
+    # \\wsl.localhost (the 9p share is not mapped in that process context) — so -File is not an
+    # option here. Build the launch inline instead and pass it base64/UTF-16LE via -EncodedCommand,
+    # which also sidesteps bash->PowerShell quoting entirely.
+    ps = (
+        '$ErrorActionPreference="Stop";'
+        '$b="$env:LOCALAPPDATA\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";'
+        'if(-not (Test-Path $b)){Write-Output "brave-missing";exit 1};'
+        '$p="$env:USERPROFILE\\brave-recon-debug";'
+        'New-Item -ItemType Directory -Force -Path $p | Out-Null;'
+        '$live=[bool](Get-NetTCPConnection -LocalPort 9222 -State Listen -EA SilentlyContinue);'
+        # --proxy-server only applies at LAUNCH. Reusing a window that was started without it means
+        # Burp sees nothing — so inspect the running process rather than assume.
+        '$prox=$false;'
+        'if($live){$prox=[bool](Get-CimInstance Win32_Process -Filter "Name=\'brave.exe\'" -EA SilentlyContinue |'
+        ' Where-Object { $_.CommandLine -match "brave-recon-debug" -and $_.CommandLine -match "proxy-server" })};'
+        '$a=@("--user-data-dir=`"$p`"","--proxy-server=http://127.0.0.1:8080",'
+        '"--ignore-certificate-errors","--no-default-browser-check");'
+        'if(-not $live){$a+=@("--remote-debugging-port=9222","--remote-debugging-address=127.0.0.1")};'
+        f'$a+="{url}";'
+        'Start-Process -FilePath $b -ArgumentList $a;'
+        'if(-not $live){Write-Output "launched"}'
+        'elseif($prox){Write-Output "reused-proxied"}else{Write-Output "reused-unproxied"}'
+    )
+    b64 = base64.b64encode(ps.encode("utf-16-le")).decode()
+    print(f"  launching debug-Brave (proxied through Burp :8080) at {url}")
+    try:
+        r = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-EncodedCommand", b64],
+                           capture_output=True, text=True, timeout=120)
+        out = (r.stdout or "").replace("\r", "").strip()
+        if "brave-missing" in out:
+            print("  ! brave.exe not found on the Windows side."); return False
+        if r.returncode != 0 and "launched" not in out and "reused" not in out:
+            print(f"    launcher exited {r.returncode}: {(r.stderr or '')[:200]}"); return False
+        if "reused-unproxied" in out:
+            print("    ⚠ reused the RUNNING debug window, which was started WITHOUT a proxy —")
+            print("      Burp will NOT capture this signup. --proxy-server only applies at launch.")
+            print("      Close that Brave window and re-run to get a proxied one.")
+        elif "reused-proxied" in out:
+            print("    opened in the running debug window (already proxied — Burp is capturing)")
+        else:
+            print("    new debug window (CDP :9222, proxied through Burp)")
+    except Exception as e:
+        print(f"  ! could not launch Brave: {e}")
+        return False
+    captured = "reused-unproxied" not in out
+    print("\n  PASTE THESE INTO THE SIGNUP FORM"
+          + (" (Burp is capturing the flow):" if captured else " (NOT captured — see the warning above):"))
+    print(f"    email    : {email}")
+    print(f"    password : {password}")
+    print("\n  Keep that window open afterwards — the authed session lives in that profile"
+          + (",\n  and Burp now has the registration + login flow for the authed tests that follow."
+             if captured else ".") )
+    return True
+
 
 def fill_signup(url, email, password, profile, keep_open):
     """Headful Selenium: open signup, auto-fill (or profile-driven) email+password, PAUSE for operator."""
@@ -187,8 +261,14 @@ def cmd_create(a):
     print(f"  password={password}  (generated, will be stored locally)")
     if a.dry_run:
         print("  --dry-run: not opening a browser, not storing."); return 0
+    # Default: signup goes through the Windows-side debug Brave so BURP CAPTURES the flow. The
+    # WSL-side Selenium path stays available (--local) but Burp can never see it — see
+    # signup_via_brave() for why. Falls back to local automatically if the launch fails.
     try:
-        fill_signup(url,email,password,profile,a.keep_open)
+        if a.local or not signup_via_brave(url,email,password):
+            if not a.local:
+                print("  falling back to the local browser (NOT captured by Burp)")
+            fill_signup(url,email,password,profile,a.keep_open)
     except Exception as e:
         print(f"  browser step failed: {e}",file=sys.stderr)
         print("  (creds still recorded so you can finish the signup manually with them.)")
@@ -207,6 +287,8 @@ def main():
     c.add_argument("--url"); c.add_argument("--platform"); c.add_argument("--label")
     c.add_argument("--username"); c.add_argument("--keep-open",action="store_true")
     c.add_argument("--dry-run",action="store_true")
+    c.add_argument("--local",action="store_true",
+                   help="use the WSL browser instead of debug-Brave (NOT captured by Burp)")
     sub.add_parser("list")
     a=ap.parse_args()
     if a.cmd=="create": return cmd_create(a)
