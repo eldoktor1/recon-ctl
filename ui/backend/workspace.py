@@ -1306,7 +1306,8 @@ _MODEL_CONTRACT = (
     '  "stride": [\n'
     '    {"cat":"S|T|R|I|D|E", "threat":"<specific to THIS app, names the real asset/role/flow>",\n'
     '     "rationale":"<the evidence that makes it credible>", "hosts":["<host from the surface>"],\n'
-    '     "severity":"high|medium|low"}\n'
+    '     "severity":"high|medium|low",\n'
+    '     "wstg":["<the WSTG id(s) whose test would CONFIRM or KILL this threat>"]}\n'
     "  ],\n"
     '  "wstg": [\n'
     '    {"id":"WSTG-XXXX-NN", "relevance":"high|medium|low|na",\n'
@@ -1317,6 +1318,9 @@ _MODEL_CONTRACT = (
     "RULES:\n"
     "- Ground EVERY stride threat in the surface above. No generic textbook threats — if the "
     "evidence does not support it, leave it out. Prefer few, sharp, testable threats over many vague ones.\n"
+    "- EVERY threat MUST name the WSTG test(s) that would confirm or kill it (`wstg`). This is the "
+    "point of modelling first: the threats DERIVE the battery of tests to run, so a threat nobody "
+    "can test is not worth logging, and a test no threat points at is not worth an evening.\n"
     "- `hosts` and `targets` must be real values copied from the surface, never invented.\n"
     "- relevance=na REQUIRES a concrete reason the test cannot apply to this stack (e.g. no SOAP "
     "service, no file upload surface). 'Not interesting' is NOT a reason — that is a judgement the "
@@ -1390,11 +1394,16 @@ def parse_model(text: str) -> dict[str, Any]:
         threat = str(row.get("threat") or "").strip()
         if cat not in _STRIDE_CATS or not threat:
             continue
+        ref_ids = wstg_reference()
         out["stride"].append({
             "cat": cat, "threat": threat[:500],
             "rationale": str(row.get("rationale") or "")[:2000],
             "hosts": [str(h)[:255] for h in (row.get("hosts") or [])][:50],
             "severity": str(row.get("severity") or "").strip().lower()[:10],
+            # the tests that confirm/kill this threat — invented ids are dropped, so a threat
+            # never points at a test that does not exist
+            "wstg": [w for w in (str(x).strip().upper() for x in (row.get("wstg") or []))
+                     if w in ref_ids][:8],
         })
     ref = wstg_reference()
     for row in (data.get("wstg") or []):
@@ -1610,6 +1619,7 @@ def apply_model(key: str, model: dict[str, Any]) -> dict[str, Any]:
             "id": f"{row['cat']}{len(bucket) + 1}", "threat": row["threat"],
             "note": row.get("rationale") or "", "status": "open",
             "hosts": row.get("hosts") or [], "severity": row.get("severity") or "",
+            "wstg": row.get("wstg") or [],      # the tests that confirm/kill it
             "source": "generated", "created_at": ts,
         })
         added_s += 1

@@ -154,6 +154,11 @@ export interface WstgReference {
 }
 export interface StrideThreat {
   id?: string; threat: string; note?: string; status?: string; hosts?: string[];
+  severity?: string; source?: string; created_at?: string;
+  // WSTG ids whose test confirms or kills this threat. WSTG's own guidance: the threat model
+  // devises the battery of tests — a threat with no test is untestable, a test no threat points
+  // at is not worth an evening.
+  wstg?: string[];
 }
 export interface StrideBoard {
   S: StrideThreat[]; T: StrideThreat[]; R: StrideThreat[];

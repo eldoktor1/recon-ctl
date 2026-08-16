@@ -817,6 +817,13 @@ function GuidedTab({ ws, onChanged, onTask }:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto]);
 
+  // Jump to the WSTG step a threat points at. WSTG's own guidance is that the threat model
+  // devises the battery of tests; without this the board and the checklist stay disconnected.
+  const jumpToWstg = useCallback((wid: string) => {
+    const i = steps.findIndex((s) => s.phase === "wstg" && s.key === wid);
+    if (i >= 0) setIdx(i);
+  }, [steps]);
+
   const workingIdx = useMemo(
     () => (working ? steps.findIndex((s) => `${s.phase}:${s.key}` === working) : -1),
     [working, steps]);
@@ -918,7 +925,7 @@ function GuidedTab({ ws, onChanged, onTask }:
       {step.phase === "stride"
         ? <StrideGuideStep ws={ws} cat={step.key} guideCat={ref?.stride?.[step.key]} onChanged={onChanged}
             onGuide={() => guide("stride", step.key)} canned={canned} guideTid={guideTid}
-            guideSid={guideSid} onReply={setGuideTid} auto={auto}
+            guideSid={guideSid} onReply={setGuideTid} onJump={jumpToWstg} auto={auto}
             onDead={onGuideDead} onNext={jumpNextUncovered} active={focusActive} />
         : <WstgGuideStep ws={ws} item={wstgById.get(step.key)!} host={host} setHost={setHost}
             actions={hostActions} onTask={onTask} onChanged={onChanged}
@@ -1368,10 +1375,10 @@ function GuideReply({ sid, onReply }: { sid: string; onReply: (tid: number) => v
   );
 }
 
-function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, guideSid, onReply, auto, onDead, onNext, active }:
+function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideTid, guideSid, onReply, onJump, auto, onDead, onNext, active }:
   { ws: WorkspaceDetail; cat: string; guideCat?: { name: string; prompt: string; examples: string[] };
     onChanged: () => void; onGuide: () => void; canned: string | null; guideTid: number | null;
-    guideSid?: string | null; onReply?: (tid: number) => void;
+    guideSid?: string | null; onReply?: (tid: number) => void; onJump?: (wid: string) => void;
     auto: boolean; onDead?: () => void; onNext: () => void; active?: boolean }) {
   const toast = useToast();
   const [val, setVal] = useState("");
@@ -1454,7 +1461,20 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
         {threats.map((t, i) => (
           <div key={t.id || i} className="group flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
             <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: wsc(t.status) }} />
-            <span className="min-w-0 flex-1 text-[11px] text-[var(--color-ink)]">{t.threat}</span>
+            <div className="min-w-0 flex-1">
+              <span className="text-[11px] text-[var(--color-ink)]">{t.threat}</span>
+              {!!(t.wstg && t.wstg.length) && (
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  <span className="text-[9px] uppercase tracking-wider text-[var(--color-ink-faint)]">confirm with</span>
+                  {t.wstg!.map((w) => (
+                    <button key={w} onClick={() => onJump?.(w)} title={`go to ${w}`}
+                      className="mono rounded border border-[var(--color-border-bright)] px-1 py-0.5 text-[9px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">
+                      {w}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button onClick={() => del(t)} title="delete threat"
               className="shrink-0 rounded px-1 text-[11px] text-[var(--color-ink-faint)] opacity-0 transition hover:text-[var(--color-bad)] group-hover:opacity-100">✕</button>
           </div>
