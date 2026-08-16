@@ -654,7 +654,11 @@ function GuidedTab({ ws, onChanged, onTask }:
   // which is what the model was FOR. Only applies on first open; an explicit position is kept.
   useEffect(() => {
     if (idx >= 0) return;
-    if (!strideCount) { setIdx(0); return; }
+    // Threats alone are not enough to aim the walk: without a RANKING, "jump to the best test"
+    // degrades to "jump to WSTG-INFO-01" — the alphabetical walk this is meant to replace. So
+    // require a real ranking before leaving STRIDE.
+    const ranked = ws.wstg.some((w) => w.relevance);
+    if (!strideCount || !ranked) { setIdx(0); return; }
     const rank: Record<string, number> = { high: 0, medium: 1, low: 3, na: 9 };
     let best = -1, bestRank = 99;
     ws.wstg.forEach((w) => {
