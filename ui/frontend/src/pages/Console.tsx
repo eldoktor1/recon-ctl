@@ -74,11 +74,14 @@ function newSid(): string {
   });
 }
 
-export default function Console() {
+// Embeddable. The program workspace mounts this with its own `sidKey`, so each engagement keeps a
+// SEPARATE conversation instead of sharing one global thread, plus a `seed` naming the program that
+// is prepended to the FIRST message only — the co-pilot starts knowing which target it is working.
+export default function Console({ sidKey = SID_KEY, seed }: { sidKey?: string; seed?: string } = {}) {
   const { data: cfg } = useFetch<ConsoleCfg>("/api/claude/config");
   const { status: liveStatus } = useLiveStatus();
   const ai = liveStatus?.ai;
-  const [sid, setSid] = useState<string>(() => localStorage.getItem(SID_KEY) || newSid());
+  const [sid, setSid] = useState<string>(() => localStorage.getItem(sidKey) || newSid());
   const [model, setModel] = useState<string>(() => localStorage.getItem(MODEL_KEY) || "opus");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -95,7 +98,7 @@ export default function Console() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const toast = useToast();
 
-  useEffect(() => { localStorage.setItem(SID_KEY, sid); }, [sid]);
+  useEffect(() => { localStorage.setItem(sidKey, sid); }, [sid, sidKey]);
   useEffect(() => { localStorage.setItem(MODEL_KEY, model); }, [model]);
   useEffect(() => { scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight); }, [turns]);
   useEffect(() => () => wsRef.current?.close(), []);
@@ -167,9 +170,12 @@ export default function Console() {
     setInput("");
     setTurns((ts) => [...ts, { role: "user", blocks: [{ kind: "text", text: msg }] }]);
     setBusy(true);
+    // Seed only the opening message — the session carries the context after that, and repeating it
+    // every turn would burn tokens and drown the actual question.
+    const payload = seed && turns.length === 0 ? `${seed}\n\n${msg}` : msg;
     try {
       const r = await api.action<{ id: number; session_id: string }>("/api/claude/message", {
-        session_id: sid, message: msg, model,
+        session_id: sid, message: payload, model,
       });
       if (r.session_id && r.session_id !== sid) setSid(r.session_id);
       setTid(r.id);

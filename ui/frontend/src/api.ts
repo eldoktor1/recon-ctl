@@ -131,6 +131,14 @@ export interface WstgItem {
   // Set by POST /api/workspaces/{key}/model: a ranking DERIVED server-side from the program's
   // real surface. Supersedes the client-side category heuristic wherever it is present.
   relevance?: "high" | "medium" | "low" | "na"; targets?: string[]; rationale?: string;
+  // What the last run of this step FOUND, persisted so navigating away does not lose it.
+  // `suggested` is what the step proposed; the accepted verdict is the item's own status/note.
+  card?: {
+    found: { what: string; evidence: string; why: string }[];
+    pursue: { label: string; why: string; priority: string; action: string | null; target: string | null; cmd: string }[];
+    suggested?: { status?: string; note?: string };
+    at?: string;
+  };
 }
 // A runnable lane offered by a WSTG test (GET /api/workspaces/{key}/actions). `cmd` is for
 // display only — running posts {id, action, target} and the backend rebuilds the argv itself.
@@ -173,4 +181,12 @@ export interface WorkspaceDetail {
   wstg: WstgItem[]; stride: StrideBoard; classes: ClassProgress[];
   notes: WsNote[]; history: WsEvent[]; hosts: WsHost[]; findings: Finding[];
   followups?: Followup[];
+  // What each STRIDE category's last guided run found, kept so a worked category is not blank
+  // on return. Keyed by category letter; threats themselves live in `stride`.
+  stride_cards?: Record<string, {
+    found: { what: string; evidence: string; why: string }[];
+    pursue: { label: string; why: string; priority: string; action: string | null; target: string | null; cmd: string }[];
+    suggested?: { status?: string; note?: string };
+    at?: string;
+  }>;
 }

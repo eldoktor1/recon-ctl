@@ -625,7 +625,7 @@ async def api_workspaces():
     workspace.ensure_seeded()
     out = []
     for ws in workspace.list_all():
-        name = ws.get("name") or ws.get("key")
+        name = workspace.program_ids(ws)
         counts = workspace.summarize(ws)
         try:
             counts["findings"] = findings.list_findings(program=name, limit=0)["total"]
@@ -672,7 +672,7 @@ async def api_workspace(key: str):
     ws = workspace.load(key)
     if not ws:
         raise HTTPException(404, "workspace not found")
-    name = ws.get("name") or ws.get("key")
+    name = workspace.program_ids(ws)
     try:
         hosts = (await es.search(program=name, limit=200)).get("items", [])
     except Exception:
@@ -705,7 +705,7 @@ async def api_workspace_guide(key: str, body: dict = Depends(safety.require_conf
         raise HTTPException(400, "unknown WSTG id")
     if phase == "stride" and ident.upper()[:1] not in workspace.STRIDE_GUIDE:
         raise HTTPException(400, "unknown STRIDE category")
-    name = ws.get("name") or ws.get("key")
+    name = workspace.program_ids(ws)
     try:
         hosts = (await es.search(program=name, limit=25)).get("items", [])
     except Exception:
@@ -730,7 +730,7 @@ async def api_workspace_generate(key: str, body: dict = Depends(safety.require_c
     ws = workspace.load(key)
     if not ws:
         raise HTTPException(404, "workspace not found")
-    name = ws.get("name") or ws.get("key")
+    name = workspace.program_ids(ws)
     try:
         hosts = (await es.search(program=name, limit=40)).get("items", [])
     except Exception:
@@ -765,6 +765,16 @@ async def api_workspace_model(key: str, body: dict = Depends(safety.require_conf
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/workspaces/{key}/delete")
+async def api_workspace_delete(key: str, body: dict = Depends(safety.require_confirm)):
+    """Delete a workspace. Irreversible — the engagement record lives only in this file, so the
+    response reports exactly what was discarded. Host notes/findings are untouched (ledger + ES)."""
+    try:
+        return workspace.delete(key)
+    except KeyError:
+        raise HTTPException(404, "workspace not found")
+
+
 @app.post("/api/workspaces/{key}/followup")
 async def api_workspace_followup(key: str, body: dict = Depends(safety.require_confirm)):
     """PICK a pursue-item into the follow-up queue, bound to the step that surfaced it.
@@ -792,11 +802,20 @@ async def api_workspace_followup_status(key: str, body: dict = Depends(safety.re
 
 @app.post("/api/workspaces/{key}/step-card")
 async def api_workspace_step_card(key: str, body: dict = Depends(safety.require_confirm)):
-    """Parse a guide reply into its step card (found / record / pursue).
+    """Parse a guide reply into its step card (found / record / pursue), and persist the evidence
+    onto the checklist item so the step KEEPS what it found across navigation.
 
-    Pure parsing — no mutation. Lives server-side so action ids are validated against the same
-    lane table the runner uses; a reply with no card returns {"card": null} rather than an error."""
-    return {"card": workspace.parse_step_card(body.get("text") or "")}
+    Lives server-side so action ids validate against the same lane table the runner uses. Only the
+    evidence is stored — status/note stay the operator's call via the card's save button. A reply
+    with no card returns {"card": null} rather than an error."""
+    card = workspace.parse_step_card(body.get("text") or "")
+    wid = (body.get("wid") or "").strip().upper()
+    if card and wid:
+        try:
+            workspace.save_step_card(key, wid, card)
+        except KeyError:
+            pass            # unknown workspace/test: still return the card rather than 404 the step
+    return {"card": card}
 
 
 @app.get("/api/workspaces/{key}/actions")
@@ -868,7 +887,7 @@ async def api_workspace_autonote(key: str, body: dict = Depends(safety.require_c
     ws = workspace.load(key)
     if not ws:
         raise HTTPException(404, "workspace not found")
-    name = ws.get("name") or ws.get("key")
+    name = workspace.program_ids(ws)
     try:
         hosts = (await es.search(program=name, limit=25)).get("items", [])
     except Exception:

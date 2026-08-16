@@ -32,7 +32,7 @@
 #   recon-account list                         # show stored accounts (emails/usernames, NOT passwords)
 #   recon-account create ... --dry-run         # resolve alias + gen password + show plan, NO browser
 # =============================================================================
-import os, sys, json, argparse, secrets, string, datetime, re
+import os, sys, json, argparse, secrets, string, datetime, re, subprocess
 
 HOME=os.path.expanduser("~")
 PRIV=os.path.join(HOME,"recon/state/private_programs")
@@ -109,15 +109,34 @@ def fill_signup(url, email, password, profile, keep_open):
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
-    chromedriver=next((p for p in ("/usr/bin/chromedriver",) if os.path.exists(p)), "chromedriver")
-    binloc=next((p for p in ("/usr/bin/google-chrome","/usr/bin/chromium","/usr/bin/google-chrome-stable") if os.path.exists(p)), None)
+    # Selenium refuses to drive a browser whose MAJOR differs from the driver's. Google Chrome
+    # auto-updates while /usr/bin/chromedriver comes from the `chromium-driver` package and tracks
+    # CHROMIUM — so hard-coding google-chrome broke signup ("only supports Chrome version 145")
+    # the moment the two diverged. Pick the browser that MATCHES the installed driver instead of
+    # assuming Chrome; on this box that is chromium, and both are already installed.
+    def _major(cmd):
+        try:
+            out=subprocess.run(cmd,capture_output=True,text=True,timeout=15).stdout
+            m=re.search(r"(\d+)\.",out); return m.group(1) if m else None
+        except Exception: return None
+
+    BROWSERS=("/usr/bin/chromium","/usr/bin/google-chrome","/usr/bin/google-chrome-stable")
+    present=[p for p in BROWSERS if os.path.exists(p)]
+    sysdrv="/usr/bin/chromedriver" if os.path.exists("/usr/bin/chromedriver") else None
+    drv_major=_major([sysdrv,"--version"]) if sysdrv else None
+    binloc=next((p for p in present if _major([p,"--version"])==drv_major), None) if drv_major else None
+    if not binloc and present:
+        binloc=present[0]      # no match — try anyway, and say why it may fail
+        print(f"  ⚠ no browser matches chromedriver {drv_major}; trying {binloc} "
+              f"({_major([binloc,'--version'])}). Install a matching driver if this fails.")
+
     opts=Options()
     if binloc: opts.binary_location=binloc
     opts.add_argument("--no-first-run"); opts.add_argument("--no-default-browser-check")
     opts.add_argument(f"--user-data-dir=/tmp/recon_acct_{secrets.token_hex(4)}")  # clean per-account profile
     opts.add_argument("--window-size=1280,900")
     opts.add_experimental_option("excludeSwitches",["enable-automation"])
-    d=webdriver.Chrome(service=Service(chromedriver), options=opts)
+    d=webdriver.Chrome(service=Service(sysdrv), options=opts) if sysdrv else webdriver.Chrome(options=opts)
     try:
         d.get(url)
         WebDriverWait(d,20).until(EC.presence_of_element_located((By.TAG_NAME,"body")))

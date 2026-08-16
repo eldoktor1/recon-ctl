@@ -9,6 +9,7 @@ import { LeadActions, useHostActions } from "../components/LeadActions";
 import { HostDrawer } from "../components/HostDrawer";
 import { GuideStream } from "../components/GuideStream";
 import { AutoNote } from "../components/AutoNote";
+import Console from "./Console";
 import { useResizable } from "../components/useResizable";
 import { getTask, setTask, clearTask, getNum, setNum, claimDone } from "../taskStore";
 import { api, type WorkspacesResp, type WorkspaceSummary, type WorkspaceCandidate,
@@ -116,7 +117,8 @@ export default function Programs() {
         ) : wsLoading && !ws ? <Spinner /> : !ws ? (
           <Panel><Empty>workspace failed to load</Empty></Panel>
         ) : (
-          <WorkspaceView ws={ws} onChanged={refresh} onTask={openTaskConsole} />
+          <WorkspaceView ws={ws} onChanged={refresh} onTask={openTaskConsole}
+            onDeleted={() => { setSel(null); refetchList(); }} />
         )}
       </div>
 
@@ -203,10 +205,11 @@ function RailRow({ w, active, onClick }: { w: WorkspaceSummary; active: boolean;
 }
 
 // --- Workspace view: header + sub-tabs ---------------------------------------
-type Tab = "guided" | "overview" | "wstg" | "stride" | "notes";
+type Tab = "guided" | "overview" | "wstg" | "stride" | "copilot" | "notes";
 
-function WorkspaceView({ ws, onChanged, onTask }:
-  { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void }) {
+function WorkspaceView({ ws, onChanged, onTask, onDeleted }:
+  { ws: WorkspaceDetail; onChanged: () => void; onTask: (tid: number) => void;
+    onDeleted?: () => void }) {
   const [tab, setTab] = useState<Tab>("guided");
   const toast = useToast();
   const done = ws.wstg.filter((w) => w.status === "done").length;
@@ -214,10 +217,39 @@ function WorkspaceView({ ws, onChanged, onTask }:
   const inprog = ws.wstg.filter((w) => w.status === "in-progress").length;
   const findingsN = ws.findings.length;
   const classesDone = ws.classes.filter((c) => c.status === "done" || c.status === "finding").length;
+  const strideN = (["S", "T", "R", "I", "D", "E"] as const)
+    .reduce((n, c) => n + ((ws.stride?.[c] || []).length), 0);
 
   const setStatus = async (body: { status?: string; current?: boolean }) => {
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/status`, body); toast("ok", "updated"); onChanged(); }
     catch (e: any) { toast("err", e.message); }
+  };
+
+  // Deleting discards the engagement record, so name exactly what is lost before asking. Host
+  // notes and findings live in the ledger/ES and survive — say so, or this reads scarier than it is.
+  const del = async () => {
+    const threats = (["S", "T", "R", "I", "D", "E"] as const)
+      .reduce((n, c) => n + ((ws.stride?.[c] || []).length), 0);
+    const worked = ws.wstg.filter((w) => w.status !== "todo").length;
+    const openF = (ws.followups || []).filter((f) => f.status === "open").length;
+    const lost = [
+      worked && `${worked} worked WSTG item${worked > 1 ? "s" : ""}`,
+      threats && `${threats} STRIDE threat${threats > 1 ? "s" : ""}`,
+      ws.notes.length && `${ws.notes.length} note${ws.notes.length > 1 ? "s" : ""}`,
+      openF && `${openF} open follow-up${openF > 1 ? "s" : ""}`,
+    ].filter(Boolean).join(", ");
+    const ok = confirm(
+      `Delete the "${ws.name}" workspace?\n\n` +
+      (lost ? `This discards: ${lost}.\n\n` : "Nothing has been worked in it yet.\n\n") +
+      "Host notes and findings are NOT affected — they live in the ledger and ES.\n\nThis cannot be undone."
+    );
+    if (!ok) return;
+    try {
+      await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/delete`);
+      toast("ok", `${ws.name} deleted`);
+      onDeleted?.();
+      onChanged();
+    } catch (e: any) { toast("err", e.message); }
   };
 
   // jump to the Guided walkthrough focused on a specific test/category — from any tab.
@@ -230,9 +262,13 @@ function WorkspaceView({ ws, onChanged, onTask }:
   }, [ws.wstg, ws.key]);
 
   const tabs: { id: Tab; label: string }[] = [
+    // STRIDE sits BEFORE WSTG: the pipeline has already done the enumeration those first WSTG
+    // categories would cover (hosts/tech/endpoints/params are in ES before a program is opened),
+    // so the threat model can be evidence-grounded immediately — and it is what aims the walk.
     { id: "guided", label: "◎ Guided" }, { id: "overview", label: "Overview" },
+    { id: "stride", label: `STRIDE · ${strideN}` },
     { id: "wstg", label: `WSTG · ${done}/${total}` },
-    { id: "stride", label: "STRIDE" }, { id: "notes", label: "Notes / Timeline" },
+    { id: "copilot", label: "✦ Co-Pilot" }, { id: "notes", label: "Notes / Timeline" },
   ];
 
   return (
@@ -260,6 +296,10 @@ function WorkspaceView({ ws, onChanged, onTask }:
               </button>
             ))}
             {!ws.current && <Btn size="sm" variant="primary" onClick={() => setStatus({ current: true })}>set current</Btn>}
+            <button onClick={del} title="delete this workspace"
+              className="mono rounded border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-ink-faint)] transition hover:border-[var(--color-bad)] hover:text-[var(--color-bad)]">
+              ✕ delete
+            </button>
           </div>
         </div>
 
@@ -289,8 +329,25 @@ function WorkspaceView({ ws, onChanged, onTask }:
       </div>
 
       {tab === "guided" && <GuidedTab ws={ws} onChanged={onChanged} onTask={onTask} />}
-      {tab === "overview" && <OverviewTab ws={ws} onChanged={onChanged} onTask={onTask} />}
+      {tab === "overview" && (
+        <div className="min-h-0 flex-1 space-y-3 overflow-auto pb-4">
+          <StageFindings ws={ws} onGoToStep={goToStep} />
+          <OverviewTab ws={ws} onChanged={onChanged} onTask={onTask} />
+        </div>
+      )}
       {tab === "wstg" && <WstgTab ws={ws} onChanged={onChanged} onGoToStep={goToStep} onTask={onTask} />}
+      {tab === "copilot" && (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <Console
+            sidKey={`recon_console_sid:${ws.key}`}
+            seed={
+              `We are working the "${ws.name}" bug-bounty program (${ws.platform || "?"}) in its recon-ctl workspace.\n` +
+              `Coverage so far: WSTG ${done}/${total} worked, ${strideN} STRIDE threats modelled, ` +
+              `${ws.findings.length} findings, ${ws.hosts.length} in-scope hosts joined.\n` +
+              `Scope + pays gates and the PoC-or-GTFO doctrine apply. Keep answers specific to this program.`
+            } />
+        </div>
+      )}
       {tab === "stride" && <StrideTab ws={ws} onChanged={onChanged} onGoToStep={goToStep} />}
       {tab === "notes" && <NotesTab ws={ws} onChanged={onChanged} />}
     </div>
@@ -1038,12 +1095,16 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
   const [status, setStatus] = useState("in-progress");
   const [saved, setSaved] = useState(false);
   const [picked, setPicked] = useState<Record<number, boolean>>({});
+  const [openCmd, setOpenCmd] = useState<Record<number, boolean>>({});
+  const [logged, setLogged] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const r = await api.action<{ card: StepCardT | null }>(`/api/workspaces/${enc}/step-card`, { text });
+        // `wid` makes the backend persist the evidence onto the item, so the step keeps what it
+        // found once this component unmounts.
+        const r = await api.action<{ card: StepCardT | null }>(`/api/workspaces/${enc}/step-card`, { text, wid });
         if (!alive || !r.card) return;
         setCard(r.card);
         setNote(r.card.record.note || "");
@@ -1058,12 +1119,29 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
 
   if (!card) return null;
 
+  const isStride = !!wid && wid.length === 1;   // S/T/R/I/D/E vs a WSTG-XXXX-NN id
+
   const saveRecord = async () => {
     try {
-      if (wid) await api.action(`/api/workspaces/${enc}/wstg`, { id: wid, status, note });
+      if (wid && !isStride) await api.action(`/api/workspaces/${enc}/wstg`, { id: wid, status, note });
       else await api.action(`/api/workspaces/${enc}/note`, { text: note });
       setSaved(true);
-      toast("ok", wid ? `${wid} → ${status}, note recorded` : "note recorded");
+      toast("ok", wid && !isStride ? `${wid} → ${status}, note recorded` : "note recorded");
+      onChanged?.();
+    } catch (e: any) { toast("err", e.message); }
+  };
+
+  // On a STRIDE step the findings ARE the threats — logging them to the board is the whole output
+  // of the step. Without this the category kept reading "0 threats" after being worked.
+  const addThreat = async (f: { what: string; why: string; evidence: string }, i: number) => {
+    if (!isStride) return;
+    try {
+      await api.action(`/api/workspaces/${enc}/stride`, {
+        cat: wid, threat: f.what,
+        note: [f.why, f.evidence].filter(Boolean).join(" — "),
+      });
+      setLogged((s) => ({ ...s, [i]: true }));
+      toast("ok", `logged to ${wid}`);
       onChanged?.();
     } catch (e: any) { toast("err", e.message); }
   };
@@ -1096,10 +1174,21 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
           <div className="mb-1.5 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">what we found</div>
           <div className="space-y-1.5">
             {card.found.map((f, i) => (
-              <div key={i} className="text-[11px]">
-                <div className="text-[var(--color-ink)]">{f.what}</div>
-                {f.evidence && <div className="mono break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</div>}
-                {f.why && <div className="text-[10px] text-[var(--color-ink-faint)]">{f.why}</div>}
+              <div key={i} className="flex items-start gap-2 text-[11px]">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[var(--color-ink)]">{f.what}</div>
+                  {f.evidence && <div className="mono break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</div>}
+                  {f.why && <div className="text-[10px] text-[var(--color-ink-faint)]">{f.why}</div>}
+                </div>
+                {isStride && (
+                  <button onClick={() => addThreat(f, i)} disabled={logged[i]}
+                    title={`log as a ${wid} threat on the STRIDE board`}
+                    className={`mono shrink-0 rounded border px-2 py-0.5 text-[10px] ${logged[i]
+                      ? "border-[var(--color-good)]/50 text-[var(--color-good)]"
+                      : "border-[var(--color-good)]/60 text-[var(--color-good)] hover:bg-[var(--color-good)]/10"}`}>
+                    {logged[i] ? "✓ logged" : "＋ log threat"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -1130,44 +1219,66 @@ function StepCard({ wsKey, wid, text, onTask, onChanged }:
 
       {card.pursue.length > 0 && (
         <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-2.5">
-          <div className="mb-1.5 flex flex-wrap items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">what to pursue next</span>
-            <span className="text-[10px] text-[var(--color-ink-faint)]">— pick to queue it; the walk continues</span>
+          <div className="mb-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">what to pursue next</div>
+            <div className="mt-0.5 text-[10px] leading-snug text-[var(--color-ink-faint)]">
+              <span className="text-[var(--color-good)]">pick</span> queues it against this step and you keep walking —
+              that is the default. <span className="text-[var(--color-accent)]">run</span> executes the lane now.
+              Neither takes you off the checklist.
+            </div>
           </div>
-          <div className="space-y-1.5">
-            {card.pursue.map((p, i) => (
-              <div key={i} className="flex flex-wrap items-start gap-2">
-                <Badge color={PRI_COLOR[p.priority]} filled={p.priority === "high"}>{p.priority}</Badge>
-                <div className="min-w-[180px] flex-1">
-                  <div className="text-[11px] text-[var(--color-ink)]">{p.label}</div>
-                  {p.why && <div className="text-[10px] text-[var(--color-ink-faint)]">{p.why}</div>}
-                  {!p.action && p.cmd && (
-                    <div className="mono mt-0.5 break-all rounded bg-[var(--color-panel)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)]">{p.cmd}</div>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <button onClick={() => pick(p, i)} disabled={picked[i]}
-                    title="queue this lead against the current step — does not navigate away"
-                    className={`mono rounded border px-1.5 py-0.5 text-[10px] ${picked[i]
-                      ? "border-[var(--color-good)]/50 text-[var(--color-good)]"
-                      : "border-[var(--color-border-bright)] text-[var(--color-ink-dim)] hover:border-[var(--color-good)] hover:text-[var(--color-good)]"}`}>
-                    {picked[i] ? "✓ picked" : "＋ pick"}
-                  </button>
-                  {p.action && wid && (
-                    <button onClick={() => run(p)} title={`run lane now: ${p.action} ${p.target || ""}`}
-                      className="mono rounded border border-[var(--color-border-bright)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">
-                      ▸ run{p.target ? ` · ${p.target}` : ""}
+          <div className="space-y-1">
+            {card.pursue.map((p, i) => {
+              const top = i === 0;   // already priority-sorted server-side
+              return (
+              <div key={i}
+                className={`rounded-md border-l-2 py-1.5 pl-2.5 pr-2 ${top && !picked[i]
+                  ? "border-[var(--color-border)] bg-[var(--color-accent)]/[0.06]"
+                  : "border-[var(--color-border)] bg-transparent"}`}
+                style={{ borderLeftColor: PRI_COLOR[p.priority] }}>
+                <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+                  <div className="min-w-[220px] flex-1">
+                    <div className="flex items-baseline gap-1.5">
+                      {top && !picked[i] && (
+                        <span className="shrink-0 text-[9px] uppercase tracking-wider text-[var(--color-accent)]">start here</span>
+                      )}
+                      <span className="text-[11px] leading-snug text-[var(--color-ink)]">{p.label}</span>
+                    </div>
+                    {p.why && <div className="mt-0.5 text-[10px] leading-snug text-[var(--color-ink-faint)]">{p.why}</div>}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button onClick={() => pick(p, i)} disabled={picked[i]}
+                      title="queue it against this step — nothing runs, nothing navigates"
+                      className={`mono rounded border px-2 py-0.5 text-[10px] ${picked[i]
+                        ? "border-[var(--color-good)]/50 bg-[var(--color-good)]/10 text-[var(--color-good)]"
+                        : "border-[var(--color-good)]/60 text-[var(--color-good)] hover:bg-[var(--color-good)]/10"}`}>
+                      {picked[i] ? "✓ queued" : "＋ pick"}
                     </button>
-                  )}
-                  {p.cmd && (
+                    {p.action && wid && (
+                      <button onClick={() => run(p)} title={`run now: ${p.action} ${p.target || ""}`}
+                        className="mono rounded border border-[var(--color-border-bright)] px-2 py-0.5 text-[10px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">
+                        ▸ run
+                      </button>
+                    )}
+                    {p.cmd && (
+                      <button onClick={() => setOpenCmd((s) => ({ ...s, [i]: !s[i] }))}
+                        title="show the exact command"
+                        className="mono rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]">
+                        {openCmd[i] ? "⌃" : "⌄"} cmd
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {p.cmd && openCmd[i] && (
+                  <div className="mt-1 flex items-start gap-1.5">
+                    <div className="mono min-w-0 flex-1 whitespace-pre-wrap break-all rounded bg-[var(--color-panel)] px-1.5 py-1 text-[10px] leading-relaxed text-[var(--color-ink-dim)]">{p.cmd}</div>
                     <button onClick={() => { navigator.clipboard?.writeText(p.cmd); toast("ok", "copied"); }}
-                      className="mono rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]">
-                      copy
-                    </button>
-                  )}
-                </div>
+                      className="mono shrink-0 rounded border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]">copy</button>
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1180,6 +1291,10 @@ function GuideBox({ canned, tid, onComplete, onDead, wsKey, wid, onTask, onChang
     onComplete?: (text: string, tid: number) => void; onDead?: () => void;
     wsKey?: string; wid?: string | null; onTask?: (tid: number) => void; onChanged?: () => void }) {
   const [done, setDone] = useState<string | null>(null);
+  // Drop the previous step's card the moment the step changes. Without this the card is sticky:
+  // GuideBox keeps its position in the tree across steps, so a finished WSTG card would render
+  // over the next step (including a STRIDE category it has nothing to do with).
+  useEffect(() => { setDone(null); }, [tid, wid]);
   // Capture the finished text for the card REGARDLESS of onComplete — auto-drive passes no
   // onComplete, and the card is the whole point of running the step.
   const complete = (text: string, t: number) => { setDone(text); onComplete?.(text, t); };
@@ -1211,10 +1326,15 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
   const toast = useToast();
   const [val, setVal] = useState("");
   const threats = ws.stride[cat as keyof StrideBoardT] || [];
-  const add = async () => {
-    if (!val.trim()) return;
-    try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, threat: val.trim() }); setVal(""); toast("ok", "threat added"); onChanged(); }
-    catch (e: any) { toast("err", e.message); }
+  // `text` lets a finding from the last run be logged straight to the board; no arg = the input box.
+  const add = async (text?: string) => {
+    const threat = (text ?? val).trim();
+    if (!threat) return;
+    try {
+      await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride`, { cat, threat });
+      if (!text) setVal("");
+      toast("ok", "threat added"); onChanged();
+    } catch (e: any) { toast("err", e.message); }
   };
   const del = async (t: StrideThreat) => {
     try { await api.action(`/api/workspaces/${encodeURIComponent(ws.key)}/stride/delete`, { cat, id: t.id }); onChanged(); }
@@ -1255,7 +1375,31 @@ function StrideGuideStep({ ws, cat, guideCat, onChanged, onGuide, canned, guideT
         <span className="text-[10px] text-[var(--color-ink-faint)]">program-specific threats for this category → streams below</span>
       </div>
       <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead}
-        wsKey={ws.key} wid={null} onChanged={onChanged} />
+        wsKey={ws.key} wid={cat} onChanged={onChanged} />
+
+      {/* What this category's last run found — so a worked category is never blank on return. */}
+      {guideTid == null && ws.stride_cards?.[cat]?.found?.length ? (
+        <div className="mt-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-2.5">
+          <div className="mb-1.5 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">from the last run</span>
+            {ws.stride_cards[cat].at && <span className="text-[10px] text-[var(--color-ink-faint)]">{fmtAgo(ws.stride_cards[cat].at!)}</span>}
+          </div>
+          <div className="space-y-1">
+            {ws.stride_cards[cat].found.map((f, i) => (
+              <div key={i} className="flex items-start gap-2 text-[11px]">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[var(--color-ink-dim)]">{f.what}</div>
+                  {f.evidence && <div className="mono break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</div>}
+                </div>
+                <button onClick={() => add(f.what)} title={`log as a ${cat} threat`}
+                  className="mono shrink-0 rounded border border-[var(--color-good)]/60 px-2 py-0.5 text-[10px] text-[var(--color-good)] hover:bg-[var(--color-good)]/10">
+                  ＋ log threat
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="mt-3 space-y-1">
         {threats.map((t, i) => (
           <div key={t.id || i} className="group flex items-start gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-2.5 py-1.5">
@@ -1369,6 +1513,12 @@ function WstgGuideStep({ ws, item, host, setHost, actions, onTask, onChanged, on
       </div>
       <GuideBox canned={canned} tid={guideTid} onComplete={auto ? undefined : recordGuide} onDead={onDead}
         wsKey={ws.key} wid={item.id} onTask={onTask} onChanged={onChanged} />
+
+      {/* What the LAST run of this step found — shown when there is no live stream, so returning
+          to a test does not require re-running it (and re-spending the tokens) to see the evidence. */}
+      {guideTid == null && item.card && (item.card.found?.length || item.card.pursue?.length) ? (
+        <PersistedCard ws={ws} item={item} onTask={onTask} onChanged={onChanged} />
+      ) : null}
 
       {/* inline testing on a chosen host */}
       <div className="mt-3 border-t border-[var(--color-border)] pt-3">
@@ -1487,6 +1637,77 @@ const WSTG_DEFAULT_NOTE: Record<string, string> = {
   done: "reviewed — no issue", finding: "flagged as a finding", na: "not applicable to this surface",
   "in-progress": "in progress",
 };
+// --- evidence board: what each stage actually turned up ----------------------
+// Every stage's findings in one place, read from the evidence persisted on each item. Answers
+// "what has this program given us so far" without opening 97 tests one by one.
+function StageFindings({ ws, onGoToStep }:
+  { ws: WorkspaceDetail; onGoToStep: (phase: "wstg", id: string) => void }) {
+  const stages = useMemo(() => {
+    const out: { id: string; name: string; cat: string; status: string;
+                 found: { what: string; evidence: string; why: string }[]; at?: string }[] = [];
+    for (const w of ws.wstg) {
+      const f = w.card?.found || [];
+      if (f.length) out.push({ id: w.id, name: w.name, cat: w.category, status: w.status, found: f, at: w.card?.at });
+    }
+    return out;
+  }, [ws.wstg]);
+  const threats = (["S", "T", "R", "I", "D", "E"] as const)
+    .flatMap((c) => (ws.stride?.[c] || []).map((t) => ({ cat: c, ...t })));
+  const totalEvidence = stages.reduce((n, s) => n + s.found.length, 0);
+
+  if (!stages.length && !threats.length) {
+    return (
+      <Panel title="what each stage found">
+        <Empty>nothing yet — model the threats, then work a test; evidence lands here as it is found</Empty>
+      </Panel>
+    );
+  }
+  return (
+    <Panel title="what each stage found"
+      right={<div className="flex items-center gap-1.5">
+        {!!threats.length && <Badge color="var(--color-accent)">{threats.length} threats</Badge>}
+        {!!totalEvidence && <Badge color="var(--color-good)">{totalEvidence} evidence</Badge>}
+      </div>}>
+      <div className="space-y-2">
+        {!!threats.length && (
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">stride · threat model</div>
+            <div className="flex flex-wrap gap-1">
+              {threats.map((t, i) => (
+                <span key={i} title={t.note || ""}
+                  className="rounded border px-1.5 py-0.5 text-[10px]"
+                  style={{ borderColor: `${wsc(t.status || "open")}55`, color: "var(--color-ink-dim)" }}>
+                  <span className="mono text-[var(--color-ink-faint)]">{t.cat}</span> {t.threat.slice(0, 64)}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {stages.map((s) => (
+          <div key={s.id} className="rounded-md border-l-2 bg-[var(--color-panel-2)] py-1.5 pl-2.5 pr-2"
+            style={{ borderLeftColor: wsc(s.status) }}>
+            <div className="mb-1 flex flex-wrap items-baseline gap-2">
+              <button onClick={() => onGoToStep("wstg", s.id)}
+                className="mono text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-accent)]">{s.id}</button>
+              <span className="text-[11px] text-[var(--color-ink)]">{s.name}</span>
+              <Badge color={wsc(s.status)}>{s.status}</Badge>
+              {s.at && <span className="text-[10px] text-[var(--color-ink-faint)]">{fmtAgo(s.at)}</span>}
+            </div>
+            <div className="space-y-0.5">
+              {s.found.map((f, i) => (
+                <div key={i} className="text-[11px] leading-snug">
+                  <span className="text-[var(--color-ink-dim)]">{f.what}</span>
+                  {f.evidence && <span className="mono ml-1.5 break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 // The picked-leads queue. Deliberately lives INSIDE the WSTG tab: it is the "what the walk turned
 // up but we have not done yet" record, not a second worklist that competes with the checklist.
 function FollowupQueue({ ws, onChanged, onTask, onGoToStep }:
@@ -1566,6 +1787,77 @@ function FollowupQueue({ ws, onChanged, onTask, onGoToStep }:
         {!rows.length && <Empty>nothing open — every picked lead is closed out</Empty>}
       </div>
     </Panel>
+  );
+}
+
+// The persisted result of a step's last run. Read-back only — it never re-decides status; the
+// operator's verdict lives on the item itself. Leads stay pickable so evidence found in a previous
+// session is still actionable without re-running the step.
+function PersistedCard({ ws, item, onTask, onChanged }:
+  { ws: WorkspaceDetail; item: WstgItem; onTask: (tid: number) => void; onChanged: () => void }) {
+  const toast = useToast();
+  const enc = encodeURIComponent(ws.key);
+  const card = item.card!;
+  const [picked, setPicked] = useState<Record<number, boolean>>({});
+
+  const pick = async (p: any, i: number) => {
+    try {
+      const r = await api.action<any>(`/api/workspaces/${enc}/followup`, { wid: item.id, item: p });
+      setPicked((s) => ({ ...s, [i]: true }));
+      toast("ok", r?.duplicate ? "already in the queue" : "picked — queued");
+      onChanged();
+    } catch (e: any) { toast("err", e.message); }
+  };
+  const run = async (p: any) => {
+    if (!p.action) return;
+    try {
+      const t = await api.action<any>(`/api/workspaces/${enc}/action`, { id: item.id, action: p.action, target: p.target });
+      const tid = t.task_id ?? t.id;
+      if (tid != null) onTask(tid);
+      toast("ok", `running: ${t.cmd || p.action}`);
+    } catch (e: any) { toast("err", e.message); }
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] p-2.5">
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">from the last run</span>
+        {card.at && <span className="text-[10px] text-[var(--color-ink-faint)]">{fmtAgo(card.at)}</span>}
+        <span className="text-[10px] text-[var(--color-ink-faint)]">— kept, so you do not have to re-run it</span>
+      </div>
+      {!!card.found?.length && (
+        <div className="mb-2 space-y-1">
+          {card.found.map((f, i) => (
+            <div key={i} className="text-[11px]">
+              <div className="text-[var(--color-ink)]">{f.what}</div>
+              {f.evidence && <div className="mono break-all text-[10px] text-[var(--color-accent)]">{f.evidence}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {!!card.pursue?.length && (
+        <div className="space-y-1">
+          {card.pursue.map((p, i) => (
+            <div key={i} className="flex flex-wrap items-start gap-2 border-l-2 pl-2"
+              style={{ borderLeftColor: PRI_COLOR[p.priority] }}>
+              <div className="min-w-[200px] flex-1 text-[11px] text-[var(--color-ink-dim)]">{p.label}</div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button onClick={() => pick(p, i)} disabled={picked[i]}
+                  className={`mono rounded border px-2 py-0.5 text-[10px] ${picked[i]
+                    ? "border-[var(--color-good)]/50 text-[var(--color-good)]"
+                    : "border-[var(--color-good)]/60 text-[var(--color-good)] hover:bg-[var(--color-good)]/10"}`}>
+                  {picked[i] ? "✓ queued" : "＋ pick"}
+                </button>
+                {p.action && (
+                  <button onClick={() => run(p)}
+                    className="mono rounded border border-[var(--color-border-bright)] px-2 py-0.5 text-[10px] text-[var(--color-ink-dim)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">▸ run</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

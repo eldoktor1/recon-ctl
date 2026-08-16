@@ -80,7 +80,16 @@ def _build_query(
         must.append({"multi_match": {"query": tech, "type": "best_fields",
                                      "fields": ["tech", "title", "host_notes_text", "triage_classes"]}})
     if program:
-        must.append({"term": {"triage_program": program}})
+        # triage_program holds whatever the platform's scope feed supplies — a slug for some
+        # (`automattic`, `deezer-bug-bounty-program-2019`), a display name for others (`Etsy`,
+        # `Glassdoor Managed Bug Bounty Engagement`). A workspace must therefore match on its key
+        # OR its name; matching only one silently joins zero hosts.
+        if isinstance(program, (list, tuple, set)):
+            vals = [str(p) for p in program if p]
+            if vals:
+                must.append({"terms": {"triage_program": vals}})
+        else:
+            must.append({"term": {"triage_program": program}})
     if priority:
         must.append({"term": {"triage_priority": priority}})
     if cls:

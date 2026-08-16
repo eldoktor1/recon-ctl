@@ -71,7 +71,14 @@ def list_findings(
     if state:
         where.append("state = ?"); params.append(state)
     if program:
-        where.append("program = ?"); params.append(program)
+        # A workspace matches on key OR name — findings.program follows the same inconsistent
+        # convention as ES triage_program (slug for some platforms, display name for others).
+        if isinstance(program, (list, tuple, set)):
+            vals = [str(p) for p in program if p]
+            if vals:
+                where.append(f"program IN ({','.join('?' * len(vals))})"); params += vals
+        else:
+            where.append("program = ?"); params.append(program)
     if vuln_class:
         where.append("vuln_class = ?"); params.append(vuln_class)
     if verdict:

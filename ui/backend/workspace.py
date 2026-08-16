@@ -754,7 +754,8 @@ def load(key: str) -> dict[str, Any] | None:
         ws = json.loads(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
-    ws.setdefault("followups", [])   # added later; older workspaces load without it
+    ws.setdefault("followups", [])       # added later; older workspaces load without them
+    ws.setdefault("stride_cards", {})
     return ws
 
 
@@ -1413,6 +1414,40 @@ def parse_model(text: str) -> dict[str, Any]:
     return out
 
 
+def program_ids(ws: dict[str, Any]) -> list[str]:
+    """Every identifier this workspace might be stored under in ES / findings.db.
+
+    `triage_program` is whatever the platform's scope feed supplies and the convention is NOT
+    consistent: yeswehack gives a slug (`deezer-bug-bounty-program-2019`), bugcrowd a display name
+    (`Glassdoor Managed Bug Bounty Engagement`), and ES holds both shapes side by side (`automattic`
+    next to `Etsy`). Joining on the display name alone silently returned zero hosts for slug-keyed
+    programs — which read as "this program has no surface" rather than as a bug."""
+    out: list[str] = []
+    for v in (ws.get("key"), ws.get("name")):
+        v = (v or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def delete(key: str) -> dict[str, Any]:
+    """Delete a workspace outright.
+
+    The engagement record (notes, worked WSTG items, threats, follow-ups) lives in this file and
+    nowhere else, so the caller must be sure — the route requires an explicit confirm. Host notes
+    and findings are NOT affected: those live in the ledger/ES and survive independently."""
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    worked = sum(1 for w in ws.get("wstg") or [] if (w.get("status") or "todo") != "todo")
+    threats = sum(len(v or []) for v in (ws.get("stride") or {}).values())
+    _path(key).unlink(missing_ok=True)
+    return {"ok": True, "key": key, "name": ws.get("name") or key,
+            "discarded": {"wstg_worked": worked, "stride_threats": threats,
+                          "notes": len(ws.get("notes") or []),
+                          "followups": len(ws.get("followups") or [])}}
+
+
 # --- follow-up queue --------------------------------------------------------
 # A step surfaces leads worth pursuing, but chasing one immediately is how a systematic walk turns
 # into a rabbit hole and coverage silently stops. PICKING a lead parks it here — bound to the step
@@ -1521,6 +1556,36 @@ def parse_step_card(text: str) -> dict[str, Any] | None:
     if not found and not pursue and not record["note"]:
         return None
     return {"found": found[:12], "record": record, "pursue": pursue[:8]}
+
+
+def save_step_card(key: str, wid: str, card: dict[str, Any]) -> dict[str, Any]:
+    """Persist what a step FOUND — for a WSTG test (`wid` = WSTG-XXXX-NN) or a STRIDE category
+    (`wid` = one of S/T/R/I/D/E).
+
+    A step's evidence used to live only in the browser: run it, navigate on, and the findings were
+    gone — the operator had to re-run the step (and re-spend the tokens) to see them again. STRIDE
+    steps were worse: they persisted nothing at all, so a worked category still read "0 threats".
+
+    Status/note/threats are deliberately NOT written here: those are the operator's call via the
+    card. This only records evidence, never a verdict."""
+    ws = load(key)
+    if not ws:
+        raise KeyError(key)
+    body = {
+        "found": (card.get("found") or [])[:12],
+        "pursue": (card.get("pursue") or [])[:8],
+        "suggested": (card.get("record") or {}),   # what the step proposed, not what was accepted
+        "at": _now(),
+    }
+    cat = (wid or "").strip().upper()
+    if cat in _STRIDE_CATS:
+        ws.setdefault("stride_cards", {})[cat] = body
+        return save(ws)
+    item = next((w for w in ws.get("wstg") or [] if w.get("id") == wid), None)
+    if not item:
+        raise KeyError(wid)
+    item["card"] = body
+    return save(ws)
 
 
 def apply_model(key: str, model: dict[str, Any]) -> dict[str, Any]:
