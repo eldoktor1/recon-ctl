@@ -28,3 +28,39 @@ Pipe 401/403 hits from `recon_kr.sh` and jsintel endpoint candidates through nom
 nomore403 -u "https://target.example.com/api/admin/users" \
   --delay 500 \
   --output json
+
+---
+
+# 403 TAXONOMY — classify before you chase (measured 2026-08-16)
+
+A 403 in `recon_alive` is FOUR different things. Chasing them as one class is what turns an
+evening into dead ends. Classify FIRST — the discriminator is cheap.
+
+| what you see | real cause | recoverable? |
+|---|---|---|
+| Real page renders in browser, 403 to curl | curl fingerprint / managed challenge | **YES — use the browser** |
+| `Attention Required! \| Cloudflare` in the BROWSER too | CF custom Firewall Rule (err 1020) matching our ASN | No — different exit didn't help |
+| `Error: Access denied` + page prints **your own IP** | CF 1020, IP/ASN-matched | No |
+| `Request forbidden by administrative rules.` (~106 B) | origin nginx/Apache **path ACL**, blocks everyone | No — by design, not about us |
+| CF **522 Connection timed out** | origin is DOWN | Not a block at all |
+| Redirects to an SSO/SAML login (e.g. Cloudflare Access) | auth-gated app | Not a block — needs creds |
+
+## The discriminators (cheapest first)
+1. **curl default UA vs curl browser UA** — measured on 28 hosts: 24/28 identical 403 both ways
+   ⇒ **User-Agent is almost never the cause.** Don't bother spoofing UA.
+2. **Real browser (JS + TLS fingerprint + cookies)** — the only thing that recovers the challenge
+   class. Verified: `au.seek.com` and `a23.paddypower.com` both 403 to curl, both render in Brave
+   on the SAME Mullvad exit.
+3. **Read the block page body** — it names the cause. CF prints your IP + a Request ID for 1020;
+   nginx prints `Request forbidden by administrative rules`; 522 says connection timed out.
+
+## Egress findings (2026-08-16, measured not assumed)
+- **Switching Mullvad exit does NOT clear a CF 1020 rule.** Tested Tzulo `23.234.92.199` →
+  DataPacket `37.19.210.35` (Denver): `*.onlineauth.prod.outfra.xyz` still 403 on all three hosts.
+  The rule matches ASN/datacenter category, not a single IP ⇒ that SEEK estate is out of reach;
+  deprioritise rather than re-probe.
+- **Never trade the VPN for reachability.** Mullvad stays sole egress; a non-VPN path is not an
+  option regardless of how much surface it would unblock.
+- **Sizing honesty:** ES showed 111k in-scope+paying 403s, 31.5k with Cloudflare Bot Management.
+  A 5-host browser sample recovered 1. Do NOT treat the Bot-Management count as a recovery
+  estimate — the pile is mostly genuine WAF rules, dead origins and SSO-gated apps.

@@ -132,6 +132,49 @@ in that set is burned. Our edge is the complement: in-scope hosts that were **no
 top-30k-style sweep — the deep/fresh CT surface, staging and regional hosts, the WAF-hardened DIG
 leads. Racing the same big-name targets everyone will now scan is the dup trap.
 
+## EMPIRICAL — our 2026-08-16 sweep: 15 hosts, 8 front-end stacks, ZERO desync
+Swept the 2026 vectors (N1 dup-CL, obfuscated dup, N2 multipart/byteranges, TE-chunked, masked-header
+control) across CloudFront/ALB, openresty, Byte-nginx, mdbws, TLB, PLB, Varnish, Tengine, BigIP.
+**Every stack: 1 request → 1 response.** All either reject ambiguous framing (400) or accept-then-close,
+which removes the connection-reuse precondition RQP needs.
+
+**The lesson worth more than the sweep: a days-old TECHNIQUE is not days-old EXPOSURE.** PortSwigger
+pre-disclosed to vendors before Black Hat, so the big edges shipped fixes before the talk. When a lane's
+freshness comes from *published research* rather than from *fresh attack surface*, assume the major
+vendors are already patched and discount the lane accordingly — the opposite of the fresh-CT-surface case,
+where freshness genuinely means nobody has looked. Ranking by "has a CDN/LB front-end" actively selects
+for the best-maintained, most-patched population; if this is retried, filter for genuinely unmaintained or
+bespoke front-ends instead, and expect low yield.
+
+## FP PATTERN — "self-pipelining" (burned an evening 2026-08-16, auth.noti.dev.outfra.xyz)
+**The single most convincing desync FP.** You send `Content-Length: 0` plus trailing bytes, then a
+follow-up on the SAME socket, and the follow-up comes back with a response that is clearly not its own
+(different status, different content-type, different body). It reproduces perfectly. It is **not a bug**.
+Declaring `CL: 0` and then sending more bytes does not smuggle anything — **those bytes ARE the next
+request**, and the server answering them is correct RFC pipelining on *your own* connection. No other
+user's traffic can be involved, so there is no vulnerability, only you confusing yourself.
+
+**THE DISCRIMINATOR — count responses per request, never inspect content:**
+- Send the probe **alone**, with NO follow-up, and count `HTTP/1.1 ` response lines.
+- **1 request → 1 response = NO desync**, regardless of how wrong a follow-up on that socket looks.
+- **1 request → ≥2 responses = the real signal** (this is exactly the 2026 N1 criterion: *an
+  RFC-compliant request drawing more than one response*).
+- Control: a genuinely-terminated trailing request (`...\r\n\r\n`) will give 1→2 legitimately — that is
+  two pipelined requests, not desync. Only a request the server must treat as ONE counts.
+
+Corollaries learned the same day:
+- **A "hang" is not a deadlock until you prove the response never arrives.** `Connection: keep-alive`
+  keeps the socket open after the response; a client waiting for close (Burp, or a naive read-loop)
+  reports a timeout while the response already sat in the buffer. Read to a byte-count, not to EOF.
+- **Connection-close on duplicate CL is the MITIGATION, not a finding.** CloudFront normalizes obfuscated
+  forms (`Content-Length : 0`) and drops connection reuse — killing the RQP precondition. Prove the
+  mechanism with a masked-header control (`Xontent-Length:`) that must stay keep-alive.
+- **Burp sends h1-formatted requests over HTTP/2 unless you disable it.** `project_options.http.http2.
+  enable_http2=false` + `http1.enable_keep_alive=true` + `repeater.enable_http1_keep_alive=true`, or every
+  h1 vector silently tests nothing. Verify the response line reads `HTTP/1.1` before trusting any result.
+- The Burp **MCP server cannot invoke extension actions** (no Smuggle-probe tool). For same-socket tests
+  drive a raw `ssl`/`socket` script — `send_http1_request` opens a fresh connection per call.
+
 ## Sources
 - PortSwigger Research — "HTTP/1.1 must die: the desync endgame" (2025)
 - PortSwigger Research — "Browser-Powered Desync Attacks" (client-side desync)
