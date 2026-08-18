@@ -791,11 +791,17 @@ run_targetsel() { v21_killed targetsel && return 0; [[ -f "$TARGETSEL_SCRIPT" ]]
 # ---- ENUMERATE the target set. 12 of the top 30 low-saturation programs had ZERO hosts
 # in ES: enumeration effort had gone to the crowded programs instead (849k of 1.39M hosts
 # are tumblr blogs). A lane with no surface to work is the real bottleneck. -------------
-ENUMTARGETS_SCRIPT="${ENUMTARGETS_SCRIPT:-$(script_path recon_discovery.sh)}"
-ENUMTARGETS_INTERVAL="${ENUMTARGETS_INTERVAL:-43200}"  # 12h
+# recon_discovery.sh pulls roots from EVERY paying program, which is how 849,539 of 1.39M
+# enumerated hosts ended up being tumblr blogs. This enumerates ONLY the low-saturation set
+# and queues at 01_ (ahead of the general backlog, behind the CT-fresh feed at 00_).
+# Passive sources + public resolvers = not target traffic, so it is cheap and carries no
+# burn risk; the validator probes what it finds under the usual Mullvad + rate-limit rules.
+ENUMTARGETS_SCRIPT="${ENUMTARGETS_SCRIPT:-$(script_path recon_enum_targets.py)}"
+ENUMTARGETS_INTERVAL="${ENUMTARGETS_INTERVAL:-21600}"  # 6h — 12 of the top 30 programs had
+                                                       # ZERO hosts; this is the bottleneck
 run_enumtargets() { v21_killed enumtargets && return 0
   [[ -f "$ENUMTARGETS_SCRIPT" ]] || return 0
-  run_scanner bash "$ENUMTARGETS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+  python3 "$ENUMTARGETS_SCRIPT" --roots 10 >>"$LOG_FILE" 2>&1 || true; }
 
 # ---- OFF-TARGET lanes — no traffic to the target, so they run hot ------------
 DEPCONF_SCRIPT="${DEPCONF_SCRIPT:-$(script_path recon_depconf.py)}"
