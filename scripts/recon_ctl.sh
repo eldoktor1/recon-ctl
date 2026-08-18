@@ -628,7 +628,7 @@ cmd_watching() {
 cmd_takeover_check() {
   local host="${1:?usage: recon-takeover-check <host>}"
   hdr "Manual takeover probe: $host"
-  bash "$(script_path recon_takeover_hunter.sh)" check "$host"
+  python3 "$SCRIPT_DIR/recon_takeover.py" "$host"
 }
 
 cmd_dupes() {
@@ -669,7 +669,6 @@ cmd_health() {
     "validate:recon_validate.sh" \
     "discovery:recon_discovery.sh" \
     "scope-watch:recon_scope_watch.sh" \
-    "takeover-watch:recon_takeover_hunter.sh watch" \
     "true-fresh:recon_true_fresh.sh" \
     "hot-seed:recon_hot_seed.sh" \
     "vpnguard:recon_vpnguard.sh" \
@@ -1606,7 +1605,7 @@ cmd_digest_now() {
 
 cmd_leads() {
   # Curated high-signal lead digest — read-only preview to stdout (no posting).
-  bash "$SCRIPT_DIR/recon_digest_leads.sh" print
+  echo "lead digest retired — the briefing now leads with RECOVERED impact" >&2
 }
 
 cmd_leads_post() {
@@ -2577,7 +2576,8 @@ case "${1:-}" in
   takeovers|to) shift; cmd_takeovers "$@" ;;
   watching|w)   cmd_watching ;;
   takeover-check|tc) shift; cmd_takeover_check "$@" ;;
-  takeover-dedup|tdd) bash "$(script_path recon_takeover_hunter.sh)" dedup ;;
+  takeover|tko)  # claimability-confirmed subdomain takeover (reads host_notes first)
+                shift; python3 "$SCRIPT_DIR/recon_takeover.py" "$@" ;;
   dupes)        shift; cmd_dupes "$@" ;;
   submit)       shift; cmd_submit "$@" ;;
   health)       cmd_health ;;
@@ -2612,10 +2612,12 @@ case "${1:-}" in
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;
-  mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
-  targets)      # Under-Hunted Target Board: ranked program-selection menu + auto-onboard.
-                # Pure data (no target traffic) → runs as d0k. default = show the board.
-                shift; bash "$SCRIPT_DIR/recon_targets.sh" "${@:-show}" ;;
+  targets|unsaturated)
+                # LOW-SATURATION target set. Replaces the mood selector and the
+                # under-hunted target board: both ranked by payout, which is backwards for a
+                # part-timer. Expected value is payout x P(you are first), and the second term
+                # collapses on famous programs. Pure data, no target traffic → d0k.
+                shift; python3 "$SCRIPT_DIR/recon_target_select.py" "$@" ;;
   buckets)      # cloud-bucket exposure (S3Scanner). target-facing → reconrun (Mullvad egress);
                 # default = one scan cycle. check/writecheck/results/seed pass through.
                 shift

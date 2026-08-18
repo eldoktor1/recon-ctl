@@ -103,7 +103,7 @@ BATCHES_PER_CYCLE="${BATCHES_PER_CYCLE:-3}"
 RUN_TAKEOVER="${RUN_TAKEOVER:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 script_path() { printf '%s\n' "$SCRIPT_DIR/$1"; }
-TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover_hunter.sh)}"
+TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover.py)}"
 RUN_TRIAGE="${RUN_TRIAGE:-1}"
 TRIAGE_SCRIPT="${TRIAGE_SCRIPT:-$(script_path triage.sh)}"
 

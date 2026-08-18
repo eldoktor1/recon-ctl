@@ -44,8 +44,6 @@ VALIDATE="${VALIDATE:-$(script_path recon_validate.sh)}"
 DISCOVERY="${DISCOVERY:-$(script_path recon_discovery.sh)}"
 HOT_SEED="${HOT_SEED:-$(script_path recon_hot_seed.sh)}"
 SCOPE_WATCH="${SCOPE_WATCH:-$(script_path recon_scope_watch.sh)}"
-TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
-
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
 
@@ -188,7 +186,7 @@ run_scanner() {
   # SMART-SCOPED: only the CONFIRM + UNIQUE lanes get the proxy pool (MT_LANES) — the commodity
   # validate/portscan bulk drain stays on the single host exit, so the scarce IPs buy findings
   # (confirm throughput on dup-proof leads), not raw fps over commodity hosts.
-  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql|recon_unauth_expose}"
+  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql}"
   if [[ "${MULTITUNNEL:-0}" == "1" && "${2##*/}" =~ ^(${_mtlanes}) ]]; then
     local _mtlist="${MT_PROXY_LIST:-$STATE_DIR/egress_proxies.txt}"
     local _mtrr="${MT_RR_FILE:-$STATE_DIR/egress_rr.idx}"
@@ -667,7 +665,7 @@ run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 
 # decides what is worth verifying + which vuln class, and flags evidence-gate
 # candidates: conscious surface selection, not blanket scanning. Feeds gate -> verify.
 # Runs as d0k (Claude auth per-user). Not target-facing (reasons over stored data).
-AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
+
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
@@ -689,7 +687,7 @@ run_ai_hunter() { v21_killed ai_hunter && return 0; [[ -f "$AI_HUNTER_SCRIPT" ]]
 # that metadata-only ANALYZE is blind to; worth+probeable hits become evidence-gate
 # candidates (feeds verify). Token-frugal: thumb-only, haiku, TTL. Not target-facing
 # (reasons over stored thumbnails). Runs as d0k (Claude auth per-user).
-AI_VISION_SCRIPT="${AI_VISION_SCRIPT:-$(script_path recon_ai_vision.sh)}"
+
 AI_VISION_INTERVAL="${AI_VISION_INTERVAL:-3600}"
 run_ai_vision() { [[ -f "$AI_VISION_SCRIPT" ]] && bash "$AI_VISION_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
@@ -790,7 +788,7 @@ run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIP
 # Scores every bug-bounty PROGRAM by Under-Hunted EV (freshness + low-saturation dominate, payout
 # capped = anti-dup) → ranked menu (briefings/targets_<date>.md) + auto-onboards the top N into the
 # validator queue. Pure data (no target traffic) → runs as d0k. Killswitch: state/kill/v2_targets.
-TARGETS_SCRIPT="${TARGETS_SCRIPT:-$(script_path recon_targets.sh)}"
+
 TARGETS_INTERVAL="${TARGETS_INTERVAL:-86400}"        # daily
 run_targets() { v21_killed targets && return 0; [[ -f "$TARGETS_SCRIPT" ]] && bash "$TARGETS_SCRIPT" score >>"$LOG_FILE" 2>&1 || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
@@ -1044,7 +1042,6 @@ run_discord_bot() {
   supervise_loop "validate"      "VALIDATE_SLEEP"      run_validate      &
   supervise_loop "validate-fast" "VALIDATE_FAST_SLEEP" run_validate_fast &
   supervise_loop "discovery"     "DISCOVERY_SLEEP"     run_discovery     &
-  supervise_loop "hot-seed"      "HOT_SEED_SLEEP"      run_hot_seed      &
   supervise_loop "scope-watch"   "SCOPE_SLEEP"         run_scope_watch   &
 
   supervise_loop "true-fresh" "TRUE_FRESH_SLEEP"  run_true_fresh &
@@ -1065,10 +1062,7 @@ run_discord_bot() {
   supervise_loop "params-live"    "PARAMS_LIVE_INTERVAL"   run_params_live    &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
-  supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
   supervise_loop "ai-hunter"      "AI_HUNTER_INTERVAL"     run_ai_hunter      &
-  supervise_loop "ai-vision"      "AI_VISION_INTERVAL"     run_ai_vision      &
-  supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
@@ -1086,23 +1080,17 @@ run_discord_bot() {
   supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
-  supervise_loop "targets"          "TARGETS_INTERVAL"          run_targets          &
-  supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
-  supervise_loop "baddns"         "BADDNS_INTERVAL"        run_baddns         &
-  supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
   supervise_loop "kr"             "KR_INTERVAL"            run_kr             &
-  supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
   supervise_loop "cognito"        "COGNITO_INTERVAL"       run_cognito        &
   supervise_loop "blindxss-plant"     "BLINDXSS_PLANT_INTERVAL"     run_blindxss_plant     &
   supervise_loop "blindxss-correlate" "BLINDXSS_CORRELATE_INTERVAL" run_blindxss_correlate &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
-  supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
   supervise_loop "self-audit"     "SELFAUDIT_INTERVAL"     run_selfaudit      &
   supervise_loop "nuclei-update"  "NUCLEI_UPDATE_INTERVAL" run_nuclei_update  &
