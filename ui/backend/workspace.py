@@ -1157,8 +1157,39 @@ _STEP_CARD = (
 )
 
 
+# Endpoint semantics. A flat list of 25 paths tells the model nothing about where the
+# TRUST BOUNDARIES are; bucketing by what a route DOES (money / identity / privilege /
+# object-ownership) is what turns a path list into an application model. These buckets are
+# the ones that carry five-figure classes: multi-tenant isolation, auth chains, payment logic.
+_EP_MONEY = re.compile(r"pay|billing|invoice|subscri|offer|coupon|voucher|promo|gift|price|refund|order|card|iban|charge|plan|upgrade|downgrade|credit|wallet|checkout", re.I)
+_EP_IDENT = re.compile(r"auth|token|login|logout|session|oauth|sso|saml|password|reset|email|phone|mfa|otp|verify|account|profile|register|signup", re.I)
+_EP_PRIV = re.compile(r"admin|internal|manage|moderat|staff|backoffice|console|debug|impersonat|export|import|bulk", re.I)
+_EP_OBJ = re.compile(r"\{[^}]+\}|:[a-z_]+|/\d{3,}|%s|<[a-z_]+>|\[\.\.\.|\[[a-z]+\]", re.I)
+_EP_TENANT = re.compile(r"/(orgs?|organizations?|tenants?|workspaces?|teams?|compan(y|ies)|members?|famil(y|ies)|groups?)/", re.I)
+
+
+def _bucket_endpoints(endpoints: list[str]) -> list[str]:
+    """Group endpoints by what they DO, so the model reasons about boundaries not strings."""
+    buckets: dict[str, list[str]] = {}
+    for e in endpoints:
+        tags = []
+        if _EP_TENANT.search(e): tags.append("TENANT/MEMBER")
+        if _EP_MONEY.search(e): tags.append("MONEY")
+        if _EP_IDENT.search(e): tags.append("IDENTITY")
+        if _EP_PRIV.search(e): tags.append("PRIVILEGED")
+        if _EP_OBJ.search(e): tags.append("OBJECT-REF")
+        buckets.setdefault(" + ".join(tags) if tags else "other", []).append(e)
+    out: list[str] = []
+    # boundary-carrying buckets first; 'other' last and capped (it is the least informative)
+    for k in sorted(buckets, key=lambda k: (k == "other", -len(buckets[k]))):
+        rows = buckets[k]
+        out.append(f"  [{k}]  ({len(rows)})")
+        out.extend(f"    - {e}" for e in rows[: (8 if k == 'other' else 20)])
+    return out
+
+
 def _program_context(ws: dict[str, Any], hosts: list[dict[str, Any]],
-                     endpoints: list[str]) -> str:
+                     endpoints: list[str], source: dict[str, Any] | None = None) -> str:
     name = ws.get("name") or ws.get("key")
     lines = [f"PROGRAM: {name}  (platform: {ws.get('platform') or '?'})"]
     if hosts:
@@ -1170,9 +1201,37 @@ def _program_context(ws: dict[str, Any], hosts: list[dict[str, Any]],
     else:
         lines.append("(no ES hosts joined yet for this program)")
     if endpoints:
-        lines.append("Sample discovered endpoints (from jsintel/ES):")
-        for e in endpoints[:25]:
-            lines.append(f"  - {e}")
+        lines.append(f"DISCOVERED ROUTES ({len(endpoints)}), grouped by what they do — "
+                     "the grouped buckets are where trust boundaries live:")
+        lines.extend(_bucket_endpoints(endpoints))
+    else:
+        lines.append("(NO endpoints mined for this program yet — run jsintel focused on it before "
+                     "trusting any model built from this context)")
+
+    # RETAINED APPLICATION SOURCE — the difference between 'a route exists' and 'here is where
+    # authorisation is decided'. Endpoint strings cannot show a client-side-only check; source can.
+    if source and (source.get("authz") or source.get("calls")):
+        lines.append(f"\nRECONSTRUCTED APPLICATION SOURCE (from leaked source maps — "
+                     f"{source.get('files', 0)} file(s) across {len(source.get('hosts') or [])} host(s)):")
+        mods = source.get("modules") or []
+        if mods:
+            lines.append("  Modules (auth/billing/member/admin first — the app's own component names):")
+            lines.extend(f"    - {m}" for m in mods[:30])
+        authz = source.get("authz") or []
+        if authz:
+            lines.append("  AUTHORISATION / OWNERSHIP DECISION POINTS — for each, ask: is this check "
+                         "enforced SERVER-side, or is this the ONLY check and it runs in the browser? "
+                         "A client-side-only ownership check is a critical, not a nit:")
+            for a in authz[:60]:
+                lines.append(f"    - {a.get('file')}:{a.get('line')}  {a.get('code')}")
+        calls = source.get("calls") or []
+        if calls:
+            lines.append("  API call sites observed in source (method/path the client actually invokes):")
+            lines.extend(f"    - {c}" for c in calls[:40])
+    else:
+        lines.append("\n(no reconstructed source retained for these hosts — jsintel keeps source maps "
+                     "under ~/recon/js_recon/src/<host>/; without it the model can only reason about "
+                     "route NAMES, never about where authorisation is actually enforced)")
     return "\n".join(lines)
 
 
@@ -1335,10 +1394,15 @@ _MODEL_CONTRACT = (
 
 
 def build_model_prompt(ws: dict[str, Any], hosts: list[dict[str, Any]], endpoints: list[str],
-                       killed: dict[str, set[str]] | None = None) -> str:
+                       killed: dict[str, set[str]] | None = None,
+                       source: dict[str, Any] | None = None) -> str:
     """Grounded prompt asking Claude to DERIVE the STRIDE threat model + WSTG relevance
-    ranking from this program's actual surface (not the generic seed)."""
-    ctx = _program_context(ws, hosts, endpoints)
+    ranking from this program's actual surface (not the generic seed).
+
+    `source` is the retained reconstructed application source (files.program_source) — the
+    authorisation/ownership decision points. Without it the model can only reason about route
+    names; with it, it can name the specific broken assumption a five-figure finding turns on."""
+    ctx = _program_context(ws, hosts, endpoints, source)
     lines: list[str] = []
     wstg = ws.get("wstg") or []
     worked = [w for w in wstg if (w.get("status") or "todo") != "todo"]

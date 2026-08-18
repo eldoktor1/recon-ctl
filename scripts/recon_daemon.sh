@@ -723,6 +723,51 @@ run_buckets() { v21_killed buckets && return 0; [[ -f "$BUCKETS_SCRIPT" ]] && ru
 GRAPHQL_SCRIPT="${GRAPHQL_SCRIPT:-$(script_path recon_graphql.sh)}"
 GRAPHQL_INTERVAL="${GRAPHQL_INTERVAL:-10800}"   # 3h
 run_graphql() { v21_killed graphql && return 0; [[ -f "$GRAPHQL_SCRIPT" ]] && run_scanner bash "$GRAPHQL_SCRIPT" scan || true; }
+# ---------------------------------------------------------------------------------------
+# CHAIN-TO-IMPACT lanes (2026-08-17). Discovery is not a finding — each of these takes a
+# lane that used to mint an observation and carries it through to recovered credentials or
+# confirmed unauthenticated access. Each mints ONLY on demonstrated impact; a properly
+# secured target is recorded as a negative and never minted. See CLAUDE.md.
+#
+# recon_feed — mines ES for what each impact lane needs (the lanes were starved: the bucket
+# lane read a 162k-row endpoint file and found 11 buckets, ES holds 2.8M docs; the actuator
+# lane had ZERO candidates because its fingerprints live in headers, not JS paths).
+# Read-only against our OWN index — issues no target traffic → d0k. Killswitch: v2_feed.
+FEED_SCRIPT="${FEED_SCRIPT:-$(script_path recon_feed.py)}"
+FEED_INTERVAL="${FEED_INTERVAL:-21600}"          # 6h — cheap, keeps every lane supplied
+run_feed() { v21_killed feed && return 0; [[ -f "$FEED_SCRIPT" ]] && \
+  python3 "$FEED_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+# recon_actuator_chain — exposed actuator → /env + /configprops + streamed /heapdump →
+# ACTUALLY recovered credentials. Read-only endpoints only (never /shutdown, /restart,
+# /jolokia). Target-facing → run_scanner. Killswitch: v2_actchain.
+ACTCHAIN_SCRIPT="${ACTCHAIN_SCRIPT:-$(script_path recon_actuator_chain.py)}"
+ACTCHAIN_INTERVAL="${ACTCHAIN_INTERVAL:-28800}"  # 8h
+run_actchain() { v21_killed actchain && return 0
+  local f="$STATE_DIR/feed_actuator.txt"
+  [[ -f "$ACTCHAIN_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$ACTCHAIN_SCRIPT" $(head -60 "$f" | tr '\n' ' ') || true; }
+
+# recon_port_proto — open port → SPEAK THE PROTOCOL → confirm unauthenticated access.
+# Replaces "port 6379 is open" (96 findings, 0 real) with "no-AUTH Redis, N keys".
+# Read-only verbs; no records read. CDN-fronted hosts excluded by the feed.
+PORTPROTO_SCRIPT="${PORTPROTO_SCRIPT:-$(script_path recon_port_proto.py)}"
+PORTPROTO_INTERVAL="${PORTPROTO_INTERVAL:-21600}"  # 6h
+run_portproto() { v21_killed portproto && return 0
+  local f="$STATE_DIR/feed_ports.txt"
+  [[ -f "$PORTPROTO_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$PORTPROTO_SCRIPT" $(head -60 "$f" | tr '\n' ' ') || true; }
+
+# recon_graphql_chain — introspection → a sensitive query with NO required args → EXECUTE ONE
+# read-only query. "Introspection enabled" alone is the #1 GraphQL duplicate; the finding is
+# the data returned. Queries only, never a mutation, never an invented identifier.
+GQLCHAIN_SCRIPT="${GQLCHAIN_SCRIPT:-$(script_path recon_graphql_chain.py)}"
+GQLCHAIN_INTERVAL="${GQLCHAIN_INTERVAL:-28800}"  # 8h
+run_gqlchain() { v21_killed gqlchain && return 0
+  local f="$STATE_DIR/feed_graphql.txt"
+  [[ -f "$GQLCHAIN_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$GQLCHAIN_SCRIPT" $(head -40 "$f" | tr '\n' ' ') || true; }
+
 # recon_wcd — web-cache deception/poisoning LEAD surfacer (detect-only, cache-busted = never poisons
 # the real cache). CDN-fronted in-scope hosts only. Target-facing → run_scanner. Killswitch: v2_wcd.
 WCD_SCRIPT="${WCD_SCRIPT:-$(script_path recon_wcd.sh)}"
@@ -896,8 +941,40 @@ run_selfaudit() { [[ -f "$SELFAUDIT_SCRIPT" ]] && bash "$SELFAUDIT_SCRIPT" >>"$L
 # anywhere = a FROZEN template set, missing every monthly FP-fix + new CVE). Refresh out-of-band
 # (weekly); the gate keeps -duc at probe time for speed. Not target-facing (fetches from GitHub),
 # runs as d0k; the supervise_loop vpn gate skips it while vpn_down (harmless to defer). ----
-NUCLEI_UPDATE_INTERVAL="${NUCLEI_UPDATE_INTERVAL:-604800}"   # weekly
-run_nuclei_update() { command -v nuclei >/dev/null 2>&1 && nuclei -update-templates -silent >>"$LOG_FILE" 2>&1 || true; }
+# RELIABILITY (2026-08-18): `nuclei -update-templates` reported "No new updates found" while the
+# template set sat at 2026-03-02 — FIVE AND A HALF MONTHS stale, missing 438 CVE detections
+# (293 of them 2026 CVEs). The binary was v3.7.1 against a current v3.11.1 and its version check
+# had settled on a template release it considered latest. With `-silent ... || true` the failure
+# was indistinguishable from success, so nothing ever alarmed.
+#
+# So: pull from git DIRECTLY (authoritative — a commit either arrives or it does not), then
+# ASSERT THE OUTCOME. Never trust an updater's own report of its success.
+NUCLEI_UPDATE_INTERVAL="${NUCLEI_UPDATE_INTERVAL:-86400}"    # daily — CVE detections age fast
+NUCLEI_TEMPLATES_DIR="${NUCLEI_TEMPLATES_DIR:-$HOME/nuclei-templates}"
+NUCLEI_MAX_STALE_DAYS="${NUCLEI_MAX_STALE_DAYS:-3}"
+run_nuclei_update() {
+  local d="$NUCLEI_TEMPLATES_DIR"
+  [[ -d "$d/.git" ]] || { command -v nuclei >/dev/null 2>&1 && nuclei -update-templates -silent >>"$LOG_FILE" 2>&1; return 0; }
+  ( cd "$d" || exit 0
+    # local churn (TEMPLATES-STATS.json etc.) blocks a ff-only pull; park it, never merge it
+    git stash push -u -m "daemon-autostash-$(date +%s)" >/dev/null 2>&1 || true
+    timeout 600 git pull --ff-only origin main >>"$LOG_FILE" 2>&1 ||       timeout 600 git pull --ff-only origin master >>"$LOG_FILE" 2>&1 || true
+    git stash drop >/dev/null 2>&1 || true ) || true
+
+  # ASSERT: is the template set actually current? A stale detection set is a silent
+  # capability outage — every CVE published since the freeze is invisible to us.
+  local last_epoch age_days
+  last_epoch="$( cd "$d" 2>/dev/null && git log -1 --format=%ct 2>/dev/null )" || last_epoch=""
+  if [[ -n "$last_epoch" ]]; then
+    age_days=$(( ( $(date +%s) - last_epoch ) / 86400 ))
+    if (( age_days > NUCLEI_MAX_STALE_DAYS )); then
+      log "ALARM nuclei-templates ${age_days}d stale (max ${NUCLEI_MAX_STALE_DAYS}d) — CVE detection coverage is FROZEN"
+      discord_post ops "⚠️ nuclei-templates **${age_days} days stale** — every CVE disclosed since then has no detection. \`cd $d && git pull\`" 2>/dev/null || true
+    else
+      log "nuclei-templates current (${age_days}d old, $(find "$d" -name '*.yaml' 2>/dev/null | wc -l) templates)"
+    fi
+  fi
+}
 
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
@@ -1000,6 +1077,11 @@ run_discord_bot() {
   supervise_loop "buckets"        "BUCKETS_INTERVAL"       run_buckets        &
   supervise_loop "graphql"        "GRAPHQL_INTERVAL"       run_graphql        &
   supervise_loop "wcd"            "WCD_INTERVAL"           run_wcd            &
+  # chain-to-impact lanes — feed first so the others always have fresh targets
+  supervise_loop "feed"           "FEED_INTERVAL"          run_feed           &
+  supervise_loop "actchain"       "ACTCHAIN_INTERVAL"      run_actchain       &
+  supervise_loop "portproto"      "PORTPROTO_INTERVAL"     run_portproto      &
+  supervise_loop "gqlchain"       "GQLCHAIN_INTERVAL"      run_gqlchain       &
   supervise_loop "research-vulns"   "RESEARCH_VULNS_INTERVAL"   run_research_vulns   &
   supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &

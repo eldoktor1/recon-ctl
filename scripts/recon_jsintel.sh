@@ -56,6 +56,13 @@ exec 9>"$STATE_DIR/jsintel.lock"; flock -n 9 || { warn "already running"; exit 0
 for t in jsluice trufflehog subjs jq curl; do command -v "$t" >/dev/null 2>&1 || { warn "$t missing"; exit 0; }; done
 SOURCEMAPPER="$(command -v sourcemapper 2>/dev/null || true)"          # OPTIONAL: reconstruct leaked .map → deeper mine
 SECRET_LEADS="${JS_SECRET_LEADS:-$BASE_DIR/js_recon/secret_leads.jsonl}"  # jsluice AST secret CANDIDATES (review-only LEADs)
+# RETAINED reconstructed source (added 2026-08-16). A leaked .map is the ORIGINAL application
+# source. Regexing it for URLs/secrets and deleting it throws away the only artifact that shows
+# HOW the app works — authz checks, roles, object ownership, money flows. That reasoning surface
+# is what pays 5-figures; endpoint strings pay 3. Keep the tree so the app-model pass can read it.
+SRC_STORE="${JS_SRC_STORE:-$BASE_DIR/js_recon/src}"                      # persisted per-host source trees
+SRC_KEEP_MB="${JS_SRC_KEEP_MB:-40}"                                      # per-host cap (anti-disk-blowup)
+SRC_INDEX="${JS_SRC_INDEX:-$BASE_DIR/js_recon/src_index.jsonl}"          # what we retained, per host
 
 # Host selection: VALUE-WEIGHTED freshness. IDOR/BOLA on high-value programs is the
 # #1 paid class (the money pillar this feeds), and fresh-first alone never reached the
@@ -63,13 +70,40 @@ SECRET_LEADS="${JS_SECRET_LEADS:-$BASE_DIR/js_recon/secret_leads.jsonl}"  # jslu
 # first (elite>high>... alphabetical asc), then true_fresh (fresh WITHIN tier — keeps the
 # be-first-to-fresh edge for new high-value hosts), then score. Mines elite API surface
 # first -> richer feedstock for recon_idor_candidates.py. (2026-06-13)
+# FOCUS-FIRST (added 2026-08-16). The operator COMMITS to a program in the Program Workspace
+# (~/recon/workspaces/<key>.json with current:true) — but every lane ignored that commitment and
+# mined the ES-wide ranking instead. Because the global sort is payout_tier ASC (elite>high>mid),
+# a committed MID-tier program is structurally unreachable and its workspace stays empty of
+# endpoints/source forever. That is why a committed program's WSTG walk had no app data to work
+# from. The workspace `key` IS the ES `triage_program`, so focusing is a direct term filter.
+# Focused hosts are mined FIRST, then the global ranking fills the remaining budget (so committing
+# never starves global coverage). Disable with JS_FOCUS=0.
+FOCUS_PROG=""
+if [[ "${JS_FOCUS:-1}" == "1" && -d "$BASE_DIR/workspaces" ]]; then
+  FOCUS_PROG="$(jq -rs 'map(select(.current==true)) | .[0].key // empty' \
+                  "$BASE_DIR"/workspaces/*.json 2>/dev/null | head -1)"
+fi
+focus_hosts=()
+if [[ -n "$FOCUS_PROG" ]]; then
+  fq="$(jq -nc --arg p "$FOCUS_PROG" '{size:500,_source:["host"],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{triage_program:$p}}],
+                 must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}},
+    sort:[{triage_score:{order:"desc",missing:"_last"}}]}')"
+  mapfile -t focus_hosts < <(es "$ES_URL/$INDEX_NAME/_search" -d "$fq" 2>/dev/null \
+    | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null | awk 'NF && !s[$0]++' \
+    | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$JS_HOSTS")
+  [[ "${#focus_hosts[@]}" -gt 0 ]] \
+    && log "🎯 FOCUS: committed program '$FOCUS_PROG' — ${#focus_hosts[@]} host(s) mined FIRST" \
+    || log "🎯 FOCUS: '$FOCUS_PROG' committed but 0 un-mined hosts (already covered, or none in scope)"
+fi
 q="$(jq -nc --argjson n "$JS_HOSTS" '{size:2000,_source:["host"],
   query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{status_code:200}}],
                must_not:[{term:{triage_out_of_scope:true}}]}},
   sort:[{triage_payout_tier:{order:"asc",missing:"_last"}},{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
-mapfile -t hosts < <(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
-  | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null | awk 'NF && !s[$0]++' \
-  | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$JS_HOSTS")
+mapfile -t hosts < <( { printf '%s\n' "${focus_hosts[@]}"; \
+    es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
+      | jq -r '.hits.hits[]._source.host // empty' 2>/dev/null; } \
+  | awk 'NF && !s[$0]++' | grep -vxF -f "$SEEN" 2>/dev/null | head -n "$JS_HOSTS")
 [[ "${#hosts[@]}" -gt 0 ]] || { log "no fresh in-scope hosts to mine"; exit 0; }
 log "🧬 ─── JS INTEL ─── ${#hosts[@]} host(s) · gather JS → jsluice endpoints + trufflehog LIVE-secret verify ───"
 
@@ -110,6 +144,27 @@ for host in "${hosts[@]}"; do
       timeout 30 "$SOURCEMAPPER" -jsurl "$ju" -output "$wd/srcmap/$idx" >/dev/null 2>&1 && smaps=$((smaps+1))
     done
     [[ "$smaps" -gt 0 ]] && log "      ↳ 🗺️  $smaps source map(s) reconstructed → deeper mine"
+    # RETAIN the reconstructed tree (2026-08-16). Without this the source dies with $wd and the
+    # app-model pass has nothing to reason over. Size-capped; skips node_modules/vendor noise.
+    if [[ "${smaps:-0}" -gt 0 && -d "$wd/srcmap" ]]; then
+      _sz="$(du -sm "$wd/srcmap" 2>/dev/null | cut -f1)"; _sz="${_sz:-0}"
+      if [[ "$_sz" -le "$SRC_KEEP_MB" ]]; then
+        mkdir -p "$SRC_STORE/$host" 2>/dev/null
+        # copy only real source; drop dependency trees (not the target's code, pure noise)
+        (cd "$wd/srcmap" 2>/dev/null && find . -type f \
+            \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.vue' -o -name '*.mjs' \) \
+            ! -path '*/node_modules/*' ! -path '*/vendor/*' ! -path '*/webpack/bootstrap*' \
+            -print0 2>/dev/null | tar --null -cf - --files-from=- 2>/dev/null) \
+          | (cd "$SRC_STORE/$host" 2>/dev/null && tar -xf - 2>/dev/null)
+        _n="$(find "$SRC_STORE/$host" -type f 2>/dev/null | wc -l | tr -d ' ')"
+        jq -nc --arg h "$host" --arg p "$prog" --argjson maps "$smaps" --argjson files "${_n:-0}" \
+               --argjson mb "$_sz" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+           '{host:$h,program:$p,source_maps:$maps,files:$files,mb:$mb,at:$t}' >> "$SRC_INDEX" 2>/dev/null
+        log "      ↳ 💾 retained $_n source file(s) → $SRC_STORE/$host  (app-model feedstock)"
+      else
+        log "      ↳ ⚠️  srcmap tree ${_sz}MB > cap ${SRC_KEEP_MB}MB — not retained"
+      fi
+    fi
   fi
   # Source set for the AST miners = bundles + any reconstructed original source (capped —
   # reconstructed trees can be large).

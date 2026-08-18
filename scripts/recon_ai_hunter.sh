@@ -279,13 +279,42 @@ $(printf '%s' "$tested")"
       [[ -n "$url" ]] || url="https://$host"
       case "$verdict" in
         confirmed)
-          # execution-grounded mint -> verify gate -> reporter hard-gates ai_verdict='real'
-          local score conf evj
-          case "$sev" in critical) score=15;; high) score=12;; medium) score=8;; *) score=5;; esac
-          conf="$(jq -r '.confidence // 0.8' <<<"$v")"
-          evj="$(jq -nc --arg ev "$ev" --arg src "ai_hunter" --arg vc "$vc" --arg sev "$sev" '{probe:"ai-hunter-unauth",source:$src,vuln_class:$vc,severity:$sev,evidence:$ev}')"
+          # IMPACT GATE — the model saying "confirmed" is an opinion; the probe RESPONSE is
+          # evidence. Re-read the real body this hypothesis produced and ask engine/impact.py
+          # what was actually recovered. No recovered credential and no real personal data
+          # => score 0 => NOT a finding, whatever the adjudicator claimed.
+          #
+          # This is why the lane had 37 findings and 0 real verdicts: it minted its own
+          # self-assessment. A "request-echo information disclosure, severity low" is an
+          # endpoint responding, not something you got. (Added 2026-08-17.)
+          local score conf evj body iverd imint iscore iimpact ikinds
+          body="$(printf '%s' "$tested" | jq -r --arg id "$id" \
+                    '.[] | select(.hypothesis.id==$id) | .probe.body // ""' 2>/dev/null | head -c 400000)"
+          iverd="$(printf '%s' "$body" | python3 "$REPO_DIR/engine/impact.py" verdict "ai-hunter:$url" 2>/dev/null)"
+          imint="$(jq -r '.mint // false' <<<"${iverd:-{\}}" 2>/dev/null)"
+          iscore="$(jq -r '.score // 0'  <<<"${iverd:-{\}}" 2>/dev/null)"
+          iimpact="$(jq -r '.impact // ""' <<<"${iverd:-{\}}" 2>/dev/null)"
+          ikinds="$(jq -r '(.secret_kinds // []) | join(",")' <<<"${iverd:-{\}}" 2>/dev/null)"
+          if [[ "$imint" != "true" ]]; then
+            leads=$((leads+1))
+            log "  ✗ adjudicator said CONFIRMED $vc but the probe body demonstrates NO impact \
+(no credential recovered, no personal data) — NOT minted; recorded as a lead"
+            { [[ -s "$brief" ]] || printf '# Hunter worklist — %s\n\n' "$stamp" > "$brief"
+              printf -- '- **[lead] %s** `%s` — %s\n  - model said confirmed; impact gate found nothing recoverable in the response\n  - %s\n' \
+                "$vc" "$url" "$host" "$ev" >> "$brief"; }
+            python3 "$STATE_PY" kb-record "$host" "$program" "" "ai-hunter" "$vc" "fp" "0.9" "impact_gate" \
+              "adjudicator confirmed but no impact recoverable from the probe body" >/dev/null 2>&1 || true
+            continue
+          fi
+          # Severity comes from what was RECOVERED, not from what the model felt.
+          score="$iscore"
+          conf="$(jq -r '.confidence // 0.9' <<<"$iverd")"
+          evj="$(jq -nc --arg ev "$ev" --arg src "ai_hunter" --arg vc "$vc" --arg sev "$sev" \
+                       --arg imp "$iimpact" --arg kinds "$ikinds" --argjson iv "${iverd:-null}" \
+                 '{probe:"ai-hunter-unauth",source:$src,vuln_class:$vc,severity:$sev,
+                   evidence:$ev,impact:$imp,recovered:$kinds,impact_gate:$iv}')"
           if V3_DB="$V3_DB" python3 "$STATE_PY" record-confirmed "$host" "$url" "$program" "ai-hunter" "$vc" "$score" "$conf" "$evj" >/dev/null 2>&1; then
-            minted=$((minted+1)); log "  🔥 CONFIRMED $vc ($sev) $url — minted → verify gate → #review"
+            minted=$((minted+1)); log "  🔥 CONFIRMED $vc — $iimpact — $url — minted → verify gate → #review"
           fi
           python3 "$STATE_PY" kb-record "$host" "$program" "$(printf '%s' "$ctx"|head -1)" "ai-hunter" "$vc" "real" "${conf:-0.8}" "ai_hunter" "$ev" >/dev/null 2>&1 || true ;;
         needs-human|needs-account)

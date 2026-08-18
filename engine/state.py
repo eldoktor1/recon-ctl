@@ -574,9 +574,38 @@ def _main(argv):
         record_fp(conn, sig, a[3] if len(a) > 3 else "", a[4] if len(a) > 4 else "gate-exhausted")
         print(sig)
     elif cmd == "record-confirmed":  # host url program signal_class vuln_class score confidence evidence_json
+        # TRANSITION GATE at the actual write, not in a wrapper. It was first added to
+        # db_confirm() in recon_net.sh, but FIVE lanes (ai-hunter, blindxss, dangling-dns,
+        # domxss-confirm, and daemon paths) call this CLI directly and sailed straight past
+        # it — ai-hunter minted two request-echo "findings" hours after the gate went in.
+        # This is the one chokepoint every shell lane passes through, so it belongs here.
+        # Lanes that confirm a PRIMITIVE are exempt via transition.ALWAYS_MINT; state
+        # observations record a baseline on first sight and only mint on a CHANGE.
+        # Fails OPEN: any error lets the write through.
+        _ev = a[7] if len(a) > 7 else "{}"
+        if os.environ.get("RECON_TRANSITION_GATE") != "0":
+            try:
+                # Run as `python3 engine/state.py`, sys.path[0] is engine/ — NOT the repo
+                # root — so a plain `from engine import transition` raises ImportError and
+                # the fail-open below swallows it, silently disabling the gate. Import the
+                # sibling module directly instead of depending on how we were invoked.
+                import importlib.util as _ilu
+                _tp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transition.py")
+                _spec = _ilu.spec_from_file_location("_recon_transition", _tp)
+                _t = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_t)
+                _v = _t.check(a[3] or "", a[0] or "", (a[4] or ""), _ev)
+                if not _v.get("mint", True):
+                    print(f"suppressed: {_v.get('status')} — {_v.get('reason')}")
+                    return 0
+            except Exception as _e:
+                # Fail OPEN, but never SILENTLY — a quiet failure here disables the gate
+                # for every lane and looks identical to the gate deciding to allow.
+                print(f"transition-gate unavailable ({type(_e).__name__}: {_e}) — allowing",
+                      file=sys.stderr)
         record_confirmed(conn, a[0], url=a[1], program=a[2], signal_class=a[3],
                          vuln_class=(a[4] or None), score=int(a[5] or 0),
-                         confidence=float(a[6] or 0), evidence=(a[7] if len(a) > 7 else "{}"))
+                         confidence=float(a[6] or 0), evidence=_ev)
         print("confirmed")
     elif cmd == "ai-pending":        # ai-pending [limit] -> JSON array of findings to validate
         print(json.dumps(ai_pending(conn, int(a[0]) if a else 20)))

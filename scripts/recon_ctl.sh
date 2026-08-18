@@ -2625,6 +2625,53 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_graphql.sh" "${@:-scan}" ;;
+  authdiff|ad)  # DIFFERENTIAL access-control tester: same GET with and without the operator's
+                # session, compared. The session is the operator's, so this runs as d0k and is
+                # ON-DEMAND ONLY — never the autonomous daemon (authed testing stays human-in-loop).
+                # GET-only; endpoints replayed exactly as discovered; no ID enumeration ever.
+                shift
+                python3 "$SCRIPT_DIR/recon_authdiff.py" "$@" ;;
+  actuator-chain|actchain)
+                # Exposed actuator -> ACTUALLY recovered credentials (/env, /configprops,
+                # streamed /heapdump). Mints only when credential material is recovered;
+                # a properly masked actuator is recorded as a negative, not a finding.
+                # Read-only endpoints only — never /shutdown, /restart, /jolokia.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_actuator_chain.py" "$@" ;;
+  bucket-loot|loot)
+                # Public-READ bucket -> object triage -> credentials/PII inside it. This is
+                # the chain that produced the only Critical this operation has landed.
+                # Anonymous GET/LIST only; --provenance REQUIRED to mint (the S3 namespace
+                # is global, so a name match is not ownership).
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_bucket_loot.py" "$@" ;;
+  port-proto|proto)
+                # Open port -> speak the protocol -> confirm UNAUTHENTICATED access.
+                # Replaces "port 6379 is open" with "no-AUTH Redis, N keys". Read-only
+                # verbs only; CDN-fronted hosts skipped (their port results are meaningless).
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_port_proto.py" "$@" ;;
+  gql-chain|gqlc)
+                # Introspection -> a sensitive query with NO required args -> EXECUTE ONE
+                # read-only query. "Introspection enabled" alone stays the #1 GraphQL dup;
+                # the finding is the data that came back. Queries only — never a mutation,
+                # and never an invented identifier.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_graphql_chain.py" "$@" ;;
+  feed)         # Mine ES for what each impact lane needs (buckets/actuator/ports/graphql).
+                # Read-only against our own index — issues NO target traffic, so d0k.
+                shift
+                python3 "$SCRIPT_DIR/recon_feed.py" "$@" ;;
+  program-gate|pgate)
+                # Batch eligibility gate over every program we hold scope for, scored for the
+                # odds of an AUTHENTICATED authorization bug. Pure data — no target traffic.
+                # Run this BEFORE committing an evening, not after.
+                shift
+                python3 "$SCRIPT_DIR/recon_program_gate.py" "$@" ;;
   wcd)          # web-cache deception/poisoning surfacer (detect-only, cache-busted). reconrun.
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
