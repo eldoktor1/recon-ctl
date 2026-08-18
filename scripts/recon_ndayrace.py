@@ -170,10 +170,58 @@ def parse_template(path: str) -> dict | None:
             "product_terms": product_terms(name, tags, path)}
 
 
+# Scanner vocabulary and grammar — never a product name, so never a useful fingerprint.
+# NOTE: product words like "spring" or "jenkins" are deliberately NOT here. The earlier
+# tumblr-blog mis-targeting came from match_phrase against the free-text `title` field,
+# not from the term itself; `tech` is a Wappalyzer controlled vocabulary, so an exact
+# term match on it is precise. The fix was to stop matching `title`, not to blind the
+# product terms.
 STOP = {"cve", "http", "network", "javascript", "detect", "detection", "rce", "lfi", "xss",
         "sqli", "ssrf", "auth", "bypass", "unauth", "disclosure", "exposure", "misconfig",
         "instance", "panel", "default", "login", "file", "read", "remote", "code", "execution",
-        "the", "and", "for", "via", "with", "in", "of", "a", "an", "to"}
+        "the", "and", "for", "via", "with", "in", "of", "a", "an", "to",
+        "unauthenticated", "improper", "arbitrary", "injection", "traversal", "upload",
+        "authorization", "authentication", "vulnerability", "vulnerable", "affected"}
+
+# CVE advisories name products the way vendors do; ES records them the way Wappalyzer
+# fingerprints them. Bridge the two, or a Spring Boot CVE finds nothing because the
+# estate is tagged "Spring".
+TECH_ALIAS = {
+    "springboot": ["Spring", "Spring Boot", "Java"],
+    "spring_boot": ["Spring", "Spring Boot", "Java"],
+    "spring": ["Spring", "Spring Boot"],
+    "actuator": ["Spring", "Spring Boot"],
+    "wordpress": ["WordPress"], "drupal": ["Drupal"], "joomla": ["Joomla"],
+    "jenkins": ["Jenkins"], "gitlab": ["GitLab"], "grafana": ["Grafana"],
+    "confluence": ["Confluence"], "jira": ["Jira"], "tomcat": ["Apache Tomcat"],
+    "nginx": ["Nginx"], "apache": ["Apache HTTP Server"], "iis": ["IIS"],
+    "elasticsearch": ["Elasticsearch"], "kibana": ["Kibana"], "mongodb": ["MongoDB"],
+    "redis": ["Redis"], "rabbitmq": ["RabbitMQ"], "kubernetes": ["Kubernetes"],
+    "docker": ["Docker"], "django": ["Django"], "laravel": ["Laravel"],
+    "rails": ["Ruby on Rails"], "express": ["Express"], "nextjs": ["Next.js"],
+    "next.js": ["Next.js"], "nodejs": ["Node.js"], "node.js": ["Node.js"],
+    "php": ["PHP"], "magento": ["Magento"], "shopify": ["Shopify"],
+    "sharepoint": ["Microsoft SharePoint"], "exchange": ["Microsoft Exchange Server"],
+    "fortinet": ["Fortinet"], "citrix": ["Citrix"], "vmware": ["VMware"],
+    "zimbra": ["Zimbra"], "moveit": ["MOVEit"], "aem": ["Adobe Experience Manager"],
+    "keycloak": ["Keycloak"], "solr": ["Apache Solr"], "struts": ["Apache Struts"],
+    "weblogic": ["Oracle WebLogic Server"], "websphere": ["IBM WebSphere"],
+}
+
+
+def expand_terms(terms: list[str]) -> list[str]:
+    """Map CVE product vocabulary onto the fingerprints ES actually stores."""
+    out: list[str] = []
+    for t in terms:
+        for alias in TECH_ALIAS.get(t.lower(), []):
+            if alias not in out:
+                out.append(alias)
+    for t in terms:
+        if len(t) >= 5 and t.lower() not in TECH_ALIAS:
+            for v in (t, t.title(), t.capitalize()):
+                if v not in out:
+                    out.append(v)
+    return out
 
 
 def product_terms(name: str, tags: str, path: str) -> list[str]:
@@ -194,7 +242,11 @@ def product_terms(name: str, tags: str, path: str) -> list[str]:
 
 
 def es_hosts_for(terms: list[str], limit: int = 40) -> list[dict]:
-    """In-scope, paying, not-benched hosts whose fingerprint mentions this technology."""
+    """In-scope, paying, not-benched hosts whose TECH FINGERPRINT matches this product.
+
+    Returns nothing when the terms are too generic to identify a product — firing a
+    template at a target list assembled from a vague word is worse than not firing."""
+    terms = expand_terms([t for t in terms if len(t) >= 4])
     if not terms:
         return []
     import base64
@@ -203,10 +255,10 @@ def es_hosts_for(terms: list[str], limit: int = 40) -> list[dict]:
     if os.path.exists(pf):
         pw = open(pf).read().strip()
     auth = base64.b64encode(f"elastic:{pw}".encode()).decode()
-    should = []
-    for t in terms:
-        should.append({"term": {"tech": t}})
-        should.append({"match_phrase": {"title": t}})
+    # `tech` is a KEYWORD field, so a term query is an exact fingerprint match. The old
+    # query also match_phrase'd `title`, which is free text — that is how a Spring Boot
+    # template acquired a target list of tumblr blogs. Fingerprint only.
+    should = [{"term": {"tech": t}} for t in terms]
     body = {"size": limit, "_source": ["host", "triage_program", "tech"],
             "query": {"bool": {
                 "must": [{"bool": {"should": should, "minimum_should_match": 1}}],
