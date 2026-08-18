@@ -288,8 +288,73 @@ def feed_openbuckets() -> tuple[list[str], dict]:
     return sorted(prov), prov
 
 
+TARGET_PROGRAMS = os.path.join(STATE_DIR, "target_programs.json")
+ROTATE = os.path.join(STATE_DIR, "feed_hosts_cursor.json")
+
+
+def feed_hosts() -> tuple[list[str], dict]:
+    """The general working set: in-scope, paying hosts belonging to LOW-SATURATION programs.
+
+    Most lanes (leak, firebase, depconf, dangling, takeover) take an arbitrary host rather
+    than a fingerprint-matched one, so they need a queue. It is deliberately restricted to
+    the unsaturated programs from recon_target_select.py — pointing these lanes at Tesla or
+    Coinbase means racing full-timers for surface that is already gone.
+
+    Rotates: each call hands back the next slice, so a daemon lane works through the estate
+    across days instead of re-hammering the same first page forever.
+    """
+    programs: set[str] = set()
+    if os.path.exists(TARGET_PROGRAMS):
+        try:
+            data = json.load(open(TARGET_PROGRAMS))
+            programs = {(p.get("name") or "").strip() for p in data.get("programs", [])}
+            programs.discard("")
+        except Exception:
+            pass
+    if not programs:
+        log("hosts: no target_programs.json — run `recon-ctl targets` first; "
+            "refusing to feed lanes an unfiltered estate")
+        return [], {}
+
+    docs = search({"_source": ["host", "triage_program", "last_seen"],
+                   "query": {"bool": dict(
+                       GATE,
+                       must=[{"terms": {"triage_program": sorted(programs)}}])}})
+    hosts: dict[str, dict] = {}
+    for d in docs:
+        h = (d.get("host") or "").lower()
+        if h and not is_shared_tenant(h):
+            hosts[h] = {"program": d.get("triage_program") or "",
+                        "provenance": "in-scope+paying host of a low-saturation program"}
+
+    names = sorted(hosts)
+    # rotate so successive daemon cycles cover new ground
+    try:
+        cur = json.load(open(ROTATE)).get("offset", 0)
+    except Exception:
+        cur = 0
+    if names:
+        cur = cur % len(names)
+        names = names[cur:] + names[:cur]
+        json.dump({"offset": (cur + 250) % len(names), "updated_at": datetime.now().isoformat()},
+                  open(ROTATE, "w"))
+    log(f"hosts: {len(names)} host(s) across {len(programs)} low-saturation program(s) "
+        f"(rotated to offset {cur})")
+    return names, hosts
+
+
+def is_shared_tenant(host: str) -> bool:
+    """A high-entropy label under a vendor wildcard is a CUSTOMER's instance. In-scope
+    describes the host, never the action."""
+    import re as _re
+    label = host.split(".", 1)[0]
+    return bool(_re.match(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                          r"|[0-9a-f]{24,})$", label, _re.I)) and host.count(".") >= 2
+
+
 FEEDS = {"buckets": feed_buckets, "actuator": feed_actuator,
-         "ports": feed_ports, "graphql": feed_graphql, "openbuckets": feed_openbuckets}
+         "ports": feed_ports, "graphql": feed_graphql, "openbuckets": feed_openbuckets,
+         "hosts": feed_hosts}
 
 
 def main() -> int:

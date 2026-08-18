@@ -766,6 +766,100 @@ run_gqlchain() { v21_killed gqlchain && return 0
   [[ -f "$GQLCHAIN_SCRIPT" && -s "$f" ]] || return 0
   run_scanner python3 "$GQLCHAIN_SCRIPT" $(head -40 "$f" | tr '\n' ' ') || true; }
 
+# =========================================================================================
+# THE UNAUTH PIPELINE (reworked 2026-08-18). Every lane below mints ONLY on recovered
+# impact — a credential, records, an executed query, a claimable name. A properly secured
+# target is recorded as a negative and never surfaces. See CLAUDE.md CHAIN-TO-IMPACT LAW.
+#
+# Two families, and they have opposite cost profiles:
+#
+#   OFF-TARGET  send NO traffic to the bug-bounty host at all. They cannot be rate-limited,
+#               WAFed, or get the Mullvad exit banned, so they run hot and often. depconf
+#               asks npm; jwt cracks offline; mobile pulls a public APK; intel asks NVD.
+#   ON-TARGET   rate-limited, Mullvad-gated via run_scanner, and paced to be polite.
+#
+# Everything is pointed at the LOW-SATURATION target set (recon_target_select.py). Aiming
+# these at Tesla or Coinbase means racing full-timers for surface that is already gone.
+# =========================================================================================
+
+# ---- targeting + feeds (pure data, no target traffic) -----------------------
+TARGETSEL_SCRIPT="${TARGETSEL_SCRIPT:-$(script_path recon_target_select.py)}"
+TARGETSEL_INTERVAL="${TARGETSEL_INTERVAL:-86400}"     # daily — scope files change slowly
+run_targetsel() { v21_killed targetsel && return 0; [[ -f "$TARGETSEL_SCRIPT" ]] && \
+  python3 "$TARGETSEL_SCRIPT" --top 60 >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- ENUMERATE the target set. 12 of the top 30 low-saturation programs had ZERO hosts
+# in ES: enumeration effort had gone to the crowded programs instead (849k of 1.39M hosts
+# are tumblr blogs). A lane with no surface to work is the real bottleneck. -------------
+ENUMTARGETS_SCRIPT="${ENUMTARGETS_SCRIPT:-$(script_path recon_discovery.sh)}"
+ENUMTARGETS_INTERVAL="${ENUMTARGETS_INTERVAL:-43200}"  # 12h
+run_enumtargets() { v21_killed enumtargets && return 0
+  [[ -f "$ENUMTARGETS_SCRIPT" ]] || return 0
+  run_scanner bash "$ENUMTARGETS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- OFF-TARGET lanes — no traffic to the target, so they run hot ------------
+DEPCONF_SCRIPT="${DEPCONF_SCRIPT:-$(script_path recon_depconf.py)}"
+DEPCONF_INTERVAL="${DEPCONF_INTERVAL:-21600}"          # 6h
+run_depconf() { v21_killed depconf && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$DEPCONF_SCRIPT" $(head -25 "$f" | tr '\n' ' ') || true; }
+
+JWT_SCRIPT="${JWT_SCRIPT:-$(script_path recon_jwt.py)}"
+JWT_INTERVAL="${JWT_INTERVAL:-43200}"                  # 12h — CPU-bound, zero target traffic
+run_jwt() { v21_killed jwt && return 0; [[ -f "$JWT_SCRIPT" ]] && \
+  python3 "$JWT_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+MOBILE_SCRIPT="${MOBILE_SCRIPT:-$(script_path recon_mobile.py)}"
+MOBILE_INTERVAL="${MOBILE_INTERVAL:-86400}"            # daily — heavy download + decompile
+run_mobile() { v21_killed mobile && return 0
+  local f="$STATE_DIR/feed_apps.txt"; [[ -s "$f" ]] || return 0
+  python3 "$MOBILE_SCRIPT" $(head -4 "$f" | tr '\n' ' ') >>"$LOG_FILE" 2>&1 || true; }
+
+INTEL_SCRIPT="${INTEL_SCRIPT:-$(script_path recon_intel.py)}"
+INTEL_INTERVAL="${INTEL_INTERVAL:-21600}"              # 6h — NVD/KEV confirmation
+run_intel() { v21_killed intel && return 0
+  local f="$STATE_DIR/intel_claims.txt"; [[ -s "$f" ]] || return 0
+  python3 "$INTEL_SCRIPT" --file "$f" >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- ON-TARGET impact chains (rate-limited, Mullvad via run_scanner) ---------
+LEAKCHAIN_SCRIPT="${LEAKCHAIN_SCRIPT:-$(script_path recon_leak_chain.py)}"
+LEAKCHAIN_INTERVAL="${LEAKCHAIN_INTERVAL:-28800}"      # 8h
+run_leakchain() { v21_killed leakchain && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$LEAKCHAIN_SCRIPT" $(head -30 "$f" | tr '\n' ' ') || true; }
+
+FIREBASE_SCRIPT="${FIREBASE_SCRIPT:-$(script_path recon_firebase.py)}"
+FIREBASE_INTERVAL="${FIREBASE_INTERVAL:-43200}"        # 12h
+run_firebase() { v21_killed firebase && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$FIREBASE_SCRIPT" $(head -25 "$f" | tr '\n' ' ') || true; }
+
+DANGLING_SCRIPT="${DANGLING_SCRIPT:-$(script_path recon_dangling.py)}"
+DANGLING_INTERVAL="${DANGLING_INTERVAL:-43200}"        # 12h
+run_dangling() { v21_killed dangling && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$DANGLING_SCRIPT" $(head -30 "$f" | tr '\n' ' ') || true; }
+
+TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover.py)}"
+TAKEOVER_INTERVAL="${TAKEOVER_INTERVAL:-28800}"        # 8h — claimability, reads host_notes first
+run_takeover() { v21_killed takeover && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$TAKEOVER_SCRIPT" $(head -40 "$f" | tr '\n' ' ') || true; }
+
+# ---- THE RACE — freshest surface and freshest detections --------------------
+# These two are the only lanes where being EARLY is the whole edge, so they run hottest.
+FRESHCHAIN_SCRIPT="${FRESHCHAIN_SCRIPT:-$(script_path recon_freshchain.py)}"
+FRESHCHAIN_INTERVAL="${FRESHCHAIN_INTERVAL:-1800}"     # 30m — CT surface goes stale fast
+run_freshchain() { v21_killed freshchain && return 0; [[ -f "$FRESHCHAIN_SCRIPT" ]] && \
+  run_scanner python3 "$FRESHCHAIN_SCRIPT" --batch 8 || true; }
+
+NDAYRACE_SCRIPT="${NDAYRACE_SCRIPT:-$(script_path recon_ndayrace.py)}"
+NDAYRACE_INTERVAL="${NDAYRACE_INTERVAL:-3600}"         # hourly — the window between a
+                                                       # template landing and everyone
+                                                       # having scanned with it is hours
+run_ndayrace() { v21_killed ndayrace && return 0; [[ -f "$NDAYRACE_SCRIPT" ]] && \
+  run_scanner python3 "$NDAYRACE_SCRIPT" --max-templates 15 || true; }
+
 # recon_wcd — web-cache deception/poisoning LEAD surfacer (detect-only, cache-busted = never poisons
 # the real cache). CDN-fronted in-scope hosts only. Target-facing → run_scanner. Killswitch: v2_wcd.
 WCD_SCRIPT="${WCD_SCRIPT:-$(script_path recon_wcd.sh)}"
@@ -1072,7 +1166,23 @@ run_discord_bot() {
   supervise_loop "graphql"        "GRAPHQL_INTERVAL"       run_graphql        &
   supervise_loop "wcd"            "WCD_INTERVAL"           run_wcd            &
   # chain-to-impact lanes — feed first so the others always have fresh targets
+  # --- the reworked unauth pipeline -----------------------------------------
+  supervise_loop "targetsel"      "TARGETSEL_INTERVAL"     run_targetsel      &
   supervise_loop "feed"           "FEED_INTERVAL"          run_feed           &
+  supervise_loop "enumtargets"    "ENUMTARGETS_INTERVAL"   run_enumtargets    &
+  # off-target: no traffic to the target, so these run hot
+  supervise_loop "depconf"        "DEPCONF_INTERVAL"       run_depconf        &
+  supervise_loop "jwt"            "JWT_INTERVAL"           run_jwt            &
+  supervise_loop "mobile"         "MOBILE_INTERVAL"        run_mobile         &
+  supervise_loop "intel"          "INTEL_INTERVAL"         run_intel          &
+  # on-target impact chains
+  supervise_loop "leakchain"      "LEAKCHAIN_INTERVAL"     run_leakchain      &
+  supervise_loop "firebase"       "FIREBASE_INTERVAL"      run_firebase       &
+  supervise_loop "dangling"       "DANGLING_INTERVAL"      run_dangling       &
+  supervise_loop "takeover"       "TAKEOVER_INTERVAL"      run_takeover       &
+  # the race — being early is the entire edge here
+  supervise_loop "freshchain"     "FRESHCHAIN_INTERVAL"    run_freshchain     &
+  supervise_loop "ndayrace"       "NDAYRACE_INTERVAL"      run_ndayrace       &
   supervise_loop "actchain"       "ACTCHAIN_INTERVAL"      run_actchain       &
   supervise_loop "portproto"      "PORTPROTO_INTERVAL"     run_portproto      &
   supervise_loop "gqlchain"       "GQLCHAIN_INTERVAL"      run_gqlchain       &
