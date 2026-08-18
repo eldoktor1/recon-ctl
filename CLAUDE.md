@@ -121,6 +121,61 @@ The UNIQUE pillars (all additive — nothing that works was removed):
   test + verified findings to submit. The output that fits a 9-5.
 Smart targeting + clone/staging dedup (XBOW) is the next layer; precision over volume.
 
+## CHAIN-TO-IMPACT LAW (operator 2026-08-17, after 3 months / 0 findings) — NON-NEGOTIABLE
+**DISCOVERY IS NOT A FINDING. THE FINDING IS WHAT YOU GOT.** An audit of 320 minted findings
+found 316 false positives, 3 `real` verdicts (all one week in June), and 0 in 65 days. Cause:
+every lane stopped at the discovery half — "a port is open", "an endpoint returns data", "an
+actuator responds", "a bucket is readable", "introspection is enabled". Those are the exact
+sentences a stranger's `nuclei` run produces an hour later, which makes every one a duplicate
+before it is written. The MOTTO was right; the CODE ignored it.
+**THE TEST, applied to every lane and every report:** *if someone else scanned this host an
+hour after me, would they file the identical report?* If yes, the lane stopped too early.
+**Cognito is the reference pattern** — the ONLY lane that ever produced a Critical, and the
+only one that chains all the way: it does not report "an identity pool exists", it requests
+credentials, gets them, and the finding is unauthenticated AWS credential issuance.
+Required chains (each mints ONLY on recovered impact; a properly-secured target is recorded
+as a NEGATIVE, never minted):
+- **actuator** → `/env` + `/configprops` + streamed `/heapdump` → recovered DB passwords /
+  cloud keys / JWT signing secrets (`recon_actuator_chain.py`; read-only endpoints ONLY —
+  never `/shutdown`, `/restart`, `/jolokia`). Also version-gates CVE-2026-40976 (Spring Boot
+  4.0.0-4.0.5, unauth actuator authz bypass, CVSS 9.1).
+- **bucket public-read** → object triage → `.env`/tfstate/private-keys/db-dumps/**source-maps
+  (`sourcesContent` = the ORIGINAL un-minified source, where cloud config lives — the step the
+  crowd skips)** → credentials (`recon_bucket_loot.py`; anonymous GET/LIST only, `--provenance`
+  REQUIRED to mint because the S3 namespace is global and a name match is not ownership).
+- **open port** → SPEAK THE PROTOCOL → confirm unauth access (`recon_port_proto.py`; Redis
+  PING/INFO/DBSIZE, Elastic `_cat/indices`, Docker `/version`+`/containers/json`, kubelet
+  `/pods`, Mongo isMaster, memcached stats, CouchDB `_all_dbs`, ZooKeeper ruok). Read-only
+  verbs; NO records read, nothing written/executed. CDN-fronted hosts SKIPPED (a CDN ACKs
+  every port, so those results are meaningless).
+- **graphql** → schema → an unauth-reachable sensitive query → EXECUTE ONE read-only query;
+  the finding is the data returned. "Introspection enabled" alone stays the #1 dup.
+- **n-day** → confirm the RUNNING VERSION in range → safe detection primitive.
+- **ai-hunter** → a hypothesis is a LEAD, never a finding; it must drive `recon_safe_probe.sh`
+  and mint only when a probe result supports it.
+Shared impact layer: **`engine/impact.py`** (`scan_secrets` / `classify_data` / `severity_for`)
+— one implementation, so lanes cannot drift. It REDACTS every secret (proves recovery, never
+returns a usable value), COUNTS and TYPES personal data (never copies records out), excludes
+public-by-design keys (Stripe `pk_`, Firebase web config, Supabase anon, `NEXT_PUBLIC_`, OAuth
+`client_id`) and masked/placeholder values, and rejects schemas/specs/`example.com` fixtures
+that look like live data. Severity is honest by construction — no impact ⇒ score 0 ⇒ no mint.
+
+## TRANSITION GATE (2026-08-17) — mint on CHANGE, not on STATE
+A STATE ("port 6379 open", "CNAME points at S3", "response contains a token-shaped string") is
+always true, so it fires forever and on a large estate ~95% of matches are by design — that was
+the entire FP population. Professional continuous-monitoring fires on a TRANSITION instead
+(EdOverflow's setup gets zero FPs *by construction* because the mechanism is `git commit`;
+Assetnote rescans hourly and sells the diff). `engine/transition.py` is wired into the shared
+`db_confirm()` in `recon_net.sh`, so ALL lanes inherit it: **first sighting = baseline, SILENT;
+changed = MINT; unchanged = suppress.** Silence on first sight is deliberate — something already
+exposed when we started watching has been exposed for months and is a duplicate; the exposure
+that appeared TODAY is the un-reported one (same trade as "be first to fresh surface").
+Timestamps/scan-ids are stripped from the fingerprint so a re-scan is not a false "change".
+Lanes that confirm a PRIMITIVE rather than observe a state are EXEMPT and always mint
+(`ALWAYS_MINT`: authdiff, bucket-exposure, cognito-unauth, wcd-purge, auth-bypass, executed
+xss/sqli). Kill switch `RECON_TRANSITION_GATE=0`; fails OPEN (a bug in the gate lets the mint
+through — losing a real finding is worse than one extra FP).
+
 ## RESEARCH MANDATE (operator 2026-06-14, "very very important") — read the source, don't guess
 For ANYTHING that needs research — **design, hunting, recon, enumeration, AND building/fixing the
 pipeline** — GO READ THE AUTHORITATIVE SOURCE before acting: (1) the **target host's own DOCS**

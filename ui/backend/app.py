@@ -741,12 +741,19 @@ async def api_workspace_generate(key: str, body: dict = Depends(safety.require_c
         killed = {h: c for h, c in files.killed_host_classes().items() if h in host_set}
     except Exception:
         killed = {}
-    prompt = workspace.build_model_prompt(ws, hosts, endpoints, killed)
+    # retained reconstructed source = the authz/ownership decision points (app-model feedstock)
+    try:
+        source = files.program_source([h.get("host") for h in hosts])
+    except Exception:
+        source = {}
+    prompt = workspace.build_model_prompt(ws, hosts, endpoints, killed, source)
     sid = claude_console.new_session_id()
     argv = claude_console.build_argv(sid, prompt, body.get("model"))
     t = await manager.spawn(f"model:{key[:20]}", argv)
     return {**t.snapshot(), "session_id": sid, "task_id": t.id,
-            "surface": {"hosts": len(hosts), "endpoints": len(endpoints), "killed": len(killed)}}
+            "surface": {"hosts": len(hosts), "endpoints": len(endpoints), "killed": len(killed),
+                        "source_files": (source or {}).get("files", 0),
+                        "authz_points": len((source or {}).get("authz") or [])}}
 
 
 @app.post("/api/workspaces/{key}/model")

@@ -44,8 +44,6 @@ VALIDATE="${VALIDATE:-$(script_path recon_validate.sh)}"
 DISCOVERY="${DISCOVERY:-$(script_path recon_discovery.sh)}"
 HOT_SEED="${HOT_SEED:-$(script_path recon_hot_seed.sh)}"
 SCOPE_WATCH="${SCOPE_WATCH:-$(script_path recon_scope_watch.sh)}"
-TAKEOVER="${TAKEOVER:-$(script_path recon_takeover_hunter.sh)}"
-
 
 SCANNER_USER="${SCANNER_USER:-reconrun}"
 
@@ -188,7 +186,7 @@ run_scanner() {
   # SMART-SCOPED: only the CONFIRM + UNIQUE lanes get the proxy pool (MT_LANES) — the commodity
   # validate/portscan bulk drain stays on the single host exit, so the scarce IPs buy findings
   # (confirm throughput on dup-proof leads), not raw fps over commodity hosts.
-  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql|recon_unauth_expose}"
+  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql}"
   if [[ "${MULTITUNNEL:-0}" == "1" && "${2##*/}" =~ ^(${_mtlanes}) ]]; then
     local _mtlist="${MT_PROXY_LIST:-$STATE_DIR/egress_proxies.txt}"
     local _mtrr="${MT_RR_FILE:-$STATE_DIR/egress_rr.idx}"
@@ -667,7 +665,7 @@ run_v3_digest() { [[ -f "$V3_PY_DIR/observability.py" ]] && run_scanner python3 
 # decides what is worth verifying + which vuln class, and flags evidence-gate
 # candidates: conscious surface selection, not blanket scanning. Feeds gate -> verify.
 # Runs as d0k (Claude auth per-user). Not target-facing (reasons over stored data).
-AI_ANALYZE_SCRIPT="${AI_ANALYZE_SCRIPT:-$(script_path recon_ai_analyze.sh)}"
+
 AI_ANALYZE_INTERVAL="${AI_ANALYZE_INTERVAL:-3600}"
 run_ai_analyze() { [[ -f "$AI_ANALYZE_SCRIPT" ]] && bash "$AI_ANALYZE_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
@@ -689,7 +687,7 @@ run_ai_hunter() { v21_killed ai_hunter && return 0; [[ -f "$AI_HUNTER_SCRIPT" ]]
 # that metadata-only ANALYZE is blind to; worth+probeable hits become evidence-gate
 # candidates (feeds verify). Token-frugal: thumb-only, haiku, TTL. Not target-facing
 # (reasons over stored thumbnails). Runs as d0k (Claude auth per-user).
-AI_VISION_SCRIPT="${AI_VISION_SCRIPT:-$(script_path recon_ai_vision.sh)}"
+
 AI_VISION_INTERVAL="${AI_VISION_INTERVAL:-3600}"
 run_ai_vision() { [[ -f "$AI_VISION_SCRIPT" ]] && bash "$AI_VISION_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
@@ -723,6 +721,145 @@ run_buckets() { v21_killed buckets && return 0; [[ -f "$BUCKETS_SCRIPT" ]] && ru
 GRAPHQL_SCRIPT="${GRAPHQL_SCRIPT:-$(script_path recon_graphql.sh)}"
 GRAPHQL_INTERVAL="${GRAPHQL_INTERVAL:-10800}"   # 3h
 run_graphql() { v21_killed graphql && return 0; [[ -f "$GRAPHQL_SCRIPT" ]] && run_scanner bash "$GRAPHQL_SCRIPT" scan || true; }
+# ---------------------------------------------------------------------------------------
+# CHAIN-TO-IMPACT lanes (2026-08-17). Discovery is not a finding — each of these takes a
+# lane that used to mint an observation and carries it through to recovered credentials or
+# confirmed unauthenticated access. Each mints ONLY on demonstrated impact; a properly
+# secured target is recorded as a negative and never minted. See CLAUDE.md.
+#
+# recon_feed — mines ES for what each impact lane needs (the lanes were starved: the bucket
+# lane read a 162k-row endpoint file and found 11 buckets, ES holds 2.8M docs; the actuator
+# lane had ZERO candidates because its fingerprints live in headers, not JS paths).
+# Read-only against our OWN index — issues no target traffic → d0k. Killswitch: v2_feed.
+FEED_SCRIPT="${FEED_SCRIPT:-$(script_path recon_feed.py)}"
+FEED_INTERVAL="${FEED_INTERVAL:-21600}"          # 6h — cheap, keeps every lane supplied
+run_feed() { v21_killed feed && return 0; [[ -f "$FEED_SCRIPT" ]] && \
+  python3 "$FEED_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+# recon_actuator_chain — exposed actuator → /env + /configprops + streamed /heapdump →
+# ACTUALLY recovered credentials. Read-only endpoints only (never /shutdown, /restart,
+# /jolokia). Target-facing → run_scanner. Killswitch: v2_actchain.
+ACTCHAIN_SCRIPT="${ACTCHAIN_SCRIPT:-$(script_path recon_actuator_chain.py)}"
+ACTCHAIN_INTERVAL="${ACTCHAIN_INTERVAL:-28800}"  # 8h
+run_actchain() { v21_killed actchain && return 0
+  local f="$STATE_DIR/feed_actuator.txt"
+  [[ -f "$ACTCHAIN_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$ACTCHAIN_SCRIPT" $(head -60 "$f" | tr '\n' ' ') || true; }
+
+# recon_port_proto — open port → SPEAK THE PROTOCOL → confirm unauthenticated access.
+# Replaces "port 6379 is open" (96 findings, 0 real) with "no-AUTH Redis, N keys".
+# Read-only verbs; no records read. CDN-fronted hosts excluded by the feed.
+PORTPROTO_SCRIPT="${PORTPROTO_SCRIPT:-$(script_path recon_port_proto.py)}"
+PORTPROTO_INTERVAL="${PORTPROTO_INTERVAL:-21600}"  # 6h
+run_portproto() { v21_killed portproto && return 0
+  local f="$STATE_DIR/feed_ports.txt"
+  [[ -f "$PORTPROTO_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$PORTPROTO_SCRIPT" $(head -60 "$f" | tr '\n' ' ') || true; }
+
+# recon_graphql_chain — introspection → a sensitive query with NO required args → EXECUTE ONE
+# read-only query. "Introspection enabled" alone is the #1 GraphQL duplicate; the finding is
+# the data returned. Queries only, never a mutation, never an invented identifier.
+GQLCHAIN_SCRIPT="${GQLCHAIN_SCRIPT:-$(script_path recon_graphql_chain.py)}"
+GQLCHAIN_INTERVAL="${GQLCHAIN_INTERVAL:-28800}"  # 8h
+run_gqlchain() { v21_killed gqlchain && return 0
+  local f="$STATE_DIR/feed_graphql.txt"
+  [[ -f "$GQLCHAIN_SCRIPT" && -s "$f" ]] || return 0
+  run_scanner python3 "$GQLCHAIN_SCRIPT" $(head -40 "$f" | tr '\n' ' ') || true; }
+
+# =========================================================================================
+# THE UNAUTH PIPELINE (reworked 2026-08-18). Every lane below mints ONLY on recovered
+# impact — a credential, records, an executed query, a claimable name. A properly secured
+# target is recorded as a negative and never surfaces. See CLAUDE.md CHAIN-TO-IMPACT LAW.
+#
+# Two families, and they have opposite cost profiles:
+#
+#   OFF-TARGET  send NO traffic to the bug-bounty host at all. They cannot be rate-limited,
+#               WAFed, or get the Mullvad exit banned, so they run hot and often. depconf
+#               asks npm; jwt cracks offline; mobile pulls a public APK; intel asks NVD.
+#   ON-TARGET   rate-limited, Mullvad-gated via run_scanner, and paced to be polite.
+#
+# Everything is pointed at the LOW-SATURATION target set (recon_target_select.py). Aiming
+# these at Tesla or Coinbase means racing full-timers for surface that is already gone.
+# =========================================================================================
+
+# ---- targeting + feeds (pure data, no target traffic) -----------------------
+TARGETSEL_SCRIPT="${TARGETSEL_SCRIPT:-$(script_path recon_target_select.py)}"
+TARGETSEL_INTERVAL="${TARGETSEL_INTERVAL:-86400}"     # daily — scope files change slowly
+run_targetsel() { v21_killed targetsel && return 0; [[ -f "$TARGETSEL_SCRIPT" ]] && \
+  python3 "$TARGETSEL_SCRIPT" --top 60 >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- ENUMERATE the target set. 12 of the top 30 low-saturation programs had ZERO hosts
+# in ES: enumeration effort had gone to the crowded programs instead (849k of 1.39M hosts
+# are tumblr blogs). A lane with no surface to work is the real bottleneck. -------------
+ENUMTARGETS_SCRIPT="${ENUMTARGETS_SCRIPT:-$(script_path recon_discovery.sh)}"
+ENUMTARGETS_INTERVAL="${ENUMTARGETS_INTERVAL:-43200}"  # 12h
+run_enumtargets() { v21_killed enumtargets && return 0
+  [[ -f "$ENUMTARGETS_SCRIPT" ]] || return 0
+  run_scanner bash "$ENUMTARGETS_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- OFF-TARGET lanes — no traffic to the target, so they run hot ------------
+DEPCONF_SCRIPT="${DEPCONF_SCRIPT:-$(script_path recon_depconf.py)}"
+DEPCONF_INTERVAL="${DEPCONF_INTERVAL:-21600}"          # 6h
+run_depconf() { v21_killed depconf && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$DEPCONF_SCRIPT" $(head -25 "$f" | tr '\n' ' ') || true; }
+
+JWT_SCRIPT="${JWT_SCRIPT:-$(script_path recon_jwt.py)}"
+JWT_INTERVAL="${JWT_INTERVAL:-43200}"                  # 12h — CPU-bound, zero target traffic
+run_jwt() { v21_killed jwt && return 0; [[ -f "$JWT_SCRIPT" ]] && \
+  python3 "$JWT_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
+MOBILE_SCRIPT="${MOBILE_SCRIPT:-$(script_path recon_mobile.py)}"
+MOBILE_INTERVAL="${MOBILE_INTERVAL:-86400}"            # daily — heavy download + decompile
+run_mobile() { v21_killed mobile && return 0
+  local f="$STATE_DIR/feed_apps.txt"; [[ -s "$f" ]] || return 0
+  python3 "$MOBILE_SCRIPT" $(head -4 "$f" | tr '\n' ' ') >>"$LOG_FILE" 2>&1 || true; }
+
+INTEL_SCRIPT="${INTEL_SCRIPT:-$(script_path recon_intel.py)}"
+INTEL_INTERVAL="${INTEL_INTERVAL:-21600}"              # 6h — NVD/KEV confirmation
+run_intel() { v21_killed intel && return 0
+  local f="$STATE_DIR/intel_claims.txt"; [[ -s "$f" ]] || return 0
+  python3 "$INTEL_SCRIPT" --file "$f" >>"$LOG_FILE" 2>&1 || true; }
+
+# ---- ON-TARGET impact chains (rate-limited, Mullvad via run_scanner) ---------
+LEAKCHAIN_SCRIPT="${LEAKCHAIN_SCRIPT:-$(script_path recon_leak_chain.py)}"
+LEAKCHAIN_INTERVAL="${LEAKCHAIN_INTERVAL:-28800}"      # 8h
+run_leakchain() { v21_killed leakchain && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$LEAKCHAIN_SCRIPT" $(head -30 "$f" | tr '\n' ' ') || true; }
+
+FIREBASE_SCRIPT="${FIREBASE_SCRIPT:-$(script_path recon_firebase.py)}"
+FIREBASE_INTERVAL="${FIREBASE_INTERVAL:-43200}"        # 12h
+run_firebase() { v21_killed firebase && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$FIREBASE_SCRIPT" $(head -25 "$f" | tr '\n' ' ') || true; }
+
+DANGLING_SCRIPT="${DANGLING_SCRIPT:-$(script_path recon_dangling.py)}"
+DANGLING_INTERVAL="${DANGLING_INTERVAL:-43200}"        # 12h
+run_dangling() { v21_killed dangling && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$DANGLING_SCRIPT" $(head -30 "$f" | tr '\n' ' ') || true; }
+
+TAKEOVER_SCRIPT="${TAKEOVER_SCRIPT:-$(script_path recon_takeover.py)}"
+TAKEOVER_INTERVAL="${TAKEOVER_INTERVAL:-28800}"        # 8h — claimability, reads host_notes first
+run_takeover() { v21_killed takeover && return 0
+  local f="$STATE_DIR/feed_hosts.txt"; [[ -s "$f" ]] || return 0
+  run_scanner python3 "$TAKEOVER_SCRIPT" $(head -40 "$f" | tr '\n' ' ') || true; }
+
+# ---- THE RACE — freshest surface and freshest detections --------------------
+# These two are the only lanes where being EARLY is the whole edge, so they run hottest.
+FRESHCHAIN_SCRIPT="${FRESHCHAIN_SCRIPT:-$(script_path recon_freshchain.py)}"
+FRESHCHAIN_INTERVAL="${FRESHCHAIN_INTERVAL:-1800}"     # 30m — CT surface goes stale fast
+run_freshchain() { v21_killed freshchain && return 0; [[ -f "$FRESHCHAIN_SCRIPT" ]] && \
+  run_scanner python3 "$FRESHCHAIN_SCRIPT" --batch 8 || true; }
+
+NDAYRACE_SCRIPT="${NDAYRACE_SCRIPT:-$(script_path recon_ndayrace.py)}"
+NDAYRACE_INTERVAL="${NDAYRACE_INTERVAL:-3600}"         # hourly — the window between a
+                                                       # template landing and everyone
+                                                       # having scanned with it is hours
+run_ndayrace() { v21_killed ndayrace && return 0; [[ -f "$NDAYRACE_SCRIPT" ]] && \
+  run_scanner python3 "$NDAYRACE_SCRIPT" --max-templates 15 || true; }
+
 # recon_wcd — web-cache deception/poisoning LEAD surfacer (detect-only, cache-busted = never poisons
 # the real cache). CDN-fronted in-scope hosts only. Target-facing → run_scanner. Killswitch: v2_wcd.
 WCD_SCRIPT="${WCD_SCRIPT:-$(script_path recon_wcd.sh)}"
@@ -745,7 +882,7 @@ run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIP
 # Scores every bug-bounty PROGRAM by Under-Hunted EV (freshness + low-saturation dominate, payout
 # capped = anti-dup) → ranked menu (briefings/targets_<date>.md) + auto-onboards the top N into the
 # validator queue. Pure data (no target traffic) → runs as d0k. Killswitch: state/kill/v2_targets.
-TARGETS_SCRIPT="${TARGETS_SCRIPT:-$(script_path recon_targets.sh)}"
+
 TARGETS_INTERVAL="${TARGETS_INTERVAL:-86400}"        # daily
 run_targets() { v21_killed targets && return 0; [[ -f "$TARGETS_SCRIPT" ]] && bash "$TARGETS_SCRIPT" score >>"$LOG_FILE" 2>&1 || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
@@ -896,8 +1033,40 @@ run_selfaudit() { [[ -f "$SELFAUDIT_SCRIPT" ]] && bash "$SELFAUDIT_SCRIPT" >>"$L
 # anywhere = a FROZEN template set, missing every monthly FP-fix + new CVE). Refresh out-of-band
 # (weekly); the gate keeps -duc at probe time for speed. Not target-facing (fetches from GitHub),
 # runs as d0k; the supervise_loop vpn gate skips it while vpn_down (harmless to defer). ----
-NUCLEI_UPDATE_INTERVAL="${NUCLEI_UPDATE_INTERVAL:-604800}"   # weekly
-run_nuclei_update() { command -v nuclei >/dev/null 2>&1 && nuclei -update-templates -silent >>"$LOG_FILE" 2>&1 || true; }
+# RELIABILITY (2026-08-18): `nuclei -update-templates` reported "No new updates found" while the
+# template set sat at 2026-03-02 — FIVE AND A HALF MONTHS stale, missing 438 CVE detections
+# (293 of them 2026 CVEs). The binary was v3.7.1 against a current v3.11.1 and its version check
+# had settled on a template release it considered latest. With `-silent ... || true` the failure
+# was indistinguishable from success, so nothing ever alarmed.
+#
+# So: pull from git DIRECTLY (authoritative — a commit either arrives or it does not), then
+# ASSERT THE OUTCOME. Never trust an updater's own report of its success.
+NUCLEI_UPDATE_INTERVAL="${NUCLEI_UPDATE_INTERVAL:-86400}"    # daily — CVE detections age fast
+NUCLEI_TEMPLATES_DIR="${NUCLEI_TEMPLATES_DIR:-$HOME/nuclei-templates}"
+NUCLEI_MAX_STALE_DAYS="${NUCLEI_MAX_STALE_DAYS:-3}"
+run_nuclei_update() {
+  local d="$NUCLEI_TEMPLATES_DIR"
+  [[ -d "$d/.git" ]] || { command -v nuclei >/dev/null 2>&1 && nuclei -update-templates -silent >>"$LOG_FILE" 2>&1; return 0; }
+  ( cd "$d" || exit 0
+    # local churn (TEMPLATES-STATS.json etc.) blocks a ff-only pull; park it, never merge it
+    git stash push -u -m "daemon-autostash-$(date +%s)" >/dev/null 2>&1 || true
+    timeout 600 git pull --ff-only origin main >>"$LOG_FILE" 2>&1 ||       timeout 600 git pull --ff-only origin master >>"$LOG_FILE" 2>&1 || true
+    git stash drop >/dev/null 2>&1 || true ) || true
+
+  # ASSERT: is the template set actually current? A stale detection set is a silent
+  # capability outage — every CVE published since the freeze is invisible to us.
+  local last_epoch age_days
+  last_epoch="$( cd "$d" 2>/dev/null && git log -1 --format=%ct 2>/dev/null )" || last_epoch=""
+  if [[ -n "$last_epoch" ]]; then
+    age_days=$(( ( $(date +%s) - last_epoch ) / 86400 ))
+    if (( age_days > NUCLEI_MAX_STALE_DAYS )); then
+      log "ALARM nuclei-templates ${age_days}d stale (max ${NUCLEI_MAX_STALE_DAYS}d) — CVE detection coverage is FROZEN"
+      discord_post ops "⚠️ nuclei-templates **${age_days} days stale** — every CVE disclosed since then has no detection. \`cd $d && git pull\`" 2>/dev/null || true
+    else
+      log "nuclei-templates current (${age_days}d old, $(find "$d" -name '*.yaml' 2>/dev/null | wc -l) templates)"
+    fi
+  fi
+}
 
 # ---- VPN leak guard (v2.8) -------------------------------------------------
 # Runs as d0k (NOT via run_scanner — that would self-block on its own vpn_down
@@ -967,7 +1136,6 @@ run_discord_bot() {
   supervise_loop "validate"      "VALIDATE_SLEEP"      run_validate      &
   supervise_loop "validate-fast" "VALIDATE_FAST_SLEEP" run_validate_fast &
   supervise_loop "discovery"     "DISCOVERY_SLEEP"     run_discovery     &
-  supervise_loop "hot-seed"      "HOT_SEED_SLEEP"      run_hot_seed      &
   supervise_loop "scope-watch"   "SCOPE_SLEEP"         run_scope_watch   &
 
   supervise_loop "true-fresh" "TRUE_FRESH_SLEEP"  run_true_fresh &
@@ -988,10 +1156,7 @@ run_discord_bot() {
   supervise_loop "params-live"    "PARAMS_LIVE_INTERVAL"   run_params_live    &
   supervise_loop "portscan"       "PORTSCAN_INTERVAL"      run_portscan       &
   supervise_loop "bypass"         "BYPASS_INTERVAL"        run_bypass         &
-  supervise_loop "ai-analyze"     "AI_ANALYZE_INTERVAL"    run_ai_analyze     &
   supervise_loop "ai-hunter"      "AI_HUNTER_INTERVAL"     run_ai_hunter      &
-  supervise_loop "ai-vision"      "AI_VISION_INTERVAL"     run_ai_vision      &
-  supervise_loop "evidence-gate"  "GATE_INTERVAL"          run_evidence_gate  &
   supervise_loop "xss-confirm"    "XSS_CONFIRM_INTERVAL"   run_xss_confirm    &
   supervise_loop "param-confirm"  "PARAM_CONFIRM_INTERVAL" run_param_confirm  &
   supervise_loop "jsintel"        "JSINTEL_INTERVAL"       run_jsintel        &
@@ -1000,27 +1165,42 @@ run_discord_bot() {
   supervise_loop "buckets"        "BUCKETS_INTERVAL"       run_buckets        &
   supervise_loop "graphql"        "GRAPHQL_INTERVAL"       run_graphql        &
   supervise_loop "wcd"            "WCD_INTERVAL"           run_wcd            &
+  # chain-to-impact lanes — feed first so the others always have fresh targets
+  # --- the reworked unauth pipeline -----------------------------------------
+  supervise_loop "targetsel"      "TARGETSEL_INTERVAL"     run_targetsel      &
+  supervise_loop "feed"           "FEED_INTERVAL"          run_feed           &
+  supervise_loop "enumtargets"    "ENUMTARGETS_INTERVAL"   run_enumtargets    &
+  # off-target: no traffic to the target, so these run hot
+  supervise_loop "depconf"        "DEPCONF_INTERVAL"       run_depconf        &
+  supervise_loop "jwt"            "JWT_INTERVAL"           run_jwt            &
+  supervise_loop "mobile"         "MOBILE_INTERVAL"        run_mobile         &
+  supervise_loop "intel"          "INTEL_INTERVAL"         run_intel          &
+  # on-target impact chains
+  supervise_loop "leakchain"      "LEAKCHAIN_INTERVAL"     run_leakchain      &
+  supervise_loop "firebase"       "FIREBASE_INTERVAL"      run_firebase       &
+  supervise_loop "dangling"       "DANGLING_INTERVAL"      run_dangling       &
+  supervise_loop "takeover"       "TAKEOVER_INTERVAL"      run_takeover       &
+  # the race — being early is the entire edge here
+  supervise_loop "freshchain"     "FRESHCHAIN_INTERVAL"    run_freshchain     &
+  supervise_loop "ndayrace"       "NDAYRACE_INTERVAL"      run_ndayrace       &
+  supervise_loop "actchain"       "ACTCHAIN_INTERVAL"      run_actchain       &
+  supervise_loop "portproto"      "PORTPROTO_INTERVAL"     run_portproto      &
+  supervise_loop "gqlchain"       "GQLCHAIN_INTERVAL"      run_gqlchain       &
   supervise_loop "research-vulns"   "RESEARCH_VULNS_INTERVAL"   run_research_vulns   &
   supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
-  supervise_loop "targets"          "TARGETS_INTERVAL"          run_targets          &
-  supervise_loop "dangling-dns"   "DANGLING_DNS_INTERVAL"  run_dangling_dns   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
-  supervise_loop "baddns"         "BADDNS_INTERVAL"        run_baddns         &
-  supervise_loop "unauth-expose"  "UNAUTH_EXPOSE_INTERVAL" run_unauth_expose  &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
   supervise_loop "domxss-confirm" "DOMXSS_INTERVAL"        run_domxss         &
   supervise_loop "kr"             "KR_INTERVAL"            run_kr             &
-  supervise_loop "exposed-files"  "EXPOSED_FILES_INTERVAL" run_exposed_files  &
   supervise_loop "cognito"        "COGNITO_INTERVAL"       run_cognito        &
   supervise_loop "blindxss-plant"     "BLINDXSS_PLANT_INTERVAL"     run_blindxss_plant     &
   supervise_loop "blindxss-correlate" "BLINDXSS_CORRELATE_INTERVAL" run_blindxss_correlate &
   supervise_loop "briefing"       "BRIEFING_INTERVAL"      run_briefing       &
   supervise_loop "reporter"       "REPORTER_INTERVAL"      run_reporter       &
   supervise_loop "v3-digest"      "V3_DIGEST_INTERVAL"     run_v3_digest      &
-  supervise_loop "restale"        "RESTALE_INTERVAL"       run_restale        &
   supervise_loop "screenshot"     "SCREENSHOT_INTERVAL"    run_screenshot     &
   supervise_loop "self-audit"     "SELFAUDIT_INTERVAL"     run_selfaudit      &
   supervise_loop "nuclei-update"  "NUCLEI_UPDATE_INTERVAL" run_nuclei_update  &

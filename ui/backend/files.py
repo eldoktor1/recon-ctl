@@ -125,6 +125,93 @@ def program_endpoints(hosts: list[str] | None, limit: int = 40) -> list[str]:
         return out
     return out
 
+
+# --- retained application source (app-model feedstock) ----------------------
+# recon_jsintel.sh reconstructs leaked source maps (the ORIGINAL un-minified app source) and
+# now RETAINS them under ~/recon/js_recon/src/<host>/. Endpoint strings say a route exists;
+# the source says WHERE AUTHORISATION IS ENFORCED and WHO OWNS AN OBJECT — which is what a
+# five-figure finding actually turns on. We never dump whole trees into a prompt: we extract
+# the authz/ownership/role decision points and the API call sites, which is the signal.
+
+# lines that reveal an authorisation / ownership / tenancy decision
+_AUTHZ_RE = re.compile(
+    r"\b(is[A-Z]\w*(?:Admin|Owner|Member|Staff|Manager)|hasRole|hasPermission|hasAccess|canEdit|canView|"
+    r"can[A-Z]\w{2,20}|checkAccess|requireAuth|requireRole|authoriz\w*|permission|acl|"
+    r"role\s*[=:!]|isAdmin|is_admin|owner_?id|ownerId|tenant_?id|tenantId|account_?id|accountId|"
+    r"member_?id|memberId|org(?:anization)?_?id|orgId|user_?id\s*[=!]==|current_?user|currentUser|"
+    r"subscription|entitlement|plan\s*[=:]|isPremium|is_premium)\b", re.I)
+# API call sites — reveals METHOD + PATH + which params are caller-controlled
+_CALL_RE = re.compile(
+    r"""(?:fetch|axios(?:\.\w+)?|\$http|request|api(?:\.\w+)?)\s*\(\s*[`'"]([^`'"]{4,160})[`'"]"""
+    r"""|method\s*:\s*[`'"](GET|POST|PUT|PATCH|DELETE)[`'"]""", re.I)
+_SRC_EXT = (".js", ".jsx", ".ts", ".tsx", ".vue", ".mjs")
+# dependency trees are not the target's code
+_SRC_SKIP = re.compile(r"(^|/)(node_modules|vendor|dist|polyfill|webpack|core-js|lodash|moment)(/|$)", re.I)
+
+
+def program_source(hosts: list[str] | None, max_files: int = 400,
+                   max_excerpts: int = 90) -> dict[str, Any]:
+    """Mine RETAINED reconstructed source for a program's hosts into app-model signal.
+
+    Returns {hosts:[...], files:N, authz:[{file,line,code}], calls:[str], modules:[str]}.
+    Best-effort and bounded — never raises, missing tree → empty result."""
+    host_set = [(h or "").lower() for h in (hosts or []) if h]
+    out: dict[str, Any] = {"hosts": [], "files": 0, "authz": [], "calls": [], "modules": []}
+    root = config.BASE_DIR / "js_recon" / "src"
+    if not host_set or not root.is_dir():
+        return out
+    seen_code: set[str] = set()
+    calls: set[str] = set()
+    mods: set[str] = set()
+    nfiles = 0
+    try:
+        for h in host_set:
+            d = root / h
+            if not d.is_dir():
+                continue
+            out["hosts"].append(h)
+            for p in sorted(d.rglob("*")):
+                if nfiles >= max_files or len(out["authz"]) >= max_excerpts:
+                    break
+                if not p.is_file() or p.suffix.lower() not in _SRC_EXT:
+                    continue
+                rel = str(p.relative_to(d))
+                if _SRC_SKIP.search(rel):
+                    continue
+                nfiles += 1
+                # the module path itself is signal: components named Billing/Admin/Member/Auth
+                mods.add(rel[:120])
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                if len(txt) > 400_000:          # a single giant bundle — skip, it is not real source
+                    continue
+                for i, line in enumerate(txt.splitlines(), 1):
+                    ls = line.strip()
+                    if not ls or len(ls) > 400:
+                        continue
+                    if len(out["authz"]) < max_excerpts and _AUTHZ_RE.search(ls):
+                        code = ls[:300]
+                        k = code.lower()
+                        if k not in seen_code:
+                            seen_code.add(k)
+                            out["authz"].append({"file": rel[:120], "line": i, "code": code})
+                    if len(calls) < 120:
+                        m = _CALL_RE.search(ls)
+                        if m and m.group(1):
+                            calls.add(m.group(1)[:160])
+    except Exception:
+        pass
+    out["files"] = nfiles
+    out["calls"] = sorted(calls)[:120]
+    # surface the most telling module names first (auth/billing/admin/member beat generic ui)
+    hot = re.compile(r"(auth|login|account|member|admin|billing|payment|subscri|permission|role|owner|tenant|oauth|gift|offer)", re.I)
+    out["modules"] = ([m for m in sorted(mods) if hot.search(m)][:60]
+                      + [m for m in sorted(mods) if not hot.search(m)][:20])
+    return out
+
+
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 

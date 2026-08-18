@@ -1027,6 +1027,7 @@ case "${1:-}" in
   verify-live)    shift; cmd_verify_live "$@" ;;
   list)           shift; cmd_list "$@" ;;
   confirm|verify) shift; cmd_confirm "$@" ;;   # verify = back-compat alias for confirm
-  candidates)     shift; exec python3 "$SCRIPT_DIR/recon_xss_sqli_candidates.py" "$@" ;;
+  candidates)     echo "xss/sqli candidate ranking retired — mass XSS/SQLi on saturated
+                        programs is the documented dup trap; the confirm primitives remain" >&2; exit 0 ;;
   *) echo "usage: recon_params.sh {enqueue | crawl | crawl-host <host> [url] [--cookie/--header] | collect | verify-live | list <class> [N] | confirm <xss|sqli> [host] [N] [--cookie/--header] | candidates [--class xss|sqli|both]}" >&2; exit 2 ;;
 esac

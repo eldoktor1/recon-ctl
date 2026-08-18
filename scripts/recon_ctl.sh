@@ -628,7 +628,7 @@ cmd_watching() {
 cmd_takeover_check() {
   local host="${1:?usage: recon-takeover-check <host>}"
   hdr "Manual takeover probe: $host"
-  bash "$(script_path recon_takeover_hunter.sh)" check "$host"
+  python3 "$SCRIPT_DIR/recon_takeover.py" "$host"
 }
 
 cmd_dupes() {
@@ -669,7 +669,6 @@ cmd_health() {
     "validate:recon_validate.sh" \
     "discovery:recon_discovery.sh" \
     "scope-watch:recon_scope_watch.sh" \
-    "takeover-watch:recon_takeover_hunter.sh watch" \
     "true-fresh:recon_true_fresh.sh" \
     "hot-seed:recon_hot_seed.sh" \
     "vpnguard:recon_vpnguard.sh" \
@@ -1606,7 +1605,7 @@ cmd_digest_now() {
 
 cmd_leads() {
   # Curated high-signal lead digest — read-only preview to stdout (no posting).
-  bash "$SCRIPT_DIR/recon_digest_leads.sh" print
+  echo "lead digest retired — the briefing now leads with RECOVERED impact" >&2
 }
 
 cmd_leads_post() {
@@ -2577,7 +2576,8 @@ case "${1:-}" in
   takeovers|to) shift; cmd_takeovers "$@" ;;
   watching|w)   cmd_watching ;;
   takeover-check|tc) shift; cmd_takeover_check "$@" ;;
-  takeover-dedup|tdd) bash "$(script_path recon_takeover_hunter.sh)" dedup ;;
+  takeover|tko)  # claimability-confirmed subdomain takeover (reads host_notes first)
+                shift; python3 "$SCRIPT_DIR/recon_takeover.py" "$@" ;;
   dupes)        shift; cmd_dupes "$@" ;;
   submit)       shift; cmd_submit "$@" ;;
   health)       cmd_health ;;
@@ -2612,10 +2612,12 @@ case "${1:-}" in
       *)        bash "$SCRIPT_DIR/recon_params.sh" list "$@" ;;
     esac
     ;;
-  mood)         shift; python3 "$SCRIPT_DIR/recon_mood.py" "$@" ;;
-  targets)      # Under-Hunted Target Board: ranked program-selection menu + auto-onboard.
-                # Pure data (no target traffic) → runs as d0k. default = show the board.
-                shift; bash "$SCRIPT_DIR/recon_targets.sh" "${@:-show}" ;;
+  targets|unsaturated)
+                # LOW-SATURATION target set. Replaces the mood selector and the
+                # under-hunted target board: both ranked by payout, which is backwards for a
+                # part-timer. Expected value is payout x P(you are first), and the second term
+                # collapses on famous programs. Pure data, no target traffic → d0k.
+                shift; python3 "$SCRIPT_DIR/recon_target_select.py" "$@" ;;
   buckets)      # cloud-bucket exposure (S3Scanner). target-facing → reconrun (Mullvad egress);
                 # default = one scan cycle. check/writecheck/results/seed pass through.
                 shift
@@ -2625,6 +2627,53 @@ case "${1:-}" in
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
                   bash "$SCRIPT_DIR/recon_graphql.sh" "${@:-scan}" ;;
+  authdiff|ad)  # DIFFERENTIAL access-control tester: same GET with and without the operator's
+                # session, compared. The session is the operator's, so this runs as d0k and is
+                # ON-DEMAND ONLY — never the autonomous daemon (authed testing stays human-in-loop).
+                # GET-only; endpoints replayed exactly as discovered; no ID enumeration ever.
+                shift
+                python3 "$SCRIPT_DIR/recon_authdiff.py" "$@" ;;
+  actuator-chain|actchain)
+                # Exposed actuator -> ACTUALLY recovered credentials (/env, /configprops,
+                # streamed /heapdump). Mints only when credential material is recovered;
+                # a properly masked actuator is recorded as a negative, not a finding.
+                # Read-only endpoints only — never /shutdown, /restart, /jolokia.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_actuator_chain.py" "$@" ;;
+  bucket-loot|loot)
+                # Public-READ bucket -> object triage -> credentials/PII inside it. This is
+                # the chain that produced the only Critical this operation has landed.
+                # Anonymous GET/LIST only; --provenance REQUIRED to mint (the S3 namespace
+                # is global, so a name match is not ownership).
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_bucket_loot.py" "$@" ;;
+  port-proto|proto)
+                # Open port -> speak the protocol -> confirm UNAUTHENTICATED access.
+                # Replaces "port 6379 is open" with "no-AUTH Redis, N keys". Read-only
+                # verbs only; CDN-fronted hosts skipped (their port results are meaningless).
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_port_proto.py" "$@" ;;
+  gql-chain|gqlc)
+                # Introspection -> a sensitive query with NO required args -> EXECUTE ONE
+                # read-only query. "Introspection enabled" alone stays the #1 GraphQL dup;
+                # the finding is the data that came back. Queries only — never a mutation,
+                # and never an invented identifier.
+                shift
+                sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \
+                  python3 "$SCRIPT_DIR/recon_graphql_chain.py" "$@" ;;
+  feed)         # Mine ES for what each impact lane needs (buckets/actuator/ports/graphql).
+                # Read-only against our own index — issues NO target traffic, so d0k.
+                shift
+                python3 "$SCRIPT_DIR/recon_feed.py" "$@" ;;
+  program-gate|pgate)
+                # Batch eligibility gate over every program we hold scope for, scored for the
+                # odds of an AUTHENTICATED authorization bug. Pure data — no target traffic.
+                # Run this BEFORE committing an evening, not after.
+                shift
+                python3 "$SCRIPT_DIR/recon_program_gate.py" "$@" ;;
   wcd)          # web-cache deception/poisoning surfacer (detect-only, cache-busted). reconrun.
                 shift
                 sudo -n -u reconrun env HOME="$HOME" BASE_DIR="$BASE_DIR" \

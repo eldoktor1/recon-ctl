@@ -168,7 +168,8 @@ nneed="$(printf '%s' "$needh" | jq 'length' 2>/dev/null || echo 0)"
 # FP-filtered, version-aware, deduped PROMOTE set so this one card replaces the
 # separate 5:30 lead-digest. Read-only emit; bounded so a slow run can't hang the card. ---
 vleads="[]"
-DIGEST_SELECTOR="${DIGEST_SELECTOR:-$SCRIPT_DIR/recon_digest_leads.sh}"
+# lead digest retired 2026-08-18 — the card leads with RECOVERED impact, not leads.
+DIGEST_SELECTOR=""
 if [[ -f "$DIGEST_SELECTOR" ]]; then
   vleads="$(timeout 150 bash "$DIGEST_SELECTOR" emit 2>/dev/null \
     | jq -c '[.promote[] | {host, cls, what, check, prog, url, score, cves}] | sort_by(-(.score // 0)) | .[0:10]' 2>/dev/null || echo '[]')"

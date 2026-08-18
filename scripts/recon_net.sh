@@ -82,8 +82,29 @@ discord_hook() {
 # Best-effort + non-fatal; lanes keep their own fast pings (e.g. #takeovers) regardless.
 db_confirm() {
   command -v python3 >/dev/null 2>&1 || return 0
-  local _sp="${STATE_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../engine/state.py}"
+  local _dir; _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local _sp="${STATE_PY:-$_dir/../engine/state.py}"
   [[ -f "$_sp" ]] || return 0
+
+  # TRANSITION GATE — mint on CHANGE, not on STATE.
+  # A state ("port 6379 open", "CNAME points to S3") is always true, so it fires forever
+  # and on a large estate ~95% of matches are by design; that was the entire false-positive
+  # population (316 of 320 findings, 0 real verdicts in 65 days). The gate records a
+  # baseline on first sight and only lets a CHANGED observation through. Lanes that confirm
+  # a primitive rather than observe a state (authdiff, bucket public-write, cognito, auth
+  # bypass, executed XSS/SQLi) are exempt and always mint — see engine/transition.py.
+  # Fails OPEN: any error allows the mint, because losing a real finding is worse.
+  local _tp="${TRANSITION_PY:-$_dir/../engine/transition.py}"
+  if [[ "${RECON_TRANSITION_GATE:-1}" != "0" && -f "$_tp" ]]; then
+    local _v
+    _v="$(python3 "$_tp" check "${4:-}" "${1:-}" "${5:-}" "${8:-}" 2>/dev/null)" || _v=""
+    if [[ -n "$_v" ]] && ! printf '%s' "$_v" | grep -q '"mint": *true'; then
+      log "  transition-gate: suppressed ${4:-lane}/${1:-host} — $(printf '%s' "$_v" \
+            | sed -n 's/.*"reason": *"\([^"]*\)".*/\1/p')" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
   V3_DB="${V3_DB:-$HOME/recon/v3/findings.db}" python3 "$_sp" record-confirmed "$@" >/dev/null 2>&1 || true
 }
 
