@@ -124,6 +124,52 @@ def enumerate_root(root: str, timeout: int) -> set[str]:
     return {h for h in hosts if h and "*" not in h and h.endswith(root)}
 
 
+def wildcard_ips(root: str) -> set[str]:
+    """Does *.root resolve for names that cannot exist?
+
+    Caught on the first live run: 8x8pilot.com returned 1,945 names and ALL 1,945 resolved.
+    A 100% resolution rate is not a large estate, it is a wildcard record — and queueing
+    those names is precisely how 849,539 tumblr blogs got into ES. Any host resolving to
+    the wildcard's own IP set is discarded.
+    """
+    import base64
+    ips: set[str] = set()
+    if not shutil.which("dnsx"):
+        return ips
+    probes = [f"{base64.b32encode(os.urandom(8)).decode().strip('=').lower()}.{root}"
+              for _ in range(3)]
+    try:
+        r = subprocess.run(["dnsx", "-silent", "-a", "-resp-only", "-t", "10"],
+                           input="\n".join(probes), capture_output=True, text=True, timeout=120)
+        ips = {l.strip() for l in (r.stdout or "").splitlines() if l.strip()}
+    except Exception:
+        pass
+    return ips
+
+
+def resolve_pairs(hosts: list[str]) -> dict[str, set[str]]:
+    """host -> its A records, so wildcard IPs can be filtered out."""
+    out: dict[str, set[str]] = {}
+    if not hosts or not shutil.which("dnsx"):
+        return {h: set() for h in hosts}
+    try:
+        r = subprocess.run(["dnsx", "-silent", "-a", "-resp", "-t", "60"],
+                           input="\n".join(hosts), capture_output=True, text=True, timeout=900)
+        for line in (r.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # "host [1.2.3.4]"
+            m = re.match(r"^(\S+)\s+\[([^\]]+)\]", line)
+            if m:
+                out.setdefault(m.group(1).lower(), set()).add(m.group(2).strip())
+            else:
+                out.setdefault(line.split()[0].lower(), set())
+    except Exception:
+        return {h: set() for h in hosts}
+    return out
+
+
 def resolve(hosts: list[str]) -> list[str]:
     """Public resolvers, not the target. Keeps dead names out of the validator queue."""
     if not hosts or not shutil.which("dnsx"):
@@ -176,8 +222,29 @@ def main() -> int:
         if not found:
             seen.add(root)
             continue
-        alive = resolve(sorted(found))
-        log(f"    {len(alive)} resolve")
+
+        wc = wildcard_ips(root)
+        if wc:
+            log(f"    WILDCARD DNS — *.{root} resolves to {sorted(wc)[:3]}; "
+                f"discarding names that only point there")
+
+        pairs = resolve_pairs(sorted(found))
+        alive = []
+        dropped = 0
+        for h, ips in pairs.items():
+            if wc and ips and ips <= wc:
+                dropped += 1          # resolves ONLY to the wildcard — not a real host
+                continue
+            alive.append(h)
+        alive.sort()
+        log(f"    {len(alive)} resolve" + (f" ({dropped} wildcard-only discarded)" if dropped else ""))
+        if wc and found and len(alive) / max(1, len(found)) > 0.95:
+            log(f"    still {len(alive)}/{len(found)} resolving under a wildcard — "
+                f"treating this root as unreliable and skipping the queue")
+            seen.add(root)
+            audit({"root": root, "program": prog, "found": len(found),
+                   "resolved": len(alive), "skipped": "wildcard-dominated"})
+            continue
         if alive and not a.dry_run:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             safe = re.sub(r"[^a-z0-9]+", "-", root)
