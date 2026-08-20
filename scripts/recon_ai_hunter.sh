@@ -22,6 +22,15 @@
 # autonomous; confirm-don't-exploit-past-PoC; never third-party data; Mullvad + anti-burn.
 # Claude runs as d0k (Max OAuth); the only target traffic is via safe_probe. Killswitch v2_ai_hunter.
 #
+# EVIDENCE RULE (2026-08-20): a hypothesis is only as good as the response behind it. Every
+# hypothesis carries an evidence_state the HARNESS computes — probed (a real HTTP response came
+# back), blocked (a probe was attempted but a guard/cooldown/network error swallowed it), or
+# not-probed (authed/unsafe by design, i.e. an operator plan). Only `probed` can ever mint, and
+# an all-blocked host is WITHHELD and retried rather than written up. This is the fix for the
+# heureka.sbb.ch card of 2026-08-20: one WAF 403 on /_common/file/pdf armed a 900s host cooldown,
+# every subsequent probe returned host-cooldown-after-block, and the lane still published 6
+# ranked hypotheses (one [high]) built on zero response data — 5 of which were false.
+#
 # MODES:  cycle (autonomous: pick next target) | host <host> (on-demand) | status
 # =============================================================================
 set -uo pipefail
@@ -58,6 +67,10 @@ HUNTER_MAX_HYP="${HUNTER_MAX_HYP:-6}"           # cap probes per target (anti-bu
 HUNTER_PROBE_BUDGET="${HUNTER_PROBE_BUDGET:-8}" # per-target probe budget (passed to safe_probe)
 HUNTER_EP_CAP="${HUNTER_EP_CAP:-60}"            # endpoints fed into the model (context size guard)
 HUNTER_BODY_CAP="${HUNTER_BODY_CAP:-1200}"      # probe-body chars fed back to adjudication
+# probe-availability state written by recon_safe_probe.sh — read (never written) here, so the
+# lane can tell BEFORE spending a hunt whether its probes can actually reach the target.
+PROBE_RL_DIR="${PROBE_RL_DIR:-$STATE_DIR/probe_rl}"
+PROBE_GPAUSE="${PROBE_GPAUSE:-$STATE_DIR/probe_global_pause}"
 es() { curl -fsS -m 25 --netrc-file "$NETRC" -H 'Content-Type: application/json' "$@"; }
 
 mkdir -p "$STATE_DIR" "$BRIEF_DIR" "$(dirname "$KILL_FILE")"; touch "$SEEN"
@@ -132,6 +145,25 @@ dup_sea() {  # dup_sea <host> -> 0 (skip) if it's the mainstream dup sea WITHOUT
   fi
   return 1
 }
+
+probe_gate() {  # probe_gate <host> -> rc 0 if probes can actually run NOW; else rc 1 + reason on stdout
+  # Hypotheses are worth generating only if the harness can test them. A host under cooldown (or a
+  # tripped global circuit-breaker) returns guard errors for every probe, and the lane would then
+  # reason over nothing. Checking first costs one stat() and saves an entire blind Opus hunt.
+  local host="$1" now exp hsafe
+  now="$(date +%s)"
+  if [[ -f "$PROBE_GPAUSE" ]]; then
+    exp="$(cat "$PROBE_GPAUSE" 2>/dev/null || echo 0)"
+    [[ "$now" -lt "${exp:-0}" ]] && { printf 'global-probe-pause, %ss left\n' "$((exp-now))"; return 1; }
+  fi
+  hsafe="$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '_')"
+  if [[ -f "$PROBE_RL_DIR/cooldown_$hsafe" ]]; then
+    exp="$(cat "$PROBE_RL_DIR/cooldown_$hsafe" 2>/dev/null || echo 0)"
+    [[ "$now" -lt "${exp:-0}" ]] && { printf 'host-cooldown, %ss left\n' "$((exp-now))"; return 1; }
+  fi
+  return 0
+}
+
 program_of() {  # scope_check first (offline, authoritative), ES fallback
   local p=""
   [[ -f "$SCOPE_CHECK" ]] && p="$(bash "$SCOPE_CHECK" "$1" 2>/dev/null | jq -r '.program // empty' 2>/dev/null | sed 's/[[:space:]]*$//')"
@@ -167,6 +199,7 @@ pick_target() {  # autonomous: next in-scope+pays host with endpoints, not yet h
     grep -qxF "$h" "$killed_file" 2>/dev/null && { printf '%s\n' "$h" >> "$SEEN"; continue; }  # skip worked-dead
     in_scope_pays "$h" || continue
     dup_sea "$h" && continue                                   # skip the mainstream dup sea (no SEEN mark — fresh/worth can flip)
+    probe_gate "$h" >/dev/null || continue                     # cooled/paused: not huntable NOW (no SEEN mark — retried once it lapses)
     printf '%s\n' "$h"; rm -f "$killed_file"; return 0
   done < <(jq -r '.host // empty' "$ENDPOINTS" 2>/dev/null | awk 'NF && !s[$0]++' | head -2000)
   rm -f "$killed_file"; return 1
@@ -184,6 +217,19 @@ hunt_host() {
   ctx="$(host_ctx "$host")"
   local nep; nep="$(printf '%s\n' "$endpoints" | grep -c . || true)"
   [[ "${nep:-0}" -ge 1 ]] || { log "  no endpoints for $host — skip"; return 0; }
+
+  # PRE-FLIGHT: can the harness actually probe this host right now? If not, every hypothesis
+  # would come back guard-errored and the model would reason over nothing — so spend no tokens,
+  # publish nothing, and leave the host UNSEEN so it is re-hunted once the block lapses.
+  local gate_reason
+  if ! gate_reason="$(probe_gate "$host")"; then
+    if [[ "${HUNTER_IGNORE_COOLDOWN:-0}" == "1" ]]; then
+      warn "  $host — $gate_reason; HUNTER_IGNORE_COOLDOWN=1, hunting anyway (expect blocked probes)"
+    else
+      log "  ⏸ $host — probes unavailable ($gate_reason); skipping the hunt rather than hypothesising blind"
+      return 0
+    fi
+  fi
 
   # ---- MODEL + HYPOTHESIZE (Opus over full context) ----
   hyp_in="You are an ELITE, AUTHORIZED bug-bounty researcher. You are testing a host you are AUTHORIZED
@@ -221,8 +267,8 @@ Rank by (real exploitability x payout x uniqueness). Return the app_model + up t
   [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$hyp_out" > "$STATE_DIR/hunter_dbg_hyp.json"
 
   # ---- TEST: harness runs unauth-safe hypotheses through safe_probe (Claude never executes) ----
-  local ledger; ledger="$(mktemp)"; local tested="[]"
-  local n=0
+  local ledger; ledger="$(mktemp)"; local tested="[]" bodies="{}"
+  local n=0 nprobed=0 nblocked=0
   while IFS= read -r hyp; do
     [[ -z "$hyp" ]] && continue
     [[ "$n" -ge "$HUNTER_MAX_HYP" ]] && break
@@ -231,19 +277,40 @@ Rank by (real exploitability x payout x uniqueness). Return the app_model + up t
     url="$(jq -r '.target_url' <<<"$hyp")"; method="$(jq -r '.method' <<<"$hyp")"
     auth="$(jq -r '.auth_required' <<<"$hyp")"; safe="$(jq -r '.safe_to_probe' <<<"$hyp")"
     local probe='{"skipped":"authed-or-unsafe — operator/human required, not autonomously probed"}'
+    # evidence_state is computed by the HARNESS, never claimed by the model: it is the difference
+    # between a finding and a guess, so it must not be something a prompt can talk its way out of.
+    local estate="not-probed" ereason="authed/unsafe by design — an operator plan, not an autonomous finding"
     if [[ "$auth" == "false" && "$safe" == "true" && "$method" =~ ^(GET|HEAD|OPTIONS)$ ]]; then
       local purl; purl="$(printf '%s' "$url" | grep -oE 'https?://[^ ,"]+' | head -1)"   # Opus sometimes lists several paths; probe the first valid single URL
       probe="$(SAFE_PROBE_LEDGER="$ledger" SAFE_PROBE_BUDGET="$HUNTER_PROBE_BUDGET" bash "$SAFE_PROBE" "${purl:-$url}" "$method" 2>/dev/null)"
       [[ -n "$probe" ]] || probe='{"ok":false,"error":"probe-empty"}'
-      # trim body to keep adjudication context bounded
-      probe="$(jq -c --argjson cap "$HUNTER_BODY_CAP" 'if .body then .body |= .[0:$cap] else . end' <<<"$probe" 2>/dev/null || printf '%s' "$probe")"
+      if [[ "$(jq -r '.ok // false' <<<"$probe" 2>/dev/null)" == "true" && "$(jq -r '.status // "null"' <<<"$probe" 2>/dev/null)" != "null" ]]; then
+        estate="probed"; ereason="HTTP $(jq -r '.status' <<<"$probe" 2>/dev/null)"; nprobed=$((nprobed+1))
+      else
+        # a guard denial, a cooldown, a rate-limit, a denylisted burn-trap, a DNS/fetch failure:
+        # the request never produced a response, so anything concluded from it is speculation
+        estate="blocked"; ereason="$(jq -r '.error // "probe-failed"' <<<"$probe" 2>/dev/null)"; nblocked=$((nblocked+1))
+      fi
+      # keep the FULL body for the impact gate; the model only needs a bounded slice
+      bodies="$(jq -c --arg id "$id" --arg b "$(jq -r '.body_snippet // ""' <<<"$probe" 2>/dev/null)" '. + {($id):$b}' <<<"$bodies" 2>/dev/null || printf '%s' "$bodies")"
+      probe="$(jq -c --argjson cap "$HUNTER_BODY_CAP" 'if .body_snippet then .body_snippet |= .[0:$cap] else . end' <<<"$probe" 2>/dev/null || printf '%s' "$probe")"
       n=$((n+1))
     fi
-    tested="$(jq -c --argjson h "$hyp" --argjson p "$probe" '. + [{hypothesis:$h, probe:$p}]' <<<"$tested" 2>/dev/null || printf '%s' "$tested")"
+    tested="$(jq -c --argjson h "$hyp" --argjson p "$probe" --arg es "$estate" --arg er "$ereason" '. + [{hypothesis:$h, evidence_state:$es, evidence_note:$er, probe:$p}]' <<<"$tested" 2>/dev/null || printf '%s' "$tested")"
   done < <(printf '%s' "$hyp_out" | jq -c '.hypotheses[]' 2>/dev/null)
   rm -f "$ledger"
-  log "  probed $n unauth hypothesis(es)"
+  log "  probed $n unauth hypothesis(es) — $nprobed with a real response, $nblocked blocked"
+
   [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$tested" > "$STATE_DIR/hunter_dbg_tested.json"
+
+  # WITHHOLD an evidence-free hypothesis set. If probes were attempted and NONE came back, the
+  # whole set is speculation dressed as a worklist — publishing it is exactly what produced the
+  # 6-hypothesis heureka.sbb.ch card. Leave the host UNSEEN so it is re-hunted with evidence.
+  # (The debug dump above still runs, so a withheld host is diagnosable.)
+  if [[ "$nprobed" -eq 0 && "$nblocked" -gt 0 ]]; then
+    warn "  $host — all $nblocked probe(s) blocked, zero responses captured; WITHHOLDING the hypothesis set and leaving the host for a retry"
+    return 0
+  fi
 
   # ---- ADJUDICATE: Opus judges the REAL responses (execution-grounded) ----
   local adj_in adj_out
@@ -261,6 +328,18 @@ Below are bug hypotheses and the ACTUAL unauthenticated probe responses the harn
   an empty/generic/SPA body is NOT a leak). Owned ids only; never enumerate third-party ids.
 - needs-account: requires signing up an account first.
 - refuted: the evidence does not support it.
+
+EVIDENCE STATES ARE BINDING. Each item carries an evidence_state the harness computed:
+- probed      = a real HTTP response is attached. Only these may be judged 'confirmed'.
+- blocked     = the probe NEVER EXECUTED (evidence_note says why: cooldown, rate-limit, denylisted
+                burn-trap, DNS/fetch failure). There is NO response to reason from. You MUST NOT
+                return 'confirmed' for these and MUST NOT assign a severity above 'low' — say
+                plainly in the evidence field that the probe did not execute and what would settle it.
+- not-probed  = authed / unsafe by design. Judge 'needs-human' or 'needs-account' with a precise
+                operator_plan; the severity is the plan's potential, not an observed fact.
+Inventing a response, or inferring one from the endpoint's name, is the single worst failure mode
+of this lane — a plausible guess ranked [high] costs the operator an evening and gets a report
+closed N/A. Absent evidence is a reason to say so, never a reason to raise confidence.
 Give severity + the evidence string. Hypotheses+probes:
 $(printf '%s' "$tested")"
   adj_out="$(claude_json "$HUNTER_ADJ_MODEL" "$ADJ_SCHEMA" "$adj_in")"
@@ -287,9 +366,25 @@ $(printf '%s' "$tested")"
           # This is why the lane had 37 findings and 0 real verdicts: it minted its own
           # self-assessment. A "request-echo information disclosure, severity low" is an
           # endpoint responding, not something you got. (Added 2026-08-17.)
-          local score conf evj body iverd imint iscore iimpact ikinds
-          body="$(printf '%s' "$tested" | jq -r --arg id "$id" \
-                    '.[] | select(.hypothesis.id==$id) | .probe.body // ""' 2>/dev/null | head -c 400000)"
+          local score conf evj body iverd imint iscore iimpact ikinds estate
+          # HARNESS GATE, ahead of the impact gate: "confirmed" only means something if a response
+          # actually came back. A confirmed verdict on a blocked/unprobed hypothesis is the model
+          # narrating, not evidence — record it as an FP pattern, never mint it, never rank it.
+          estate="$(printf '%s' "$tested" | jq -r --arg id "$id" \
+                    '.[] | select(.hypothesis.id==$id) | .evidence_state // "unknown"' 2>/dev/null | head -1)"
+          if [[ "$estate" != "probed" ]]; then
+            warn "  ✗ adjudicator said CONFIRMED $vc but no probe response was ever captured \
+(evidence_state=$estate) — refusing to mint or rank it"
+            python3 "$STATE_PY" kb-record "$host" "$program" "" "ai-hunter" "$vc" "fp" "0.95" "no_evidence" \
+              "adjudicator confirmed a hypothesis whose probe never executed ($estate)" >/dev/null 2>&1 || true
+            continue
+          fi
+          # the impact gate reads the FULL captured body. safe_probe_worker returns it as
+          # `body_snippet` (never `.body` — reading that was why this gate saw an empty string on
+          # every finding and could not mint at all); `bodies` holds it untrimmed, while $tested
+          # carries only the bounded slice that was shown to the model.
+          body="$(printf '%s' "$bodies" | jq -r --arg id "$id" \
+                    '.[$id] // ""' 2>/dev/null | head -c 400000)"
           iverd="$(printf '%s' "$body" | python3 "$REPO_DIR/engine/impact.py" verdict "ai-hunter:$url" 2>/dev/null)"
           imint="$(jq -r '.mint // false' <<<"${iverd:-{\}}" 2>/dev/null)"
           iscore="$(jq -r '.score // 0'  <<<"${iverd:-{\}}" 2>/dev/null)"
@@ -319,13 +414,26 @@ $(printf '%s' "$tested")"
           python3 "$STATE_PY" kb-record "$host" "$program" "$(printf '%s' "$ctx"|head -1)" "ai-hunter" "$vc" "real" "${conf:-0.8}" "ai_hunter" "$ev" >/dev/null 2>&1 || true ;;
         needs-human|needs-account)
           leads=$((leads+1))
-          local defplan="2-owned-account test; owned ids only; confirm-then-stop"
+          local defplan="2-owned-account test; owned ids only; confirm-then-stop" bnote=""
           case "${vc,,}" in
             *idor*|*bola*|*bac*|*bfla*)
               defplan="2 OWNED accounts A/B — request the SAME object as owner A then as non-owner B and COMPARE RESPONSE BODIES: identical sensitive/PII/financial body returned to B = IDOR confirmed; 403/404 or only-B's-own-data = access control working (a 200 with empty/generic/SPA body is NOT a leak). Owned ids only; never enumerate third-party ids; confirm-then-stop." ;;
           esac
+          # LABEL BY EVIDENCE. A lead built on a real response and a lead built on nothing must
+          # not read the same on the card — the [high] on an unverified guess is what sent the
+          # operator after 5 false hypotheses on 2026-08-20. The harness's evidence_state wins.
+          local bstate btag
+          bstate="$(printf '%s' "$tested" | jq -r --arg id "$id" '.[] | select(.hypothesis.id==$id) | .evidence_state // "unknown"' 2>/dev/null | head -1)"
+          bnote="$(printf '%s' "$tested" | jq -r --arg id "$id" '.[] | select(.hypothesis.id==$id) | .evidence_note // ""' 2>/dev/null | head -1)"
+          case "$bstate" in
+            probed)     btag="[$sev]" ;;
+            not-probed) btag="[$sev · authed — untested by design]" ;;
+            *)          btag="[UNVERIFIED — no response captured; model-claimed $sev]" ;;
+          esac
           { [[ -s "$brief" ]] || printf '# Hunter worklist — %s\n\n' "$stamp" > "$brief"
-            printf -- '- **[%s] %s** `%s` — %s\n  - %s\n  - OPERATOR: %s\n' "$sev" "$vc" "$url" "$host" "$ev" "${plan:-$defplan}" >> "$brief"; } ;;
+            printf -- '- **%s %s** `%s` — %s\n  - %s\n' "$btag" "$vc" "$url" "$host" "$ev" >> "$brief"
+            [[ "$bstate" == "probed" ]] || printf -- '  - ⚠ evidence: %s (%s) — treat as a lead to TEST, not a finding\n' "$bstate" "$bnote" >> "$brief"
+            printf -- '  - OPERATOR: %s\n' "${plan:-$defplan}" >> "$brief"; } ;;
       esac
     done < <(printf '%s' "$adj_out" | jq -c '.verdicts[]' 2>/dev/null)
   else
