@@ -170,3 +170,107 @@ Only in-scope + paying assets. IDOR/BAC uses two OWNED accounts. Never harvest t
 run destructive/DoS/RCE-for-harm, or bypass a login to get in. Autonomous probing stays unauthenticated,
 non-destructive, rate-limited, Mullvad-gated. Note EVERY FP / skip / disqualification / noise at the moment
 you hit it — a judgment not written down is incomplete work.
+
+---
+
+## NO SURFACE CHECKS ON A COMMITTED PROGRAM (operator-locked 2026-08-18)
+
+**"No more surface check for programs."** A surface check is not a lighter version of the work; on a
+committed program it is a WRONG ANSWER, because it produces the same output a stranger's scanner
+produces an hour later — a duplicate — while consuming the evening that could have produced a real
+finding. It also poisons the record: a shallow pass written up as a clean pass becomes worked-knowledge
+that stops anyone looking there again.
+
+**Binding rules:**
+1. A lane is not "checked" until it is EXHAUSTED or a hard blocker is named. "I ran one probe and it
+   was 403" closes nothing — state precisely what that probe did and did not answer.
+2. No sampling where enumeration is possible. All bundles, all operations, all endpoints, all hosts —
+   or an explicit written reason why not.
+3. Every negative must carry its own limits (what it does NOT rule out). See the SEEK bucket note:
+   403 on ListBucket does not clear object-level ACLs.
+4. Never report a phase complete on partial coverage. Report the actual numbers.
+
+## DEPTH DOCTRINE — "as deep as we can get, for programs, ALWAYS" (operator-locked 2026-08-18)
+
+**Surface-level work on a committed program is a failure, even when it produces tidy notes.**
+The operator called this out mid-walk on SEEK: 26 workspace notes had been recorded off ~5
+incidentally-captured HTTP messages, while the actual depth was thin. Recording is not digging.
+
+**The standard for every program, every phase:**
+- **Exhaust the client.** Not one JS bundle — ALL of them. Enumerate the module graph
+  deterministically (entry HTML -> modulepreload -> follow every `import` edge), never from
+  `performance.getEntriesByType('resource')`, whose buffer is capped and is CLEARED on SPA
+  navigation (this silently returned 0 results mid-SEEK and looked like a real negative).
+- **Enumerate the API surface, don't sample it.** Every GraphQL query AND mutation, every REST
+  path, every role/permission string. One confirmed operation is not a map.
+- **Use what we already own before touching the target.** `endpoints.jsonl`, ES, Burp history,
+  reconstructed source maps. Leaving 2,000 already-mined endpoints unread while calling a program
+  "modelled" is the exact failure this doctrine forbids.
+- **Never generalise a probe.** One production host answering does NOT answer a question about
+  staging hosts. State what was actually tested and what was not.
+- **A silent zero is a bug until proven otherwise.** If an extraction returns nothing, instrument
+  and re-run before recording it as a negative. Empty results are the easiest false negative to
+  believe.
+- **Depth beats breadth on a committed program.** We are not racing a scanner; we are looking in
+  the corners nobody looks at. "The nooks and crannies" is the whole thesis (see the MOTTO).
+
+Ties to [[feedback_no_premature_exhaustion]]: "haven't found it yet" is not "not there", and a
+surface pass is not evidence of absence. Only the OPERATOR calls a program done.
+
+
+## TRUST IS AN INSTRUMENT, NOT A CLAIM (operator-locked 2026-08-18)
+
+The operator asked mid-walk: "how can I trust that you are being as thorough as possible?"
+The correct answer is never reassurance. An agent narrating its own work will always sound
+more complete than it is, because it reports what it DID and is silent about what it never
+touched. Prose hides the silence; a ledger exposes it.
+
+**`tools/coverage_audit.py <workspace-key>` is the answer.** It is generated from ES, the
+workspace JSON and endpoints.jsonl - not from any agent's self-report - and it prints what is
+MISSING: assets never contacted, hosts known vs contacted, already-mined endpoints left
+unread, WSTG resolved vs todo, STRIDE enumerated vs tested. Run it whenever a claim of
+progress is made. The numbers are hand-checkable.
+
+**Binding rules:**
+1. **Numbers before prose.** Every stage report leads with coverage figures. "26 notes" is
+   not coverage; 1/97 WSTG is.
+2. **Declare what you touched.** Any asset an agent sent traffic to gets a workspace note
+   prefixed `COVERAGE-TOUCHED:` with a depth label (DEEP / PARTIAL / OBSERVED ONLY). Any
+   known-but-untouched asset gets an explicit `COVERAGE-UNTOUCHED:` note, so silence can
+   never be mistaken for "cleared".
+3. **Rich artefacts are not coverage.** A detailed app model, a long note list and a good
+   threat model can coexist with ~0% of the estate contacted. That combination is the exact
+   failure this rule exists to catch - it happened on SEEK: 42 notes, 34 threats, and 3 of
+   686 hosts contacted.
+4. **Every negative states its limits** (what it does NOT rule out), or it is not a negative.
+5. **The operator audits, the agent does not grade itself.** Only the OPERATOR calls a
+   program done.
+
+
+## TL;DR ALWAYS — REPORT ONLY WHAT THE OPERATOR NEEDS (operator-locked 2026-08-19)
+
+The operator works evenings. Long stage reports are a tax on the only scarce resource in this
+whole system: their attention. Detail belongs in the WORKSPACE and the ARTIFACT, which are
+durable, searchable and machine-generated. Chat is for decisions.
+
+**Every reply during a program walk MUST open with a TL;DR and MUST fit on one screen.**
+
+Required shape:
+1. **One line of status** — coverage numbers (WSTG x/97, threats tested x/34), nothing else.
+2. **What changed** — max 3 bullets. New confirmed facts or killed theories only.
+3. **What I need from you** — the decision or action, stated as a question. If nothing is
+   needed, say "nothing needed" and continue.
+
+Hard rules:
+- **No narration of method** unless it changed the result. The operator does not need the tool
+  calls, the debugging, or the reasoning chain - those are in the workspace notes.
+- **Corrections are one line.** "I was wrong about X; it is actually Y." Not a retrospective.
+- **Never re-explain what was already reported.** Assume the operator read the last TL;DR.
+- **Tables over prose** for anything with more than two dimensions.
+- **Findings and blockers are the only things worth expanding on**, and even then: what it is,
+  why it pays, what unblocks it.
+- If the operator wants depth they will ask. Depth on request, never by default.
+
+Anti-pattern that triggered this rule: multi-turn stage reports on SEEK that restated the app
+model, the method and the caveats every time, when the only actionable content was "hirer signup
+or partner application - which?".
