@@ -54,7 +54,7 @@ discover_cdn_hosts() {   # -> host<TAB>url
   local q resp
   q='{"size":2000,"_source":["host","url"],
       "query":{"bool":{
-        "filter":[{"term":{"triage_in_scope":true}},{"term":{"triage_pays":true}}],
+        "filter":[{"term":{"triage_in_scope":true}},{"term":{"triage_pays":true}},{"bool":{"must_not":{"term":{"triage_scan_deny":true}}}}],
         "must_not":[{"range":{"ignore_expires_at":{"gt":"now"}}}],
         "minimum_should_match":1,
         "should":[{"exists":{"field":"cdn_name"}},{"exists":{"field":"cdn_type"}},

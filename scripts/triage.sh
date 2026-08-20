@@ -1415,9 +1415,18 @@ update_es_scores() {
   local in="$1"
   [[ ! -s "$in" ]] && return 0
   local tmp; tmp="$(mktemp)"
-  jq -c --arg idx "$INDEX_NAME" '
+  # SCAN-DENY (2026-08-18): programs whose brief forbids automated tooling (e.g. SEEK).
+  # One program name per line in scope/scan_deny.txt, matched against triage_program.
+  # Sets triage_scan_deny=true so every target-facing lane skips the host, while
+  # triage_pays / triage_in_scope stay HONEST for manual scope checks and the workspace.
+  local deny_json="[]"
+  if [[ -s "$HOME/recon/scope/scan_deny.txt" ]]; then
+    deny_json="$(grep -vE '^[[:space:]]*(#|$)' "$HOME/recon/scope/scan_deny.txt"       | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr 'A-Z' 'a-z'       | jq -R . | jq -sc . 2>/dev/null || echo '[]')"
+  fi
+  jq -c --arg idx "$INDEX_NAME" --argjson deny "$deny_json" '
     {"update":{"_index":$idx,"_id":.host}},
     {"doc":{
+      "triage_scan_deny": (((.program // "") | ascii_downcase | sub("^ +";"") | sub(" +$";"")) | IN($deny[])),
       "triage_score":    .score,
       "triage_priority": .priority,
       "triage_signals":  (.signals | unique),

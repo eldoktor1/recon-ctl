@@ -107,7 +107,7 @@ QUERY=$(cat <<JSON
   "_source": ["host","url","triage_true_fresh","triage_external_first_seen","first_seen"],
   "query": {"bool": {"filter": [
     {"term": {"triage_in_scope": true}},
-    {"term": {"triage_pays": true}},
+    {"term": {"triage_pays": true}},{"bool":{"must_not":{"term":{"triage_scan_deny":true}}}},
     {"term": {"triage_out_of_scope": false}}
   ]}},
   "sort": [

@@ -71,7 +71,7 @@ if [[ -f "$SCOPE_CHECK" ]] && command -v jq >/dev/null 2>&1; then
   [[ "$ins" == "true" ]] || emit "$(jerr --arg h "$host" '{ok:false,error:"out-of-scope-or-nonpaying",host:$h}')"
 elif [[ -f "$NETRC" ]] && command -v jq >/dev/null 2>&1; then
   ins="$(es "$ES_URL/$INDEX_NAME/_source/$host" 2>/dev/null | jq -r \
-     '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)"
+     '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true) and ((.triage_scan_deny//false)!=true)' 2>/dev/null)"
   [[ "$ins" == "true" ]] || emit "$(jerr --arg h "$host" '{ok:false,error:"out-of-scope-or-nonpaying-es-fallback",host:$h}')"
 fi
 

@@ -141,7 +141,7 @@ query="$(jq -nc \
       filter: [
         {terms: {status_code: [401, 403]}},
         {term: {triage_in_scope: true}},
-        {term: {triage_pays: true}},
+        {term: {triage_pays: true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},
         {range: {triage_score: {gte: $min_score}}}
       ],
       must_not: [

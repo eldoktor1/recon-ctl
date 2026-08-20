@@ -231,7 +231,7 @@ build_query() {
           filter: [
             {terms: {screenshot_status: ["blocked","timeout","blank"]}},
             {term: {triage_in_scope: true}},
-            {term: {triage_pays: true}},
+            {term: {triage_pays: true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},
             {range: {triage_score: {gte: $min_score}}}
           ],
           must_not: [
@@ -251,7 +251,7 @@ build_query() {
           filter: [
             {term: {status_code: 200}},
             {term: {triage_in_scope: true}},
-            {term: {triage_pays: true}},
+            {term: {triage_pays: true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},
             {range: {triage_score: {gte: $min_score}}}
           ],
           must_not: [
@@ -273,7 +273,7 @@ build_query() {
           filter: [
             {term: {status_code: 200}},
             {term: {triage_in_scope: true}},
-            {term: {triage_pays: true}},
+            {term: {triage_pays: true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},
             {range: {triage_score: {gte: $min_score}}}
           ],
           must_not: [

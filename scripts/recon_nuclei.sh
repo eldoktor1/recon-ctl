@@ -129,7 +129,7 @@ print((datetime.utcnow()-timedelta(days=${EXP_COOLDOWN_DAYS})).strftime('%Y-%m-%
         filter: [
           {terms: {triage_priority: ["P0","P1"]}},
           {term: {triage_in_scope: true}},
-          {term: {triage_pays: true}}
+          {term: {triage_pays: true}},{bool:{must_not:{term:{triage_scan_deny:true}}}}
         ],
         must_not: [
           {term: {waf_blocks_scanners: true}},

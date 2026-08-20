@@ -47,7 +47,7 @@ in_scope_pays() {
   if [[ -x "$SCOPE_CHECK" ]]; then
     [[ "$(bash "$SCOPE_CHECK" "$1" 2>/dev/null | jq -r '((.in_scope//false)==true) and ((.pays//false)==true) and ((.out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
   else
-    [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" | jq -r '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true)' 2>/dev/null)" == "true" ]]
+    [[ "$(es "$ES_URL/$INDEX_NAME/_source/$1" | jq -r '((.triage_in_scope//false)==true) and ((.triage_pays//false)==true) and ((.triage_out_of_scope//false)!=true) and ((.triage_scan_deny//false)!=true)' 2>/dev/null)" == "true" ]]
   fi
 }
 
@@ -68,7 +68,7 @@ cut -f1 "$SEEN" 2>/dev/null | sort -u > "$STATE_DIR/kr_seen.set"
 # ---- target selection: in-scope+paying, status 200, freshest/highest first, not in cooldown.
 # Bare-API hosts (empty/short title) boosted to the front — they're the ones crawlers miss. ----
 q="$(jq -nc --argjson n "$KR_HOSTS" '{size:($n*8), _source:["host","title","triage_program"],
-  query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{status_code:200}}],
+  query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},{term:{status_code:200}}],
                must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}},
   sort:[{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
 mapfile -t hosts < <(es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \

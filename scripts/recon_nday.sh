@@ -44,7 +44,7 @@ SCHEMA='{"type":"object","additionalProperties":false,"properties":{"likely_vuln
 # in-scope+paying assets with a KEV/breaking-vuln match, freshest first, not yet assessed
 q="$(jq -nc --argjson n "$NDAY_HOSTS" '{size:($n*4),
   _source:["host","tech","webserver","status_code","title","triage_kev_cves","triage_program","triage_breaking_vuln"],
-  query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}}],
+  query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{bool:{must_not:{term:{triage_scan_deny:true}}}}],
                should:[{term:{triage_kev_match:true}},{exists:{field:"triage_kev_cves"}},{term:{triage_breaking_vuln:true}}],
                minimum_should_match:1, must_not:[{term:{triage_out_of_scope:true}}]}},
   sort:[{triage_true_fresh:{order:"desc",missing:"_last"}},{triage_score:{order:"desc",missing:"_last"}}]}')"
@@ -217,7 +217,7 @@ user-registration|CVE-2026-1492/1779||client-side token leak → admin bypass
 miniorange-oauth-single-sign-on|CVE-2026-57807||unauth login bypass via password-recovery flow → admin takeover (CVSS 9.8, ≤38.5.8, no vendor patch as of 2026-07)
 miniorange-oauth|CVE-2026-57807||unauth login bypass via password-recovery flow → admin takeover (CVSS 9.8, ≤38.5.8, no vendor patch as of 2026-07)"
   wpq="$(jq -nc --argjson n "$WP_HOSTS" '{size:($n*3),_source:["host","triage_program"],
-    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{tech:{value:"wordpress",case_insensitive:true}}}],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},{term:{tech:{value:"wordpress",case_insensitive:true}}}],
                  must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}}]}}}')"
   wpresp="$(es "$ES_URL/$INDEX_NAME/_search" -d "$wpq" 2>/dev/null)"
   wp_checked=0
@@ -328,7 +328,7 @@ _ngx_42533_inrange() {  # echo yes if nginx $1 is in the CVE-2026-42533 map-rege
 _es_hosts() {  # $1=tech term → host<TAB>program<TAB>webserver<TAB>tech-joined for in-scope+paying, un-benched
   local q; q="$(jq -nc --arg t "$1" --argjson n "$NDAY_EXTRA_HOSTS" '{size:($n*3),
     _source:["host","triage_program","webserver","tech"],
-    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{term:{tech:{value:$t,case_insensitive:true}}}],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{bool:{must_not:{term:{triage_scan_deny:true}}}},{term:{tech:{value:$t,case_insensitive:true}}}],
                  must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}},
                           {wildcard:{host:"*.unifi-hosting.ui.com"}}]}}}')"
   es "$ES_URL/$INDEX_NAME/_search" -d "$q" 2>/dev/null \
@@ -338,7 +338,7 @@ _es_unifi() {  # UniFi consoles by real console TITLE (no "unifi" tech tag exist
   # third-party *.unifi-hosting.ui.com shared tenants (hard line). host<TAB>program<TAB>webserver<TAB>tech
   local q; q="$(jq -nc --argjson n "$NDAY_EXTRA_HOSTS" '{size:($n*3),
     _source:["host","triage_program","webserver","tech"],
-    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}}],
+    query:{bool:{filter:[{term:{triage_in_scope:true}},{term:{triage_pays:true}},{bool:{must_not:{term:{triage_scan_deny:true}}}}],
       should:[{match_phrase:{title:"UniFi Network"}},{match_phrase:{title:"UniFi OS"}},{match_phrase:{title:"UniFi Dream"}}],
       minimum_should_match:1,
       must_not:[{term:{triage_out_of_scope:true}},{range:{ignore_expires_at:{gt:"now"}}},

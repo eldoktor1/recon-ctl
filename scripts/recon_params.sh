@@ -396,7 +396,7 @@ compute_dead_roots() {
   local ms="${PARAMS_DEADROOT_MIN_SAMPLE:-20}" my="${PARAMS_DEADROOT_MAX_YIELD:-0.05}" mf="${PARAMS_DEADROOT_MIN_FANOUT:-8000}" eligible crawled cataloged
   # eligible-per-root (the fan-out size: in-scope + paying hosts under the root)
   eligible="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d '{
-    "size":0,"query":{"bool":{"filter":[{"term":{"triage_in_scope":true}},{"term":{"triage_pays":true}}]}},
+    "size":0,"query":{"bool":{"filter":[{"term":{"triage_in_scope":true}},{"term":{"triage_pays":true}},{"bool":{"must_not":{"term":{"triage_scan_deny":true}}}}]}},
     "aggs":{"r":{"terms":{"field":"root_domain","size":5000}}}}' 2>/dev/null)"
   # crawled-per-root (how many we've already sampled for params)
   crawled="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d '{
@@ -500,7 +500,7 @@ cmd_enqueue() {
     local resp; resp="$(es -H 'Content-Type: application/json' -X POST "$ES_URL/$INDEX_NAME/_search" -d "{
       \"size\": $PAGE,
       \"_source\":[\"host\",\"url\",\"root_domain\",\"triage_program\",\"triage_payout_tier\",\"triage_score\",\"triage_true_fresh\",\"first_seen\"],
-      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_out_of_scope\":true}},{\"range\":{\"$PARAMS_SCANNED_FIELD\":{\"gte\":\"now-${PARAMS_COOLDOWN_DAYS}d\"}}}$DEAD_CLAUSE]}},
+      \"query\":{\"bool\":{\"filter\":[{\"term\":{\"triage_in_scope\":true}},{\"term\":{\"triage_pays\":true}}],\"must_not\":[{\"term\":{\"triage_scan_deny\":true}},{\"term\":{\"triage_out_of_scope\":true}},{\"range\":{\"$PARAMS_SCANNED_FIELD\":{\"gte\":\"now-${PARAMS_COOLDOWN_DAYS}d\"}}}$DEAD_CLAUSE]}},
       \"sort\":[{\"triage_score\":{\"order\":\"desc\",\"missing\":\"_last\"}},{\"first_seen\":{\"order\":\"asc\",\"missing\":\"_last\"}},{\"host\":{\"order\":\"asc\"}}]$sa
     }" 2>/dev/null)" || { warn "ES query failed (curl)"; exit 0; }
     # An ES-side error must NEVER masquerade as "no candidates" and silently
