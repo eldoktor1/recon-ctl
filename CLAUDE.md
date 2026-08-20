@@ -152,7 +152,12 @@ as a NEGATIVE, never minted):
   the finding is the data returned. "Introspection enabled" alone stays the #1 dup.
 - **n-day** → confirm the RUNNING VERSION in range → safe detection primitive.
 - **ai-hunter** → a hypothesis is a LEAD, never a finding; it must drive `recon_safe_probe.sh`
-  and mint only when a probe result supports it.
+  and mint only when a probe result supports it. **EVIDENCE RULE (2026-08-20):** the harness — not
+  the model — stamps every hypothesis `probed` / `blocked` / `not-probed`. Only `probed` can mint;
+  a `blocked` lead is written to the card as `[UNVERIFIED — no response captured]` instead of a
+  severity; a host whose probes are ALL blocked is withheld entirely and re-hunted later; and a host
+  already under cooldown is skipped before a token is spent. Cause: on 2026-08-20 heureka.sbb.ch
+  published 6 ranked hypotheses (one `[high]`) built on zero response data — 5 were false.
 Shared impact layer: **`engine/impact.py`** (`scan_secrets` / `classify_data` / `severity_for`)
 — one implementation, so lanes cannot drift. It REDACTS every secret (proves recovery, never
 returns a usable value), COUNTS and TYPES personal data (never copies records out), excludes
@@ -367,7 +372,17 @@ Mullvad-only, audited. **Unauthenticated only** — authenticated testing stays 
 **Anti-burn (never get banned).** Probing is rate-limited so the Mullvad egress IP isn't
 banned: min-gap + jitter, per-host and global rolling-window caps, a host COOLDOWN on a
 429/403/503, and a global CIRCUIT-BREAKER that pauses ALL probing after repeated blocks
-(`PROBE_*` env). The article's politeness rule, enforced in code.
+(`PROBE_*` env). The article's politeness rule, enforced in code. **Backoff is SIZED to
+who blocked us (2026-08-20):** `safe_probe_worker.py` classifies a blocking response as
+`block_source: edge` (CDN/WAF branded page, no app fingerprint) vs `app`. A lone EDGE 403 is a
+path RULE, not rate pushback — the app never saw the request — so it buys a short cooldown
+(`PROBE_EDGE_COOLDOWN`, 60s) and does NOT count toward the circuit-breaker; a run of them
+(`PROBE_EDGE_TRIP` in `PROBE_EDGE_WINDOW`) IS the edge shutting us out and escalates to the full
+900s. App/unknown/rate-limited blocks keep the full cooldown (unknown fails SAFE). **BURN-TRAP
+DENYLIST:** paths that always answer from the edge are never probed unattended at all — built-in
+`/_common/file/*` (Sitevision: one `GET /_common/file/pdf` cost 898s on heureka.sbb.ch and blinded
+a whole ai-hunter battery), extended per-operator in `state/probe_denylist.txt`, overridden for a
+deliberate on-demand run with `SAFE_PROBE_UNATTENDED=0`. Denied probes are audited, never silent.
 
 **MONITOR (Claude's 3rd role) — owned by the 2IC routine agent.** Once per run the 2IC
 routine sanity-checks LOCAL telemetry only — burn signals (probe blocks/cooldowns/global-
