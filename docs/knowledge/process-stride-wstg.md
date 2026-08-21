@@ -142,6 +142,31 @@ These bind every program walk, not just the one in front of you.
    recorded outcome (each WSTG test + note, each STRIDE threat + note, accounts, recorded knowledge) straight
    from the workspace. Publish that file, and republish the SAME path so the artifact keeps one stable URL.
    The board is a drill-down record — "what did each test find?" — not a scoreboard.
+
+   **THE LAYOUT IS FIXED — every program's artifact looks the same** (operator-locked 2026-08-20, so a walk
+   is legible without relearning the page). `walk_report.py` renders it; do not hand-build a variant.
+   - **Black, in every theme.** A single committed palette on `:root`, no light mode. This is an ops board
+     read at night.
+   - **TWO TABS.** *Executive summary* opens first; *Full walk — every test* holds phases, STRIDE, WSTG,
+     accounts and recorded knowledge.
+   - **Every summary point CROSS-LINKS to its evidence** in the detail tab. Clicking a chip switches tab,
+     opens every collapsed ancestor, scrolls to the row and flashes it — a reference that lands on a closed
+     `<details>` is useless. Anchors exist on every WSTG test (`WSTG-XXX-NN`), STRIDE threat (`stride-S1`)
+     and note (`note-<idx>`).
+   - **Reference notes by PHRASE, not index.** In `exec_summary`, a note ref is `{"q": "<distinctive
+     phrase>", "label": "..."}` and resolves at build time. Indices shift every time a note is appended;
+     a silently-wrong link is worse than no link. The generator warns on any unresolved ref.
+   - **One fact per row.** Step notes are split on their ALL-CAPS labels (`METHOD:`, `FOUND:`, `LIMITS:`)
+     into a label/value table, long values break at clause boundaries, and `(a)`/`(1)` enumerations become
+     list items. Labels are colour-toned by outcome so the eye lands on the verdict, not the prose.
+   - **Collapsed by default, with a one-line summary on every closed row**, so the walk skims without
+     opening anything. The open row keeps an accent spine and lifted background — look away, look back,
+     your place is still marked. Category headers are sticky.
+   - **Recorded knowledge is grouped and searchable**, newest first, bucketed by what the note IS
+     (correction / finding / cleared / lead / method / rules / ops / context) with a live filter that shows
+     `matched/total` and auto-opens groups containing hits. Hundreds of notes must never render flat.
+   - **Author `exec_summary` into the workspace, never into the HTML** — it is a workspace field, so the
+     page stays fully generated and the summary survives every regeneration.
 4. **Dev Brave only** (`brave-recon-debug`, CDP :9222, proxied into Burp) — never the daily browser, and never
    a browser that is split-tunnelled out of Mullvad (`chrome.exe` is). See [[dev-brave-for-bug-bounty]].
 5. **Burp + dev Brave must be running BEFORE Claude starts** — MCP binds at session start and cannot reconnect.
