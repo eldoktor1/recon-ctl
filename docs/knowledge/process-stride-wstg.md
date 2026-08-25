@@ -299,3 +299,63 @@ Hard rules:
 Anti-pattern that triggered this rule: multi-turn stage reports on SEEK that restated the app
 model, the method and the caveats every time, when the only actionable content was "hirer signup
 or partner application - which?".
+
+## The walk artifact — GOLDEN STANDARD (2026-08-24)
+
+Every program walk keeps its documentation in **one artifact per program**, generated — never
+hand-written — and republished to the **same URL** for the life of the engagement.
+
+    python3 tools/walk_report.py <workspace-key> evidence/<key>/<key>_walk.html
+    # then republish to the program's existing artifact URL (pass it as `url`)
+
+**The single source of truth is the workspace JSON.** Everything the document shows is rendered
+from it: `board` (state of every lead), `stride`, `wstg`, `notes`, `accounts`. Nothing that matters
+may live only in the HTML.
+
+**Why this rule exists.** The SEEK board was originally hand-authored directly into the published
+HTML. It existed in no workspace field, so `walk_report.py` could not reproduce it: a regeneration
+emitted a complete-looking document with the notes tab intact and **27 curated cards silently
+deleted**, and reported success. That was caught one step before publishing, by diffing card ids
+against the live page. Assume the next person will not be so lucky.
+
+### Rules
+1. **Generate, never hand-edit.** An edit made in the HTML is destroyed by the next regeneration.
+   New content goes into the workspace; then regenerate.
+2. **Counts are derived, never stored.** Group counts come from `len(cards)`; the notes count and
+   the notes heading come from `len(ws["notes"])`. Never type a total into the document — a label
+   that disagrees with its content is worse than a stale one, because it looks authoritative.
+3. **One artifact per program, one URL.** Republish with `url`; never publish a second document for
+   the same program. Additions belong inside the walk.
+4. **Verify before publishing.** Board card ids reproduced, rendered note count == workspace note
+   count, heading == facts strip == content, every `href="#…"` resolves to a real `id`, no
+   `<!doctype>/<html>/<body>` wrapper, no external references.
+5. **Refs by phrase where possible.** Note indices shift as notes are appended; `exec_summary`
+   supports `{"q": "<distinctive phrase>"}` which resolves at render time. A silently-wrong link is
+   worse than no link.
+
+### `board` schema
+```
+board: {
+  intro: { pill_class, pill, title, body },
+  groups: [ {
+    cat: "F",                       # one letter, shown in the group chip
+    name: "Filed &mdash; with the programme",
+    grp_class: "grp-live"|"grp-done"|"",
+    open: true,                     # expanded on load
+    cards: [ {
+      id: "SUB-1",                  # stable, also the deep-link anchor
+      title, pill, pill_class, lead,
+      segments: [ {lede: "..."} | {lab_class, label, value} ],
+      refs: [ {anchor: "note-189", label: "note 189"} ]
+    } ]
+  } ]
+}
+```
+Buckets in use: **F** filed · **O** open · **C** closed (do not re-walk) · **B** blocked ·
+**M** coverage. Pills: `p-stop` bad/blocking, `p-warn` bounded, `p-ok` cleared, `p-live` active,
+`p-idle` inert.
+
+### UI conventions
+Both tabs carry their own **Expand all / Collapse all**, scoped to that panel — an unscoped expand
+from the summary would throw open every note and every test at once. The Full-walk tab adds **Hide
+untested**, which is the intended entry point once a walk is large.
