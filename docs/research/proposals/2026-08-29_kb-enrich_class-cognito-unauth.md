@@ -1,35 +1,41 @@
 # PROPOSAL (proposal) for docs/knowledge/class-cognito-unauth.md — kb-enrich 2026-08-29
 _Review and apply manually; not auto-merged into the KB._
 
-## Sub-lane: Amplify legacy trust-policy takeover (added 2026-08-29, CVE-2024-28056 — verify before citing)
+## Adjacent attack surface: authenticated Cognito USER POOL bugs (not Identity Pool creds)
 
-A DIFFERENT bug from the "unauth guest role over-permissioned" primitive above: pre-fix Amplify CLI
-(projects scaffolded **July 2018–Aug 2019**) generated `authRole`/`unauthRole` IAM trust policies
-**missing the Cognito identity-pool audience (`cognito-identity.amazonaws.com:aud`) condition**. Without
-that condition, `AssumeRoleWithWebIdentity` via Cognito Basic authflow + STS assumes the role without
-being scoped to the specific identity pool that issued the token — and the over-permissioned role often
-survives as a dormant credential path even after the project later REMOVED its Cognito auth entirely
-(the trust policy is orphaned but still assumable).
+The primitives above are unauth Identity Pool credential issuance. Two more Cognito bugs live in the
+same config/JS surface we already mine, but require an OWNED account (ACTIVE-PoC doctrine — own account
+only, minimal, prove-then-stop):
 
-**Why this matters for us:** it's a distinct provenance signal from "is guest access enabled" — check
-it on any Cognito pool we already have from JS/sourcemap harvesting, especially ones whose build
-metadata / JS bundle looks old (2018-2019 vintage Amplify config, or an app where auth-related UI has
-since been removed but the pool ID/config still ships in the bundle).
+### Custom-attribute mass-assignment / privesc
+Cognito **custom attributes** (`custom:role`, `custom:tier`, `custom:org_id`, `custom:permissions`, …)
+default to **write-enabled** for the owning user unless the developer explicitly restricts them to
+read-only in the App Client's "Attribute read and write permissions". If the app trusts a custom
+attribute for authz decisions (role/tier/org gating) server-side, this is a direct privesc:
+1. `GetUser` / decode your own ID token to see which custom attrs exist and their current value.
+2. `aws cognito-idp update-user-attributes --access-token <YOUR-OWN-TOKEN> --user-attributes Name="custom:role",Value="admin"`
+   (or whatever attribute drives authz — `custom:tier=enterprise`, `custom:org_id=<privileged-org>`).
+3. Re-auth / re-fetch a token that reflects the new claim (some apps re-issue on next login; others
+   trust the live `GetUser` call) and observe whether backend authz actually changed.
+Own-account only; never write another user's attributes. FP check: many apps validate custom attrs
+server-side against a separate authoritative table (Cognito is just profile storage) — the client-side
+write succeeding is NOT the finding, a privilege change the BACKEND honors is. Confirm impact, don't
+stop at the write. Source: secforce.com "AWS Cognito pitfalls: Default settings attackers love".
 
-**Detection (passive, safe):**
-1. From the harvested pool config, extract the linked `authRole`/`unauthRole` ARNs (visible via
-   `aws cognito-identity describe-identity-pool` unauth, or in `aws-exports.js`/`amplifyconfiguration.json`).
-2. Check the trust policy is even readable unauth (usually isn't) — otherwise the tell is behavioral:
-   run our existing unauth flow (`get-id` → `get-credentials-for-identity`, no `--logins`) and if it
-   issues creds for a role whose naming/vintage matches this pattern, note it as a candidate for the
-   missing-audience-condition variant vs. the standard over-permissioned-guest-role variant.
-3. **AWS patched the tooling Jan–Apr 2024 for NEW deployments only** — this does not retroactively fix
-   already-scaffolded dormant roles. A hit is only actionable on legacy-looking targets.
+### Account-enumeration protection gap: SignUp bypasses `prevent_user_existence_errors`
+`prevent_user_existence_errors` (the standard Cognito hardening flag) normalizes error responses on
+`InitiateAuth`/login flows only. It does **not** cover `SignUp` — registering with an already-registered
+email still returns a distinguishing `UsernameExistsException` even on a "hardened" pool. Safe, unauth,
+single unauthenticated `SignUp` call against a known-format email is enough to confirm/deny account
+existence — useful for credential-stuffing target lists or confirming an org's user roster is enumerable
+even when the login flow looks locked down. LEAD-grade (info-disclosure-class, low severity alone) —
+pair with a concrete downstream impact (e.g. feeds a targeted password-spray) before minting. Source:
+hackingthe.cloud "Bypass Cognito Account Enumeration Controls".
 
-Same REAL-vs-FP + severity + program-scope-carve-out rules as the rest of this doc apply unchanged
-(Amazon-parent-AWS dead-zone caveat especially — this is still "found creds, pivoted via AWS," the
-exact Amazon VRP invalid-example pattern).
-
-Source: mallory.ai/stories/019e59ea-36a4-79e9-9431-fa3fc572a19d (references CVE-2024-28056 — NVD-verify
-before citing in any report; this is a 2024-vintage issue relevant only to legacy/dormant configs, not
-a fresh finding class).
+### AdminInitiateAuth flow note
+`ADMIN_NO_SRP_AUTH` is deprecated in favor of `ADMIN_USER_PASSWORD_AUTH` (same risk profile — password
+sent in the clear over TLS to Cognito, no SRP). Compromised-credential checking (`AdvancedSecurityMode`)
+only applies to `ADMIN_USER_PASSWORD_AUTH`/`USER_PASSWORD_AUTH` flows — a pool still on `USER_SRP_AUTH`
+only gets that protection if the client library implements it. Not independently exploitable; a hardening
+signal to note when scoping an authed Cognito engagement. Source: AWS docs (AdminInitiateAuth API ref,
+compromised-credentials detection guide).
