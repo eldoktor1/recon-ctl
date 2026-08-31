@@ -95,6 +95,23 @@ def _age_h(path: str):
         return None
 
 
+def _vpn_pause_age_h():
+    """Hours since $STATE_DIR/vpn_down was tripped, or None if the pipeline is not paused.
+    Prefers the flag's own `tripped_at=` stamp; falls back to its mtime. READ-ONLY — this
+    routine never clears vpn_down (hard fix-authority boundary)."""
+    f = os.path.join(STATE_DIR, "vpn_down")
+    if not os.path.isfile(f):
+        return None
+    try:
+        m = re.search(r"tripped_at=(\S+)", open(f, encoding="utf-8", errors="replace").read())
+        if m:
+            t = _dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+            return round((_now() - t).total_seconds() / 3600.0, 2)
+    except Exception:
+        pass
+    return _age_h(f)
+
+
 def _size_mb(path: str):
     try:
         return round(os.path.getsize(path) / 1048576.0, 1)
@@ -178,7 +195,21 @@ def chk_feed_stale() -> list:
     if a is None:
         out.append(finding("feed.vuln", "MEDIUM", "warn", f"vuln/vuln_feed.jsonl missing ({vf}).", remediation_class="claude-code"))
     elif a > VULNFEED_MAX_AGE_H:
-        out.append(finding("feed.vuln", "MEDIUM", "warn", f"vuln/vuln_feed.jsonl {a}h old (> {VULNFEED_MAX_AGE_H}h) — vuln-feed loop stalled?", remediation_class="claude-code"))
+        # vuln-feed runs under run_scanner, so vpn_down PAUSES its producer (cve-kev above is
+        # NOT scanner-gated, hence no pause attribution there). Staleness fully accounted for by
+        # the pause is the egress gate working, not a stalled loop — warning on it emits a
+        # claude-code fix-prompt for a non-bug (same STARVED-vs-BROKEN rule as the queue check).
+        pause = _vpn_pause_age_h()
+        if pause is not None and (a - pause) <= VULNFEED_MAX_AGE_H:
+            out.append(finding("feed.vuln", "INFO", "ok",
+                               f"vuln_feed.jsonl {a}h old, but the pipeline has been vpn_down-paused for {pause}h "
+                               f"(feed was fresh when the pause began) — staleness attributed to the pause, not a stalled loop.",
+                               remediation_class="none"))
+        else:
+            tail = f" (vpn_down-paused {pause}h — does NOT account for the age)" if pause is not None else ""
+            out.append(finding("feed.vuln", "MEDIUM", "warn",
+                               f"vuln/vuln_feed.jsonl {a}h old (> {VULNFEED_MAX_AGE_H}h) — vuln-feed loop stalled?" + tail,
+                               remediation_class="claude-code"))
     else:
         out.append(finding("feed.vuln", "OK", "ok", f"vuln_feed.jsonl fresh ({a}h).", remediation_class="none"))
     return out
