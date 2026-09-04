@@ -175,6 +175,37 @@ Corollaries learned the same day:
 - The Burp **MCP server cannot invoke extension actions** (no Smuggle-probe tool). For same-socket tests
   drive a raw `ssl`/`socket` script — `send_http1_request` opens a fresh connection per call.
 
+## Host-header path-confusion auth-bypass — Starlette CVE-2026-48710 (2IC r366, Fri technique 2026-09-04)
+The same "front-end/back-end disagree on the path" family, but from ONE header instead of a
+desync. **CVE-2026-48710** (X41-2026-002), Starlette **< 1.0.1** (fixed 1.0.1), CISA-KEV-listed
+**2026-09-02**. Web-verified (not a hallucinated CVE): affected range is everything up to and
+including 1.0.0.
+- **Mechanism:** Starlette does not validate the HTTP `Host` header before reconstructing
+  `request.url`. The router matches on the RAW ASGI scope path, but `request.url.path` is rebuilt
+  from `Host` — so a malformed `Host` (embedded path/`@`/`\`/`#` URL-confusion) makes
+  `request.url.path` DIVERGE from the path that actually routed. Any middleware or endpoint that
+  enforces a security rule on `request.url.path` (an allow/deny prefix check, an auth gate, a
+  CORS/host allowlist) is applied to the WRONG path → **auth / path-based-security BYPASS**.
+  Chained with a downstream sink it can reach RCE (why it's KEV), but the primitive itself is the
+  bypass.
+- **Fingerprint (SAFE, unauth):** ASGI/uvicorn/`starlette` server or `x-starlette`/Starlette-style
+  404 JSON; a security control that keys off the URL path (a 301/302/403 that changes with the
+  path prefix — e.g. a redirect or an admin-prefix gate). No version banner is exposed unauth, so
+  version stays UNCONFIRMED from the outside = **LEAD, never a machine-mint**.
+- **Confirm (OPERATOR, Burp, human-in-the-loop — NOT autonomous):** send the protected request but
+  set a crafted `Host:` that injects path-confusion (e.g. `Host: victim/../public` or
+  `Host: victim%00.public`), and prove the guarded response now differs from the un-crafted one
+  (the gate's redirect/403 flips to the protected content). Reflection of the Host alone is NOT the
+  bug — the SECURITY DECISION must flip. Lab to rehearse against: `xtremebeing/starlette-host-header-lab`.
+- **FP traps:** (a) a Host reflected into a link/redirect with NO security decision on the path =
+  open-redirect-adjacent at most, N/A here; (b) a reverse proxy (nginx/Envoy/CloudFront) that
+  normalizes or pins `Host` before Starlette sees it kills the primitive = SECURE; (c) 1.0.1+ =
+  patched. Version-in-range is unconfirmable unauth, so this class ships as a DIG lead the operator
+  confirms in Burp, exactly like the desync vectors above.
+- **In-scope behavioural target on file (r363):** `supportfiles.octopus.com` (Octopus, in+pays) —
+  root 301 makes it the best path-decision target to try the crafted-Host confirm against; version
+  unconfirmed = LEAD.
+
 ## Sources
 - PortSwigger Research — "HTTP/1.1 must die: the desync endgame" (2025)
 - PortSwigger Research — "Browser-Powered Desync Attacks" (client-side desync)
@@ -183,3 +214,5 @@ Corollaries learned the same day:
 - PortSwigger Research — "CRLF-Powered Desync Attacks: Beheading HTTP Streams"
 - The Hacker News — AI-Assisted HTTP Terminator … Apache Zero-Day (CVE-2026-63078, ATS), 2026-08-07
 - Burp ext: `HTTP Request Smuggler` v3.0 + 2026 vector update
+- CVE-2026-48710 (Starlette Host-header validation bypass) — X41-2026-002; CISA KEV 2026-09-02;
+  fix 1.0.1. Lab: <https://github.com/xtremebeing/starlette-host-header-lab>
