@@ -24,6 +24,11 @@ useful resource. Then RECORD what's reusable here.
 - `class-cache-deception.md` — Web Cache Deception + poisoning (U5 DIG): path-confusion arsenal
   (static-ext/delimiter/encoded/normalization), the unauth discrepancy detect (X-Cache miss→hit),
   owned-account-only impact confirm, real-vs-FP (cache-key/no-store/armor). PortSwigger "Gotta cache 'em all".
+- `process-per-asset-scope-pays.md` — how `pays` is REALLY derived: HackerOne
+  `eligible_for_bounty` / Intigriti `impact` are PER ASSET, a paying program routinely
+  marks part of its surface submission-only. Feed-by-feed field table, the
+  most-specific-asset resolution rule, `scope-resync` for the ES backfill, and the
+  known mid-label-glob gap. Read before touching any scope/pays gate.
 - _add more as we learn: tech-liferay.md, tech-wordpress.md, class-ssrf.md, …_
 
 ## Naming

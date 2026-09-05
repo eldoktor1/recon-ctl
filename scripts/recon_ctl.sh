@@ -2002,13 +2002,19 @@ cmd_bulk() {
   local scope_f="$HOME/recon/scope/programs.json"
 
   # ── shared helpers to extract scope entries ──────────────────────────────
+  # PER-ASSET (2026-09-05): with --pays we enumerate `in_scope_paying`, not the
+  # whole `in_scope` list of a program that merely pays for SOMETHING. A program
+  # like hackerone/logitech is `pays:true` while `*.logitech.com` is
+  # `eligible_for_bounty:false` — subfinder-ing that wildcard spends the whole
+  # discovery budget on surface that can never pay. Falls back to `in_scope` for
+  # records written by a pre-2026-09-05 scope build.
   # Wildcard root domains from *.root.tld entries — for subfinder
   _bulk_wildcard_roots() {
     local pays="$1"   # 1 = paying only, 0 = all
     jq -r --argjson pays "$pays" '
       .[] |
       select(if $pays == 1 then .pays == true else true end) |
-      .in_scope[]? |
+      (if $pays == 1 then (.in_scope_paying // .in_scope) else .in_scope end)[]? |
       select(type == "string") |
       select(startswith("*.")) |
       ltrimstr("*.") |
@@ -2024,7 +2030,7 @@ cmd_bulk() {
     jq -r --argjson pays "$pays" '
       .[] |
       select(if $pays == 1 then .pays == true else true end) |
-      .in_scope[]? |
+      (if $pays == 1 then (.in_scope_paying // .in_scope) else .in_scope end)[]? |
       select(type == "string") |
       select(startswith("*.") | not) |
       select(startswith("http") | not) |
@@ -2588,6 +2594,7 @@ case "${1:-}" in
   ""|-h|--help|help) usage ;;
   kev)          cmd_kev ;;
   scope)        shift; cmd_scope "$@" ;;
+  scope-resync) shift; bash "$SCRIPT_DIR/recon_scope_resync.sh" "$@" ;;
   programs)     cmd_programs ;;
   confirmed)    cmd_confirmed ;;
   vuln)         shift; cmd_vuln "$@" ;;

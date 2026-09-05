@@ -83,11 +83,47 @@ def tier($pays; $mb):
   else "mid" end;
 '
 
-# ---- HackerOne (h1 only exposes offers_bounties bool — tier=mid when paying) ----
+# =============================================================================
+# PER-ASSET BOUNTY ELIGIBILITY (2026-09-05)
+#
+# `pays` is the money gate for essentially every lane (jsintel in_scope_now,
+# safe_probe, xss/sqli confirm, the IDOR ranker, the briefings). It used to come
+# from the PROGRAM-level bool while the asset list was flattened to bare strings —
+# so a program that pays for PART of its surface marked its whole surface paying.
+# Real case: hackerone/logitech lists 58 URL/WILDCARD assets, only 15 of them
+# bounty-eligible; `*.logitech.com` is `eligible_for_bounty:false`, so 717 ES
+# hosts were gated `pays:true` when only 122 sit on payable surface.
+#
+# Every normalizer now emits, alongside the legacy flat `in_scope` string list
+# (SUBMISSION scope — shape unchanged for existing consumers):
+#   in_scope_assets[] {asset, pays, submit, max_severity}  authoritative record
+#   in_scope_paying[]                                      assets that can pay
+#   in_scope_nopay[]                                       submission-only assets
+# and program-level `pays` means "offers bounties AND at least one in-scope asset
+# is bounty-eligible". Platforms whose feed carries no per-asset eligibility field
+# (bugcrowd / yeswehack / federacy) inherit the program value per asset, so the
+# downstream shape is uniform.
+# =============================================================================
+
+# ---- HackerOne (per-asset .eligible_for_bounty; tier=mid when paying) -------
 if [[ -s "$RAW_DIR/hackerone.json" ]]; then
   jq -c "$TIER_FRAG"' .[] | select(.handle != null) |
-    ((.offers_bounties // false) == true) as $pays |
+    ((.offers_bounties // false) == true) as $prog_pays |
     0 as $mb |
+    [
+      .targets.in_scope[]?
+      | select(.asset_type == "URL" or .asset_type == "WILDCARD")
+      | select((.asset_identifier // "") != "")
+      | {
+          asset: .asset_identifier,
+          pays: ($prog_pays and ((.eligible_for_bounty // false) == true)),
+          submit: ((.eligible_for_submission // true) == true),
+          max_severity: (.max_severity // null)
+        }
+    ] as $assets |
+    # A program with zero URL/WILDCARD assets (mobile/source-only) keeps the
+    # program bool — there is nothing per-asset to demote it with.
+    ($prog_pays and (($assets | length) == 0 or ($assets | any(.pays)))) as $pays |
     {
       handle: .handle,
       name: (.name // .handle),
@@ -96,12 +132,10 @@ if [[ -s "$RAW_DIR/hackerone.json" ]]; then
       pays: $pays,
       max_bounty: $mb,
       payout_tier: tier($pays; $mb),
-      in_scope: [
-        .targets.in_scope[]?
-        | select(.asset_type == "URL" or .asset_type == "WILDCARD")
-        | .asset_identifier
-        | select(. != null and . != "")
-      ],
+      in_scope:        [ $assets[] | .asset ],
+      in_scope_assets: $assets,
+      in_scope_paying: [ $assets[] | select(.pays)       | .asset ],
+      in_scope_nopay:  [ $assets[] | select(.pays | not) | .asset ],
       out_scope: [
         .targets.out_of_scope[]?
         | select(.asset_type == "URL" or .asset_type == "WILDCARD")
@@ -109,6 +143,8 @@ if [[ -s "$RAW_DIR/hackerone.json" ]]; then
         | select(. != null and . != "")
       ]
     }' "$RAW_DIR/hackerone.json" 2>/dev/null >> "$TMP_NORM" || warn "h1 normalize errors"
+  hc="$(jq -c 'select(.platform == "hackerone")' "$TMP_NORM" 2>/dev/null | wc -l)"
+  log "  hackerone: $hc normalized"
 fi
 
 # ---- Bugcrowd (max_payout numeric) -----------------------------------------
@@ -116,6 +152,16 @@ if [[ -s "$RAW_DIR/bugcrowd.json" ]]; then
   jq -c "$TIER_FRAG"' .[] |
     (((.max_payout // 0) | tonumber? // 0)) as $mb |
     ($mb > 0) as $pays |
+    # arkadiyt bugcrowd feed target fields: type/target/uri/name/ipAddress —
+    # NO per-target reward field, so every asset inherits the program value.
+    # (Bugcrowd DOES show per-target reward ranges on the brief; if the feed ever
+    # carries one, set .pays from it here and the whole chain follows.)
+    [
+      (.targets.in_scope // [])[]
+      | (if type == "string" then . else (.target // .uri // .name // "") end)
+      | select(. != null and . != "")
+      | { asset: ., pays: $pays, submit: true, max_severity: null }
+    ] as $assets |
     {
       handle: (.code // .name | tostring),
       name: (.name // .code | tostring),
@@ -124,11 +170,10 @@ if [[ -s "$RAW_DIR/bugcrowd.json" ]]; then
       pays: $pays,
       max_bounty: $mb,
       payout_tier: tier($pays; $mb),
-      in_scope: [
-        (.targets.in_scope // [])[]
-        | (if type == "string" then . else (.target // .uri // .name // "") end)
-        | select(. != null and . != "")
-      ],
+      in_scope:        [ $assets[] | .asset ],
+      in_scope_assets: $assets,
+      in_scope_paying: [ $assets[] | select(.pays)       | .asset ],
+      in_scope_nopay:  [ $assets[] | select(.pays | not) | .asset ],
       out_scope: [
         (.targets.out_of_scope // [])[]
         | (if type == "string" then . else (.target // .uri // .name // "") end)
@@ -151,7 +196,22 @@ if [[ -s "$RAW_DIR/intigriti.json" ]]; then
     # bounty — hence the AND with max_bounty, not an OR.
     ([.targets.in_scope[]? | .impact // null]) as $impacts |
     (($impacts | length > 0) and ($impacts | all(. == "No Bounty"))) as $all_no_bounty |
-    (($mb > 0) and ($all_no_bounty | not)) as $pays |
+    (($mb > 0) and ($all_no_bounty | not)) as $prog_pays |
+    # PER-ASSET (2026-09-05): the same "No Bounty" impact tag the program-level
+    # gate above reads in aggregate is authoritative PER TARGET — a paying
+    # program can tag individual endpoints "No Bounty".
+    [
+      .targets.in_scope[]?
+      | select(.type == "url" or .type == "wildcard" or .type == "api")
+      | select((.endpoint // "") != "")
+      | {
+          asset: .endpoint,
+          pays: ($prog_pays and ((.impact // "") != "No Bounty")),
+          submit: true,
+          max_severity: null
+        }
+    ] as $assets |
+    ($prog_pays and (($assets | length) == 0 or ($assets | any(.pays)))) as $pays |
     {
       handle: .handle,
       name: (.name // .handle),
@@ -160,12 +220,10 @@ if [[ -s "$RAW_DIR/intigriti.json" ]]; then
       pays: $pays,
       max_bounty: $mb,
       payout_tier: tier($pays; $mb),
-      in_scope: [
-        .targets.in_scope[]?
-        | select(.type == "url" or .type == "wildcard" or .type == "api")
-        | .endpoint
-        | select(. != null and . != "")
-      ],
+      in_scope:        [ $assets[] | .asset ],
+      in_scope_assets: $assets,
+      in_scope_paying: [ $assets[] | select(.pays)       | .asset ],
+      in_scope_nopay:  [ $assets[] | select(.pays | not) | .asset ],
       out_scope: [
         (.targets.out_of_scope // [])[]?
         | (if type == "string" then . else (.endpoint // "") end)
@@ -183,6 +241,14 @@ if [[ -s "$RAW_DIR/yeswehack.json" ]]; then
   jq -c "$TIER_FRAG"' .[] | select(.id != null) |
     (((.max_bounty // 0) | tonumber? // 0)) as $mb |
     ($mb > 0) as $pays |
+    # arkadiyt yeswehack feed target fields: target/type only — no per-target
+    # bounty-eligibility field, so every asset inherits the program value.
+    [
+      .targets.in_scope[]?
+      | select(.type == "web-application" or .type == "api" or .type == "website" or .type == null)
+      | select((.target // "") != "")
+      | { asset: .target, pays: $pays, submit: true, max_severity: null }
+    ] as $assets |
     {
       handle: (.id | tostring),
       name: (.name | tostring),
@@ -191,12 +257,10 @@ if [[ -s "$RAW_DIR/yeswehack.json" ]]; then
       pays: $pays,
       max_bounty: $mb,
       payout_tier: tier($pays; $mb),
-      in_scope: [
-        .targets.in_scope[]?
-        | select(.type == "web-application" or .type == "api" or .type == "website" or .type == null)
-        | .target
-        | select(. != null and . != "")
-      ],
+      in_scope:        [ $assets[] | .asset ],
+      in_scope_assets: $assets,
+      in_scope_paying: [ $assets[] | select(.pays)       | .asset ],
+      in_scope_nopay:  [ $assets[] | select(.pays | not) | .asset ],
       out_scope: [
         (.targets.out_of_scope // [])[]?
         | (if type == "string" then . else (.target // "") end)
@@ -213,6 +277,13 @@ if [[ -s "$RAW_DIR/federacy.json" ]]; then
   jq -c "$TIER_FRAG"' .[] | select(.id != null) |
     ((.offers_awards // false) == true) as $pays |
     0 as $mb |
+    # federacy feed target fields: target/type only — no per-target eligibility.
+    [
+      .targets.in_scope[]?
+      | select(.type == "website" or .type == "url" or .type == "api" or .type == null)
+      | select((.target // "") != "")
+      | { asset: .target, pays: $pays, submit: true, max_severity: null }
+    ] as $assets |
     {
       handle: (.id | tostring),
       name: (.name | tostring),
@@ -221,12 +292,10 @@ if [[ -s "$RAW_DIR/federacy.json" ]]; then
       pays: $pays,
       max_bounty: $mb,
       payout_tier: tier($pays; $mb),
-      in_scope: [
-        .targets.in_scope[]?
-        | select(.type == "website" or .type == "url" or .type == "api" or .type == null)
-        | .target
-        | select(. != null and . != "")
-      ],
+      in_scope:        [ $assets[] | .asset ],
+      in_scope_assets: $assets,
+      in_scope_paying: [ $assets[] | select(.pays)       | .asset ],
+      in_scope_nopay:  [ $assets[] | select(.pays | not) | .asset ],
       out_scope: [
         (.targets.out_of_scope // [])[]?
         | (if type == "string" then . else (.target // "") end)
@@ -266,16 +335,28 @@ rm -f "$TMP_NORM"
 
 # Pattern tables
 log "Building pattern tables"
-# TSV columns (5):  pattern  handle  platform  pays  payout_tier
-# Old consumers (pre-v2.2) reading 4 columns still work — extra column is appended.
+# TSV columns (7):
+#   1 pattern  2 handle  3 platform  4 pays  5 payout_tier  6 max_severity  7 submit
+# Column 4 is now the PER-ASSET eligibility, not the program bool — every consumer
+# already filtering on `$4=="true"` (recon_discovery paying-roots,
+# recon_true_fresh paying-roots, recon_scope_check) inherits the fix for free.
+# Columns 6-7 are appended, so 4- and 5-column readers still work.
+# Falls back to the flat `in_scope` list for any record written by an older build.
 jq -r '.[] |
   . as $p |
-  ($p.in_scope // [])[] |
-  select(. != null and . != "") |
+  (
+    if ($p.in_scope_assets | type) == "array" then $p.in_scope_assets
+    else [ ($p.in_scope // [])[] | {asset: ., pays: ($p.pays // false), submit: true, max_severity: null} ]
+    end
+  )[] |
+  select((.asset // "") != "") |
   [
-    (. | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
-    $p.handle, $p.platform, ($p.pays | tostring),
-    ($p.payout_tier // (if $p.pays then "mid" else "none" end))
+    (.asset | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
+    $p.handle, $p.platform,
+    (.pays | tostring),
+    (if .pays then ($p.payout_tier // "mid") else "none" end),
+    (.max_severity // ""),
+    ((.submit // true) | tostring)
   ] | @tsv
 ' "$PROGRAMS_JSON" | sort -u > "$INSCOPE_TSV.tmp" && mv -f "$INSCOPE_TSV.tmp" "$INSCOPE_TSV"
 # ^ atomic publish: 4 loops (discovery/scope_check/true_fresh/triage) read this
@@ -300,8 +381,10 @@ jq -r '
   group_by(.platform) | map({
     platform: .[0].platform,
     count: length,
-    paying: [.[] | select(.pays == true)] | length
-  }) | .[] | "\(.platform): \(.count) total, \(.paying) paying"
+    paying: [.[] | select(.pays == true)] | length,
+    assets: ([.[] | ((.in_scope_assets // []) | length)] | add // 0),
+    pay_assets: ([.[] | ([(.in_scope_assets // [])[] | select(.pays)] | length)] | add // 0)
+  }) | .[] | "\(.platform): \(.count) total, \(.paying) paying · assets \(.pay_assets)/\(.assets) bounty-eligible"
 ' "$PROGRAMS_JSON" 2>/dev/null | while read -r line; do log "  $line"; done
 
 # Payout-tier distribution

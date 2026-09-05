@@ -1,5 +1,46 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.12 - 2026-09-05 - Per-asset bounty eligibility — `pays` stops lying
+
+`pays` is the money gate on every lane (jsintel `in_scope_now`, safe_probe, xss/sqli confirm, the
+IDOR ranker, nday, buckets/GraphQL/WCD/kr/permute, the briefings). It was read off the PROGRAM-level
+bool while the asset list was flattened to bare strings, so a program that pays for PART of its
+surface marked all of it paying. `hackerone/logitech` lists 58 URL/WILDCARD assets and pays on 15;
+`*.logitech.com` is `eligible_for_bounty:false`, and all 717 of its ES hosts were gated `pays:true`.
+This is the machine half of the exclusion-gate lesson — 6 reports, 0 paid, all lost on eligibility
+rather than validity.
+
+- **`recon_scope_db.sh`** — every normalizer now emits `in_scope_assets[] {asset,pays,submit,max_severity}`
+  plus `in_scope_paying[]` / `in_scope_nopay[]`, and program `pays` means "offers bounties AND >=1 asset
+  is eligible". HackerOne reads per-asset `eligible_for_bounty` / `eligible_for_submission` / `max_severity`;
+  Intigriti reads the per-target `impact: "No Bounty"` tag (the program-level aggregate check already
+  existed — now applied per target too). Bugcrowd / YesWeHack / Federacy carry NO per-target eligibility in
+  the arkadiyt feed, so they inherit the program value per asset — commented in place so the next person
+  knows it was checked, not missed. `in_scope` keeps every asset and its old string shape: those hosts are
+  still in scope for SUBMISSION, they just cannot pay.
+- **`inscope_patterns.tsv` is now 7 columns**, one row per ASSET: `pattern handle platform pays payout_tier
+  max_severity submit`. Column 4 became the per-asset value, so `recon_discovery.sh` and `recon_true_fresh.sh`
+  paying-roots (already filtering `$4=="true"`) inherited the fix with no edit; cols 6-7 are appended, so
+  4- and 5-column readers still parse.
+- **`recon_scope_check.sh` resolves the governing asset, not just any match.** Within a program the MOST
+  SPECIFIC matching asset wins (exact host > longer wildcard apex > shorter); across programs the best
+  payout tier wins, tie-broken by file order. Output gained `max_severity` + `eligible_for_submission`, and
+  `pattern` is now the specific asset that decided `pays`. Pattern buckets hold EVERY row instead of only
+  the first — that alone fixed 1,209 hosts wrongly gated non-paying because a VDP record
+  (`expediagroup`) shadowed the paying one (`expediagroup_bbp`) by file order.
+- **`recon_scope_resync.sh`** (new; `recon_ctl.sh scope-resync`) — `triage_pays` & friends are written from
+  scope_check during triage, so on a 530k-doc index a derivation change takes several most-stale-first
+  rotations to land. This is the one-shot correction: recompute all alive hosts, write back only the docs
+  that differ. Dry-run by default; refuses a TSV under 10k patterns or a change touching >=50% of the index.
+  Localhost ES + local TSV only — no egress. Backfill applied: 25,644 docs corrected, 9,145 of them
+  `triage_pays`; logitech 717/717 → 106/717 paying, all 717 still in scope.
+- **`recon_ctl.sh cmd_bulk`** enumerates `in_scope_paying` under `--pays`, so subfinder stops spending the
+  discovery budget on unpayable wildcards (paying roots 982 → 896, direct hosts 3,167 → 3,062).
+- **Regression, 60,261 hosts, old matcher+TSV vs new:** `in_scope` changed on 0 hosts, platform 0, program 14
+  (all VDP→paying corrections). Only the money gate moved. KB: `docs/knowledge/process-per-asset-scope-pays.md`,
+  which also records the pre-existing mid-label-glob gap (`*vc.logitech.com`, `api*.netflix.com` — 139 paying
+  patterns the `*.`-only matcher cannot see; conservative, under-reports pays, needs a real glob matcher).
+
 ## v3.11 - 2026-06-21 - Blind/stored-XSS lane (recon-blindxss) — the #1 unused dalfox feature
 
 dalfox has always had `-b`/`--custom-blind-xss-payload`; the gap was the persistent collector + the

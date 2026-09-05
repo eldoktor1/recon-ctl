@@ -38,19 +38,61 @@ fi
 # Awk engine — load patterns once, match many hosts
 # =============================================================================
 # Output format per line: TAB-separated
-#   host  in_scope  out_of_scope  pays  program  platform  pattern  out_program  out_pattern  payout_tier
-# in_scope/out_of_scope/pays = "true"/"false"
-# program/platform/pattern/payout_tier = "" if no match
+#   1 host  2 in_scope  3 out_of_scope  4 pays  5 program  6 platform  7 pattern
+#   8 out_program  9 out_pattern  10 payout_tier  11 max_severity  12 submit
+# in_scope/out_of_scope/pays/submit = "true"/"false"
+# program/platform/pattern/max_severity = "" if no match
 #
-# v2.2: payout_tier added (10th column). Old TSVs without 5th column → "mid" if pays=true.
+# v2.2: payout_tier added (10th column). Old TSVs without a 5th column → "mid" if pays=true.
+# v2.3 (2026-09-05): PER-ASSET pays. The TSV now carries one row per in-scope
+#   ASSET with that asset's own bounty eligibility (col 4), max_severity (col 6)
+#   and submission eligibility (col 7), so resolution is two-stage:
+#     1. WITHIN a program the MOST SPECIFIC matching asset governs — an exact
+#        host beats any wildcard, a longer wildcard apex beats a shorter one.
+#        That is what stops jira.logitech.com (eligible_for_bounty:false) from
+#        inheriting `*.logitech.com`, while www.logitech.com (eligible:true) and
+#        *.streamlabs.com keep paying on the very same program.
+#     2. ACROSS programs the best payout tier wins (a host in scope on both a
+#        paying program and a VDP is still worth money), tie-broken by file order.
+#   Pre-v2.3 TSVs (5 columns) still load: cols 6-7 default to "" / "true".
 # =============================================================================
 batch_match() {
   # Optimized 2026-06-05: hash exact patterns + check only the host's own
   # suffixes for wildcards -> O(hosts x labels) instead of O(hosts x 40k patterns).
-  # Verified byte-identical to the prior linear matcher on a 5k-host sample.
+  # 2026-09-05: each IN bucket now holds EVERY row for that pattern (SUBSEP-
+  # joined) rather than only the first. One pattern can legitimately repeat —
+  # different programs, or two assets that normalize to the same hostname
+  # (`www.logitech.com` eligible + `https://www.logitech.com/blog` not) — and
+  # keeping only the first silently decided `pays` by file order.
   awk -v out_tsv="$OUTSCOPE_TSV" -v in_tsv="$INSCOPE_TSV" '
+    function rank(t) { return (t=="elite"?0:(t=="high"?1:(t=="mid"?2:(t=="low"?3:4)))) }
+    # Fold every row of one matched pattern into the per-program best-so-far.
+    # spec = how specific the matched pattern is (exact host >> long apex >
+    # short apex). More specific always wins; on a tie the better payout tier
+    # wins, so two assets collapsing to one hostname resolve to the payable one.
+    function consider(list, spec, patstr,   n, arr, i, e, key, r, keep) {
+      n = split(list, arr, GS)
+      for (i = 1; i <= n; i++) {
+        split(arr[i], e, SUBSEP)
+        key = e[2] SUBSEP e[3]          # handle + platform = one program
+        r = rank(e[5])
+        keep = 0
+        if (!(key in gspec))                                keep = 1
+        else if (spec > gspec[key])                         keep = 1
+        else if (spec == gspec[key] && r < grank[key])      keep = 1
+        if (!keep) continue
+        gspec[key] = spec; grank[key] = r; gentry[key] = arr[i]; gpat[key] = patstr
+      }
+    }
     BEGIN {
       FS = "\t"
+      # Entry fields are joined with SUBSEP and entries with GS (0x1D) — control
+      # characters that cannot occur in the TSV. A printable delimiter is NOT safe:
+      # a bugcrowd handle falls back to the program NAME, and one of those names
+      # literally contains a pipe (REA Group | realestate.com.au, ...), which
+      # shifted every field of that entry. Note: no apostrophes may appear inside
+      # this awk program — it is a shell single-quoted string, so one would end it.
+      GS = sprintf("%c", 29)
       # Load OUT patterns -> exact/wildcard hashes. Keep the LOWEST file index per key
       # so "first match in file order" (the original loop semantics) is preserved.
       oi = 0
@@ -75,19 +117,22 @@ batch_match() {
         ii++
         pays = (n>=4?f[4]:"false")
         if (n>=5 && f[5]!="") tier = f[5]; else tier = (pays=="true"?"mid":"none")
+        sev = (n>=6?f[6]:"")
+        submit = (n>=7 && f[7]!="" ? f[7] : "true")
         pat = f[1]
-        meta = ii SUBSEP pat SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"") SUBSEP pays SUBSEP tier
+        # entry := idx SUBSEP handle SUBSEP platform SUBSEP pays SUBSEP tier
+        #          SUBSEP max_severity SUBSEP submit
+        entry = ii SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"") SUBSEP pays SUBSEP tier SUBSEP sev SUBSEP submit
         if (substr(pat,1,2) == "*.") {
           apex = substr(pat,3)
-          if (!(apex in in_wild)) in_wild[apex] = meta
+          in_wild[apex] = ((apex in in_wild) ? in_wild[apex] GS entry : entry)
         } else {
-          if (!(pat in in_exact)) in_exact[pat] = meta
+          in_exact[pat] = ((pat in in_exact) ? in_exact[pat] GS entry : entry)
         }
       }
       close(in_tsv)
       FS = "\n"
     }
-    function rank(t) { return (t=="elite"?0:(t=="high"?1:(t=="mid"?2:(t=="low"?3:4)))) }
     {
       raw = $0
       gsub(/[ \t\r\n]/, "", raw)
@@ -100,7 +145,7 @@ batch_match() {
       hard_excluded = 0; hard_reason = ""
       if (host ~ /\.mil$/ || host ~ /\.mil\./ ) { hard_excluded=1; hard_reason="hard-exclude:mil-tld" }
       else if (host ~ /\.smil\.mil$/ || host ~ /\.nipr\.mil$/ || host ~ /\.sipr\.mil$/) { hard_excluded=1; hard_reason="hard-exclude:classified-tld" }
-      if (hard_excluded) { printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\tnone\n", host, hard_reason; next }
+      if (hard_excluded) { printf "%s\tfalse\ttrue\tfalse\t\t\t\t\t%s\tnone\t\tfalse\n", host, hard_reason; next }
 
       # ---- OUT: lowest file index among matches (exact host + wildcard suffixes) ----
       out_idx = -1; out_meta = ""
@@ -111,33 +156,41 @@ batch_match() {
         p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
       }
 
-      # ---- IN: best by (rank asc, then file index asc) ----
-      in_rank = 99; in_idx = -1; in_meta = ""
-      if (host in in_exact) {
-        split(in_exact[host], m, SUBSEP); r = rank(m[6])
-        if (r < in_rank || (r == in_rank && (in_idx < 0 || (m[1]+0) < in_idx))) { in_rank = r; in_idx = m[1]+0; in_meta = in_exact[host] }
-      }
+      # ---- IN stage 1: per program, the most specific matching asset ---------
+      delete gspec; delete grank; delete gentry; delete gpat
+      if (host in in_exact) consider(in_exact[host], 1000000, host)
       c = host
       while (1) {
-        if (c in in_wild) {
-          split(in_wild[c], m, SUBSEP); r = rank(m[6])
-          if (r < in_rank || (r == in_rank && (in_idx < 0 || (m[1]+0) < in_idx))) { in_rank = r; in_idx = m[1]+0; in_meta = in_wild[c] }
-        }
+        if (c in in_wild) consider(in_wild[c], length(c), "*." c)
         p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
       }
 
-      # ---- assemble (mirror original field semantics exactly) ----
+      # ---- IN stage 2: across programs, best payout tier then file order -----
+      in_rank = 99; in_idx = -1; winner = ""
+      for (k in gentry) {
+        split(gentry[k], w, SUBSEP)
+        wr = rank(w[5]); wi = w[1]+0
+        if (wr < in_rank || (wr == in_rank && (in_idx < 0 || wi < in_idx))) { in_rank = wr; in_idx = wi; winner = k }
+      }
+
+      # ---- assemble ----------------------------------------------------------
       pattern = ""; program = ""; platform = ""; best_pays = "false"; best_tier = "none"
-      if (in_meta != "") { split(in_meta, m, SUBSEP); pattern = m[2]; program = m[3]; platform = m[4]; best_pays = m[5]; best_tier = m[6] }
+      best_sev = ""; best_submit = "false"
+      if (winner != "") {
+        split(gentry[winner], w, SUBSEP)
+        pattern = gpat[winner]; program = w[2]; platform = w[3]
+        best_pays = w[4]; best_tier = w[5]; best_sev = w[6]; best_submit = w[7]
+      }
       out_pattern = ""; out_program = ""
       if (out_meta != "") { split(out_meta, m, SUBSEP); out_pattern = m[2]; out_program = m[3] }
 
-      if (out_meta != "") { in_scope = "false"; best_pays = "false"; best_tier = "none" }
-      else { in_scope = (in_meta != "" ? "true" : "false") }
+      if (out_meta != "") { in_scope = "false"; best_pays = "false"; best_tier = "none"; best_sev = ""; best_submit = "false" }
+      else { in_scope = (winner != "" ? "true" : "false") }
       out_of_scope = (out_meta != "" ? "true" : "false")
 
-      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-             host, in_scope, out_of_scope, best_pays, program, platform, pattern, out_program, out_pattern, best_tier
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+             host, in_scope, out_of_scope, best_pays, program, platform, pattern,
+             out_program, out_pattern, best_tier, best_sev, best_submit
     }
   '
 }
@@ -155,7 +208,8 @@ to_json() {
       return s
     }
   {
-    # field order: host  in  out  pays  program  platform  pattern  out_program  out_pattern  payout_tier
+    # field order: host in out pays program platform pattern out_program
+    #              out_pattern payout_tier max_severity submit
     printf "{\"host\":\"%s\",\"in_scope\":%s,\"out_of_scope\":%s,\"pays\":%s",
            esc($1), $2, $3, $4
     if ($5 != "") printf ",\"program\":\"%s\"", esc($5)
@@ -167,6 +221,11 @@ to_json() {
     # v2.2: payout_tier
     tier = ($10 != "" ? $10 : "none")
     printf ",\"payout_tier\":\"%s\"", tier
+    # v2.3: `pattern` above is now the SPECIFIC asset that decided `pays`, so
+    # these two describe that asset rather than the program as a whole.
+    if ($11 != "") printf ",\"max_severity\":\"%s\"", esc($11)
+    else           printf ",\"max_severity\":null"
+    if ($2 == "true") printf ",\"eligible_for_submission\":%s", ($12 == "false" ? "false" : "true")
     # v2.1.3: hard-exclusion reason (uses out_pattern field $9 when out_program $8 is empty)
     if ($8 == "" && $9 != "" && $9 ~ /^hard-exclude:/) {
       printf ",\"hard_excluded\":true,\"reason\":\"%s\"", esc($9)
