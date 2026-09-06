@@ -2666,8 +2666,32 @@ case "${1:-}" in
                   python3 "$SCRIPT_DIR/recon_graphql_chain.py" "$@" ;;
   feed)         # Mine ES for what each impact lane needs (buckets/actuator/ports/graphql).
                 # Read-only against our own index — issues NO target traffic, so d0k.
+                # Since 2026-08-22 each lane keeps a SERVED LEDGER, so a run emits what is NEW
+                # plus a bounded 7-day re-check instead of the same set every cycle.
+                # --no-rotate shows the raw ES candidate set.
                 shift
                 python3 "$SCRIPT_DIR/recon_feed.py" "$@" ;;
+  meta)         # Compile learned priors (outcome ledger + research digests + FP patterns + KB
+                # index) into state/current_meta.md, which the ai-hunter injects into every
+                # hypothesis prompt and the 2IC reads first. Local files only — no network.
+                shift
+                python3 "$SCRIPT_DIR/recon_meta.py" "$@" ;;
+  panel)        # Fingerprint an exposed infra panel (Argo CD/Prometheus/Grafana/Airflow/Consul/
+                # Jenkins/k8s/registry/Harbor/Rancher/Nomad/Sentry) and chase THAT product's
+                # credential-bearing endpoints. Mints only on engine/impact.py recovery.
+                # Target-facing but read-only GET via safe_probe_worker → Mullvad-gated.
+                shift
+                [[ -n "${1:-}" ]] || { echo "usage: recon-panel <host> [host...] [--dry-run]" >&2; exit 1; }
+                python3 "$SCRIPT_DIR/recon_panel_chain.py" "$@" ;;
+  multitunnel|tunnels)
+                # gluetun Mullvad proxy pool: status | health | heal | autoheal | add <conf> <port>.
+                # `health` probes each exit for real and rewrites the live pool to the healthy
+                # subset, so a dead tunnel stops silently eating 1-in-N scans. `autoheal` also
+                # SWAPS a still-dead exit to a random working config from the all-exits folder
+                # (MT_HEAL_POOL) and tops the pool back to strength — the self-healing path the
+                # watchdog runs on its cadence.
+                shift
+                bash "$SCRIPT_DIR/recon_multitunnel.sh" "${@:-status}" ;;
   program-gate|pgate)
                 # Batch eligibility gate over every program we hold scope for, scored for the
                 # odds of an AUTHENTICATED authorization bug. Pure data — no target traffic.
