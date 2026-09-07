@@ -19,7 +19,7 @@ daemon. The ONLY mutations it may perform are the item-2 whitelist below.
 Output shape mirrors docs/audit_2026-06-11.md (severity-grouped markdown).
 """
 from __future__ import annotations
-import os, sys, json, re, subprocess, time, datetime as _dt
+import os, sys, io, json, re, subprocess, time, datetime as _dt
 
 # ---------------------------------------------------------------------------
 # Config (all overridable via env so the daemon/watchdog/operator agree)
@@ -49,6 +49,8 @@ QUEUE_BACKLOG_WARN = int(os.environ.get("AUDIT_QUEUE_BACKLOG_WARN", "2000"))
 QUEUE_BULK_WARN    = int(os.environ.get("AUDIT_QUEUE_BULK_WARN", "10000"))  # deprioritized bulk_ pile size that never drains -> surface it
 DRAIN_STALE_MIN   = float(os.environ.get("AUDIT_DRAIN_STALE_MIN", "20"))   # validate lock older => not draining
 DAEMON_CHILD_FLOOR = int(os.environ.get("AUDIT_DAEMON_CHILD_FLOOR", "12")) # supervise subshells expected
+SCANNER_USER      = os.environ.get("SCANNER_USER", "reconrun")            # run_scanner drops to this uid
+LANE_CRED_RE      = re.compile(r"(?:\$HOME|~)/(\.recon_[a-z0-9_]+)")            # $HOME creds a lane script reads
 
 # append-only / growth stores -> (path, threshold_MB, auto_rotatable)
 # auto_rotatable=False for LOAD-BEARING ledgers (dedup memory / permanent
@@ -650,6 +652,117 @@ def chk_perms() -> list:
     return out
 
 
+def _scanner_launched_scripts() -> set:
+    """Lane scripts the daemon launches via run_scanner (i.e. they execute as SCANNER_USER).
+
+    Resolved from recon_daemon.sh: `VAR="${VAR:-$(script_path name.sh)}"` gives VAR -> name,
+    and every `run_scanner ... "$VAR"` marks that lane as scanner-launched. Derived, not
+    hardcoded, so a new lane is covered the moment it is wired into the daemon.
+    """
+    daemon = os.path.join(REPO_DIR, "scripts", "recon_daemon.sh")
+    try:
+        text = io.open(daemon, encoding="utf-8", errors="replace").read()
+    except Exception:
+        return set()
+    var2script = dict(re.findall(r'^([A-Z0-9_]+)="\$\{\1:-\$\(script_path ([A-Za-z0-9_.]+)\)\}"',
+                                 text, re.M))
+    out = set()
+    for line in text.splitlines():
+        if "run_scanner" not in line or line.lstrip().startswith("#"):
+            continue
+        for var in re.findall(r'run_scanner[^\n]*?\$\{?([A-Z0-9_]+)\}?', line):
+            name = var2script.get(var)
+            if name and name.endswith(".sh"):
+                out.add(name)
+    return out
+
+
+def _readable_by(user: str, path: str):
+    """True/False if we can decide, None if the probe itself is unavailable."""
+    try:
+        p = subprocess.run(["sudo", "-n", "-u", user, "test", "-r", path],
+                           capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if p.returncode == 0:
+        return True
+    # sudo itself refused (no passwordless rule) -> we cannot decide; do not cry wolf.
+    if "sudo:" in (p.stderr or ""):
+        return None
+    return False
+
+
+def _read_is_guarded(body: str, cred: str) -> bool:
+    """True when the lane tests readability before using the cred (documented fallback).
+
+    e.g. recon_validate.sh: `[[ -z "$ES_PASS" && -r "$HOME/.recon_es_pass" ]] && ...`
+    falls back to ~/.recon_es_netrc, so an unreadable file degrades gracefully and is
+    not the silent-no-op failure this check exists to catch.
+    """
+    return re.search(r'-r\s+"?(?:\$HOME|~|\$\{HOME\})/' + re.escape(cred), body) is not None
+
+
+def chk_lane_creds() -> dict:
+    """Credential files a scanner lane reads must be readable by SCANNER_USER.
+
+    run_scanner drops the lane to SCANNER_USER but passes HOME=/home/<operator>, so a
+    0600 operator-owned secret is silently unreadable: the lane logs one "Permission
+    denied" and degrades to a no-op forever. That is exactly how the Wayback/CDX
+    archive proxy (~/.recon_cdx_url|key) died unnoticed for 16 days while the params
+    lane kept reporting success. Working creds carry an explicit `user:<SCANNER_USER>:r`
+    ACL (see ~/.recon_es_netrc); the drift is a missing ACL, never a chmod.
+
+    DETECT-ONLY (remediation_class=human): granting a uid read on a secret is an
+    operator decision, deliberately outside the --apply whitelist.
+    """
+    scripts_dir = os.path.join(REPO_DIR, "scripts")
+    lanes = _scanner_launched_scripts()
+    if not lanes:
+        return finding("perm.lane_creds", "LOW", "na",
+                       "could not resolve the run_scanner lane set from recon_daemon.sh — lane-cred readability not verified.",
+                       remediation_class="human")
+    broken, guarded, checked, undecided = [], [], 0, 0
+    for name in sorted(lanes):
+        sp = os.path.join(scripts_dir, name)
+        try:
+            body = io.open(sp, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        for cred in sorted(set(LANE_CRED_RE.findall(body))):
+            cpath = os.path.join(HOME, cred)
+            if not os.path.isfile(cpath):
+                continue          # absent by choice = the lane's documented no-op, not drift
+            checked += 1
+            ok = _readable_by(SCANNER_USER, cpath)
+            if ok is None:
+                undecided += 1
+            elif not ok:
+                if _read_is_guarded(body, cred):
+                    guarded.append((name, cred))
+                else:
+                    broken.append((name, cred))
+    if broken:
+        detail = ("credential(s) unreadable by " + SCANNER_USER + " — the owning lane is silently degraded: "
+                  + "; ".join("%s needs ~/%s" % (n, c) for n, c in broken)
+                  + ". Grant a read ACL (setfacl -m u:%s:r ~/<file>), matching ~/.recon_es_netrc." % SCANNER_USER)
+        return finding("perm.lane_creds", "MEDIUM", "fail", detail,
+                       remediation_class="human",
+                       broken=[{"lane": n, "cred": c} for n, c in broken],
+                       checked=checked, scanner_user=SCANNER_USER)
+    if checked == 0 or undecided == checked:
+        return finding("perm.lane_creds", "LOW", "na",
+                       "lane-cred readability not verifiable (no passwordless sudo to %s from this uid)." % SCANNER_USER,
+                       remediation_class="human", checked=checked)
+    note = ""
+    if guarded:
+        note = (" %d unreadable but -r-guarded with a documented fallback (%s) — degraded by design, not drift."
+                % (len(guarded), ", ".join("~/%s" % c for _, c in guarded)))
+    return finding("perm.lane_creds", "OK", "ok",
+                   "all %d lane credential(s) reachable by %s.%s" % (checked, SCANNER_USER, note),
+                   remediation_class="none", checked=checked,
+                   guarded=[{"lane": n, "cred": c} for n, c in guarded])
+
+
 def chk_growth() -> list:
     out = []
     for path, thresh_mb, rotatable in GROWTH_STORES:
@@ -742,6 +855,7 @@ def run_checks() -> list:
     checks.extend(chk_board_coverage())
     checks.append(chk_spool())
     checks.extend(chk_perms())
+    checks.append(chk_lane_creds())
     checks.extend(chk_growth())
     return checks
 
