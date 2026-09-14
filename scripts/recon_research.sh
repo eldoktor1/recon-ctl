@@ -31,7 +31,8 @@ cli_error_alert() {
   local topic="$1" errline="$2" stamp="$STATE_DIR/research_cli_error.alerted"
   [[ -f "$stamp" && "$(find "$stamp" -mmin -1440 2>/dev/null)" ]] && return 0
   local hook; hook="$(discord_hook ops 2>/dev/null || true)"
-  [[ -n "$hook" ]] || hook="$(discord_hook digest 2>/dev/null || true)"
+  # digest fallback removed 2026-09-13: that channel is deleted. Research digests are files
+  # (docs/research/), not notifications — nothing here is actionable within the hour.
   if [[ -n "$hook" ]]; then
     discord_post "$hook" "$(jq -nc --arg c "⚠️ **recon-research halted** — headless Claude CLI: \`${errline:0:120}\`. Research digests are paused until you re-auth: run \`~/.local/bin/claude\` → \`/login\`. (No junk committed.)" '{content:$c}')" >/dev/null 2>&1 || true
   fi

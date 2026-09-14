@@ -565,16 +565,34 @@ Run: \`recon-inspect $host\`"
   # service template FIRED  => CONFIRMED critical-port (0.9, service evidence attached)
   # bare TCP-open only       => LEAD critical-port-open (0.5 -> weekly tier; verify unauth first)
   # Either way Claude VERIFY adversarially re-checks (CDN ACKs / >6-port artifacts) before #review.
+  # 2026-08-22 — CHAIN-TO-IMPACT: this lane no longer mints on its own.
+  #
+  # It was still minting `critical-port` at score 15 / confidence 0.9 whenever a nuclei service
+  # template matched. Lifetime result of that path: 102 minted, 96 confirmed false positives,
+  # ZERO real verdicts — and the six most recent (rrn/afp/mfa-reset/cicerone/www/apigateway
+  # .tesla.cn, 2026-08-21) sat unreviewed. "A service banner answered on a critical port" is a
+  # STATE, and it is the exact sentence a stranger's scan produces an hour later. The law says
+  # the finding is what you GOT: recon_port_proto.py speaks the actual protocol (Redis PING/INFO,
+  # Elastic _cat/indices, Docker /version, kubelet /pods, Mongo isMaster...) and mints only on
+  # confirmed unauthenticated access. So portscan now ENQUEUES for that chain instead of minting.
+  #
+  # The queue is the same file the port-proto lane already consumes, so nothing else changes;
+  # a host is appended once per scan and the consumer de-duplicates.
   if [[ "${port_suspect:-0}" -eq 0 && "${is_critical:-0}" -gt 0 ]]; then
-    if [[ "$svc_confirmed" -eq 1 ]]; then
-      db_confirm "$host" "https://$host" "" "portscan" "critical-port" "15" "0.9" \
-        "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" --argjson e "$svc_evidence" \
-            '{probe:"portscan+service-confirmed", open_ports:$p, critical:$c, service_evidence:$e}' 2>/dev/null)"
-    else
-      db_confirm "$host" "https://$host" "" "portscan" "critical-port-open" "10" "0.5" \
-        "$(jq -nc --argjson p "$ports_json" --argjson c "${is_critical:-0}" \
-            '{probe:"portscan-open-UNVERIFIED-service", open_ports:$p, critical:$c, note:"TCP-open only; no unauth service template fired = LEAD. A critical port from the number alone is an FP — verify the service answers UNAUTHENTICATED before reporting."}' 2>/dev/null)"
+    _pq="${PORTPROTO_QUEUE:-$STATE_DIR/portproto_queue.txt}"   # NB: top-level loop, no `local`
+    mkdir -p "$(dirname "$_pq")" 2>/dev/null || true
+    if ! grep -qxF "$host" "$_pq" 2>/dev/null; then
+      printf '%s\n' "$host" >> "$_pq" 2>/dev/null || true
     fi
+    if [[ "$svc_confirmed" -eq 1 ]]; then
+      log "  $host: ${is_critical} critical port(s), service template fired -> queued for port-proto (NOT minted: a banner is a state, not an impact)"
+    else
+      log "  $host: ${is_critical} critical port(s), TCP-open only -> queued for port-proto"
+    fi
+    printf '%s\n' "$(jq -nc --arg h "$host" --argjson p "$ports_json" --argjson c "${is_critical:-0}" \
+        --argjson e "${svc_evidence:-[]}" --arg at "$(date -u +%FT%TZ)" \
+        '{host:$h,open_ports:$p,critical:$c,service_evidence:$e,at:$at,disposition:"queued-for-port-proto"}' 2>/dev/null)" \
+      >> "$BASE_DIR/nuclei/portscan_queued.jsonl" 2>/dev/null || true
   fi
 done
 

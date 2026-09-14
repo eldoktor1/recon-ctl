@@ -186,23 +186,197 @@ FRAMEWORK-DEBUG HINT: PHP/Laravel/Symfony signals present — add UNAUTH-SAFE GE
   printf '%s\n' "$base"
 }
 
-pick_target() {  # autonomous: next in-scope+pays host with endpoints, not yet hunted, not worked-dead
+# RANKED QUEUE (2026-08-22). This used to be `jq .host endpoints.jsonl | head -2000` and take
+# the FIRST unhunted host — i.e. targets were chosen by their position in a mining log. Two
+# costs, both measured: (1) 3,885 hosts have endpoints but only the first 2,000 in file order
+# were ever reachable, so 1,885 could never be selected no matter how valuable; (2) within the
+# window, a freshly-issued elite-tier host and a stale low-tier one were equally likely to be
+# picked, because nothing ranked them. The hunt's edge is WHICH host it spends Opus on.
+#
+# Now: score every endpoint-bearing host from ES — freshness first (be first to new surface =
+# the lowest dup-risk material there is), then KEV, payout tier and triage score — and hunt in
+# that order. Same gates as before (scope+pays, dup-sea, worked-dead, probe availability).
+rank_targets() {  # -> ranked host list on stdout, best first
   [[ -s "$ENDPOINTS" ]] || { warn "no endpoints feedstock ($ENDPOINTS)"; return 1; }
-  local h
+  local tmp_hosts q
+  tmp_hosts="$(mktemp)"
+  # NB: the host list is piped into jq via stdin, never passed as --argjson. 5,000 hostnames on
+  # the command line exceeds ARG_MAX ("jq: Argument list too long"), which silently produced an
+  # empty query and an unranked, unfiltered list — including the internal *.corp.* hosts the
+  # hard line excludes. Building the query from stdin keeps it bounded regardless of pool size.
+  jq -r '.host // empty' "$ENDPOINTS" 2>/dev/null | awk 'NF && !s[$0]++' | head -5000 > "$tmp_hosts"
+  [[ -s "$tmp_hosts" ]] || { rm -f "$tmp_hosts"; return 1; }
+  q="$(jq -Rsc 'split("\n") | map(select(length > 0)) as $hosts | {
+        size:5000,
+        _source:["host","triage_true_fresh","triage_kev_match","triage_score",
+                 "triage_payout_tier","triage_external_first_seen"],
+        query:{bool:{
+          filter:[{terms:{host:$hosts}},{term:{triage_in_scope:true}},{term:{triage_pays:true}}],
+          must_not:[{term:{triage_out_of_scope:true}},
+                    {range:{ignore_expires_at:{gt:"now"}}}]}}}' < "$tmp_hosts")"
+  rm -f "$tmp_hosts"
+  [[ -n "$q" ]] || return 1
+  # ...and the query goes to curl on STDIN (-d @-) for the same reason: a 3,885-host terms
+  # query is ~137KB, well past ARG_MAX, so `-d "$q"` fails with "Argument list too long".
+  # API-SURFACE DENSITY is the term that decides whether a hunt is worth Opus at all. Program
+  # payout tier is a property of the PROGRAM, not the host, so tier alone floated
+  # investors.dropbox.com and blog.dropbox.com to the top of the queue — elite-tier marketing
+  # pages with nothing to reason about. The count of endpoints jsintel mined from a host
+  # separates an application with an API from a brochure, costs nothing (it is already on disk),
+  # and is capped so one enormous SPA cannot crowd out everything else.
+  # CLONE COLLAPSE. Ranking by density alone filled the queue with www.vwfs.pt / .mx / .kr /
+  # .it / .ie — one product deployed per locale, i.e. the product-class fan-out that the
+  # doctrine calls a near-certain duplicate. Hosts whose MINED ENDPOINT SET is identical are
+  # the same application; hunting the second one cannot produce a non-duplicate finding, it
+  # just spends Opus. Group by the endpoint-set fingerprint and keep the best-ranked member.
+  local ep_counts; ep_counts="$(mktemp)"
+  python3 - "$ENDPOINTS" > "$ep_counts" <<'PY'
+import sys, json, hashlib, re, zlib
+from urllib.parse import urlsplit
+
+# TWO corrections, both measured on the live feedstock:
+#
+# 1. FIRST-PARTY ONLY for density. jsluice mines every URL in the bundle, so `www.vwfs.pt`
+#    scored 150 "endpoints" — of which a third were youtube.com/vimeo.com/adform embeds. That
+#    inflated brochure sites into top-ranked hunt targets. Only relative paths and URLs pointing
+#    back at the host itself are this application's attack surface.
+#
+# 2. NEAR-DUPLICATE, not exact. Locale clones are not byte-identical: vwfs.pt and vwfs.mx share
+#    144 of 150 endpoints and differ by 6 (`/audi-ew_it/`, a tracker, a schema.org link). Exact
+#    set hashing therefore left all 8 locales in the queue. MinHash + LSH banding groups sets by
+#    SIMILARITY, so one product deployed per country collapses to a single representative — the
+#    fan-out dup the doctrine warns about, caught before Opus is spent rather than after.
+LOC = re.compile(r"^(?:[a-z]{2}|[a-z]{2}[-_][a-z]{2})$", re.I)
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+HEX = re.compile(r"^[0-9a-f]{16,}$", re.I)
+BANDS, ROWS = 8, 4          # 32 minhashes as 8 bands of 4 — any shared band => same product
+
+
+def norm(ep: str) -> str:
+    ep = ep.split("?", 1)[0].split("#", 1)[0].lower()
+    parts = []
+    for seg in ep.split("/"):
+        if not seg:
+            parts.append(seg)
+        elif LOC.match(seg):
+            parts.append("{loc}")
+        elif UUID.match(seg) or HEX.match(seg):
+            parts.append("{id}")
+        elif seg.isdigit():
+            parts.append("{n}")
+        else:
+            parts.append(re.sub(r"\d+", "{n}", seg))
+    return "/".join(parts)
+
+
+def first_party(host: str, ep: str) -> str | None:
+    if ep.startswith("/"):
+        return ep
+    if "://" in ep:
+        try:
+            netloc = urlsplit(ep).netloc.lower().split("@")[-1].split(":")[0]
+        except Exception:
+            return None
+        if netloc == host or netloc.endswith("." + host) or host.endswith("." + netloc):
+            return urlsplit(ep).path or "/"
+    return None
+
+
+per: dict[str, set] = {}
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        h, e = (o.get("host") or "").strip().lower(), (o.get("endpoint") or "").strip()
+        if not h or not e:
+            continue
+        p = first_party(h, e)
+        if p:
+            per.setdefault(h, set()).add(norm(p))
+
+# MinHash sketch, then LSH banding into product groups
+sketches = {}
+for h, eps in per.items():
+    if not eps:
+        continue
+    hashes = sorted(zlib.crc32(e.encode()) & 0xFFFFFFFF for e in eps)[:32]
+    sketches[h] = (hashes + [0] * 32)[:32]
+
+band_map: dict[tuple, str] = {}
+group: dict[str, str] = {}
+for h, sk in sketches.items():
+    gid = None
+    keys = []
+    for b in range(BANDS):
+        key = (b,) + tuple(sk[b * ROWS:(b + 1) * ROWS])
+        keys.append(key)
+        if key in band_map and gid is None:
+            gid = band_map[key]
+    if gid is None:
+        gid = hashlib.sha1(h.encode()).hexdigest()[:16]
+    for key in keys:
+        band_map.setdefault(key, gid)
+    group[h] = gid
+
+for h, eps in per.items():
+    print(f"{h}\t{len(eps)}\t{group.get(h, 'u_' + h)}")
+PY
+  printf '%s' "$q" | es "$ES_URL/$INDEX_NAME/_search" -d @- 2>/dev/null | jq -r '
+    def tier(t): if t=="elite" then 40 elif t=="high" then 25 elif t=="mid" then 12 else 0 end;
+    .hits.hits[]._source
+    | [ .host,
+        ( (if .triage_true_fresh then 60 else 0 end)
+        + (if .triage_kev_match  then 30 else 0 end)
+        + tier(.triage_payout_tier // "")
+        + ((.triage_score // 0) / 4) ) ]
+    | @tsv' 2>/dev/null \
+  | awk -F'\t' -v C="$ep_counts" '
+      BEGIN { while ((getline line < C) > 0) { split(line, a, "\t"); cnt[a[1]] = a[2]; sig[a[1]] = a[3] } }
+      { n = cnt[$1] + 0;
+        d = (n > 200 ? 200 : n) / 4;          # capped density bonus, max +50
+        # Brochure penalty: an elite-tier program floats its own newsroom to the top of the
+        # queue on tier alone. A blog/IR/careers host is not where an unauth finding lives, and
+        # an Opus hunt on one is the cost of a hunt on something real.
+        b = ($1 ~ /^(blog|investors|press|news|newsroom|careers|jobs|about|media|ir)\./) ? 35 : 0;
+        printf "%.2f\t%s\t%s\n", $2 + d - b, $1, (sig[$1] == "" ? "u" NR : sig[$1]) }' \
+  | sort -rn \
+  | awk -F'\t' '!clone[$3]++' \
+  | cut -f2
+  rm -f "$ep_counts"
+}
+
+# Internal/corp/tenant surface: never worth an Opus hunt and, for tenant consoles, never ours
+# to touch. Same hard line freshchain enforces — kept here too so a ranked queue built straight
+# from ES cannot walk into it.
+hard_skip() {  # hard_skip <host> -> rc 0 if the host must not be hunted at all
+  local h="$1"
+  [[ "$h" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\. ]] && return 0
+  [[ "$h" =~ (^|\.)corp\.|(^|\.)internal\.|\.intranet\.|(^|\.)internal\.api\. ]] && return 0
+  [[ "$h" =~ \.unifi-hosting\.ui\.com$ ]] && return 0
+  return 1
+}
+
+pick_targets() {  # pick_targets <n> -> up to n huntable hosts, best-ranked first
+  local want="${1:-1}" h n=0
+  local killed_file; killed_file="$(mktemp)"
   # worked-and-killed hosts (host_notes verdict=dead per tools/note_verdict.py) — never re-serve
   # them (fixes the DIG card re-carrying killed hosts like charts.etoro; open/armed hosts survive).
-  local killed_file; killed_file="$(mktemp)"
   python3 "$SCRIPT_DIR/../tools/note_verdict.py" killed-hosts "${NOTES_FILE:-$STATE_DIR/host_notes.jsonl}" 2>/dev/null > "$killed_file" || true
   while read -r h; do
     [[ -z "$h" ]] && continue
+    [[ "$n" -ge "$want" ]] && break
     grep -qxF "$h" "$SEEN" 2>/dev/null && continue
+    hard_skip "$h" && { printf '%s\n' "$h" >> "$SEEN"; continue; }   # internal/tenant: never hunt
     grep -qxF "$h" "$killed_file" 2>/dev/null && { printf '%s\n' "$h" >> "$SEEN"; continue; }  # skip worked-dead
     in_scope_pays "$h" || continue
     dup_sea "$h" && continue                                   # skip the mainstream dup sea (no SEEN mark — fresh/worth can flip)
     probe_gate "$h" >/dev/null || continue                     # cooled/paused: not huntable NOW (no SEEN mark — retried once it lapses)
-    printf '%s\n' "$h"; rm -f "$killed_file"; return 0
-  done < <(jq -r '.host // empty' "$ENDPOINTS" 2>/dev/null | awk 'NF && !s[$0]++' | head -2000)
-  rm -f "$killed_file"; return 1
+    printf '%s\n' "$h"; n=$((n+1))
+  done < <(rank_targets)
+  rm -f "$killed_file"
+  [[ "$n" -ge 1 ]]
 }
 
 # ============================== the hunt =====================================================
@@ -231,6 +405,16 @@ hunt_host() {
     fi
   fi
 
+  # LEARNED PRIORS (2026-08-22). Until now this prompt carried one hardcoded PHP hint and knew
+  # nothing else: not what the research lane found yesterday, not which classes have a lifetime
+  # real-rate of zero here, not which FP patterns already cost an evening. scripts/recon_meta.py
+  # compiles all of that into state/current_meta.md and it is injected here — the loop that makes
+  # the hunt sharper over time instead of repeating the same duplicate-by-default hypotheses.
+  local meta_brief=""
+  if [[ -s "$STATE_DIR/current_meta.md" ]]; then
+    meta_brief="$(head -c "${HUNTER_META_CHARS:-6000}" "$STATE_DIR/current_meta.md" 2>/dev/null)"
+  fi
+
   # ---- MODEL + HYPOTHESIZE (Opus over full context) ----
   hyp_in="You are an ELITE, AUTHORIZED bug-bounty researcher. You are testing a host you are AUTHORIZED
 to test, that is IN-SCOPE and PAYING on its program, for the sole purpose of finding and REPORTING
@@ -239,6 +423,11 @@ vulnerabilities. This is legitimate authorized security testing.
 TARGET host: ${host}
 PROGRAM: ${program}
 CONTEXT: ${ctx}
+${meta_brief:+
+=== LEARNED PRIORS FROM THIS PIPELINE (aim your search; they are NOT evidence) ===
+${meta_brief}
+=== end priors ===
+}
 
 ALREADY-COLLECTED ENDPOINT SURFACE (from JS mining of this host):
 $(printf '%s\n' "$endpoints")
@@ -346,7 +535,7 @@ $(printf '%s' "$tested")"
   [[ -n "${HUNTER_DEBUG:-}" ]] && printf '%s\n' "$adj_out" > "$STATE_DIR/hunter_dbg_adj.json"
 
   # ---- MINT / PLAN / LEARN ----
-  local minted=0 leads=0
+  local minted=0 leads=0 withheld=0
   if [[ -n "$adj_out" ]]; then
     while IFS= read -r v; do
       [[ -z "$v" ]] && continue
@@ -425,14 +614,30 @@ $(printf '%s' "$tested")"
           local bstate btag
           bstate="$(printf '%s' "$tested" | jq -r --arg id "$id" '.[] | select(.hypothesis.id==$id) | .evidence_state // "unknown"' 2>/dev/null | head -1)"
           bnote="$(printf '%s' "$tested" | jq -r --arg id "$id" '.[] | select(.hypothesis.id==$id) | .evidence_note // ""' 2>/dev/null | head -1)"
+          # WITHHOLD PER-HYPOTHESIS, not just per-host (2026-08-22). Labelling a blocked lead
+          # was not enough: on the 2026-08-22 card 19 of 42 entries read "[UNVERIFIED — no
+          # response captured]" because the per-HOST withhold only fires when EVERY probe on a
+          # host is blocked — one landing probe let the other five onto the operator's card.
+          # An item whose probe never executed is a retry for the harness, not work for the
+          # human. It goes to the retry log, and the host is left unseen so it is hunted again
+          # once the block lapses. `not-probed` (authed by design) still belongs on the card:
+          # that one is genuinely the operator's 2-account job and it carries a plan.
+          if [[ "$bstate" != "probed" && "$bstate" != "not-probed" ]]; then
+            leads=$((leads-1)); withheld=$((withheld+1))
+            printf '%s\n' "$(jq -nc --arg h "$host" --arg vc "$vc" --arg url "$url" \
+                              --arg st "$bstate" --arg note "$bnote" --arg at "$(date -u +%FT%TZ)" \
+                              '{host:$h,vuln_class:$vc,url:$url,evidence_state:$st,why:$note,at:$at}')" \
+              >> "$STATE_DIR/hunter_retry.jsonl" 2>/dev/null || true
+            warn "  ⤺ withheld unverifiable lead ($vc, $bstate: $bnote) — queued for re-hunt, not carded"
+            continue
+          fi
           case "$bstate" in
             probed)     btag="[$sev]" ;;
             not-probed) btag="[$sev · authed — untested by design]" ;;
-            *)          btag="[UNVERIFIED — no response captured; model-claimed $sev]" ;;
           esac
           { [[ -s "$brief" ]] || printf '# Hunter worklist — %s\n\n' "$stamp" > "$brief"
             printf -- '- **%s %s** `%s` — %s\n  - %s\n' "$btag" "$vc" "$url" "$host" "$ev" >> "$brief"
-            [[ "$bstate" == "probed" ]] || printf -- '  - ⚠ evidence: %s (%s) — treat as a lead to TEST, not a finding\n' "$bstate" "$bnote" >> "$brief"
+            [[ "$bstate" == "probed" ]] || printf -- '  - ⚠ authed/unsafe by design — never probed; this is a plan to TEST, not a finding\n' >> "$brief"
             printf -- '  - OPERATOR: %s\n' "${plan:-$defplan}" >> "$brief"; } ;;
       esac
     done < <(printf '%s' "$adj_out" | jq -c '.verdicts[]' 2>/dev/null)
@@ -440,14 +645,45 @@ $(printf '%s' "$tested")"
     warn "  adjudication returned nothing for $host"
   fi
 
-  printf '%s\n' "$host" >> "$SEEN"; tail -n 5000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
+  # A host that produced withheld (never-executed) hypotheses is NOT finished: leave it out of
+  # SEEN so the ranked queue serves it again once the block lapses and it can be probed for real.
+  # Marking it seen is precisely how an unprobed host silently became "covered".
+  if [[ "${withheld:-0}" -gt 0 && "$minted" -eq 0 ]]; then
+    warn "  $host — $withheld unverifiable lead(s) withheld; leaving host unseen for a re-hunt"
+  else
+    printf '%s\n' "$host" >> "$SEEN"; tail -n 5000 "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN" 2>/dev/null || true
+  fi
   log "  done $host — $minted confirmed, $leads operator-lead(s)$([ "$leads" -gt 0 ] && echo " → $brief")"
 }
 
 case "${1:-cycle}" in
   cycle|"")
-    h="$(pick_target)" || { log "no fresh in-scope+pays target with endpoints (window may be lapped)"; exit 0; }
-    hunt_host "$h" ;;
+    # Hunt N hosts per cycle instead of exactly one, and REPLENISH instead of giving up.
+    # Before: one host per invocation, and if the picker found nothing the lane logged
+    # "no fresh target" and exited — so once the queue was walked, the finding engine simply
+    # stopped, silently, until new endpoints happened to be mined. An empty batch is the
+    # trigger to look again, not a reason to stop (operator, 2026-08-22).
+    HUNTER_HOSTS_PER_CYCLE="${HUNTER_HOSTS_PER_CYCLE:-2}"
+    mapfile -t _targets < <(pick_targets "$HUNTER_HOSTS_PER_CYCLE")
+    if [[ "${#_targets[@]}" -eq 0 ]]; then
+      # Everything ranked has been hunted. Recycle the OLDEST half of the hunted window so the
+      # best-ranked hosts become eligible again — their endpoint surface has been re-mined since
+      # (jsintel runs hourly), so a re-hunt reasons over new material rather than repeating.
+      # Deliberately NOT "reach further down the ranking": re-hunting a high-value host with
+      # fresh data beats hunting a low-value one, and it cannot pull in noise.
+      local_n="$(wc -l < "$SEEN" 2>/dev/null | tr -d ' ')"; local_n="${local_n:-0}"
+      if [[ "$local_n" -gt 40 ]]; then
+        log "ranked queue exhausted ($local_n hunted) — recycling the oldest half and retrying"
+        tail -n "$(( local_n / 2 ))" "$SEEN" > "$SEEN.tmp" 2>/dev/null && mv "$SEEN.tmp" "$SEEN"
+        mapfile -t _targets < <(pick_targets "$HUNTER_HOSTS_PER_CYCLE")
+      fi
+    fi
+    if [[ "${#_targets[@]}" -eq 0 ]]; then
+      log "no huntable in-scope+pays target right now (all cooled, benched or out of scope)"
+      exit 0
+    fi
+    log "ranked queue -> hunting ${#_targets[@]}: ${_targets[*]}"
+    for h in "${_targets[@]}"; do hunt_host "$h"; done ;;
   host)
     [[ -n "${2:-}" ]] || { echo "usage: recon_ai_hunter.sh host <host>"; exit 1; }
     in_scope_pays "$2" || { warn "$2 is NOT in-scope+paying (authoritative) — refusing"; exit 1; }

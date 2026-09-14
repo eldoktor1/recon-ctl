@@ -130,6 +130,14 @@ RECORD_KEYS = re.compile(
     rb"(?i)\"(?:user_?id|customer_?id|account_?id|member_?id|email|username|"
     rb"first_?name|last_?name|phone|created_?at|last_?login)\"\s*:")
 
+# UUIDs and ISO-8601 timestamps contain digit runs split by '-'/':' that the free-floating
+# phone regex matches, so a public catalog of {id: <uuid>, createdAt: <iso>} objects gets
+# mis-scored as a phone-record set (real case: MoonPay /v3/currencies auto-minted as PII,
+# 2026-08-21). Neutralise both before phone matching ONLY — a genuine phone number never
+# lives inside a UUID or a timestamp, so real detection is unaffected.
+UUID_RX = re.compile(rb"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+ISO8601_RX = re.compile(rb"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?")
+
 # Documentation, schemas and examples that look like data but describe it instead.
 SCHEMA_ISH = re.compile(
     rb"(?i)(\"\$schema\"|\"swagger\"|\"openapi\"|\"definitions\"|\"properties\"\s*:\s*\{|"
@@ -152,8 +160,9 @@ def classify_data(blob: bytes, ctype: str = "", source: str = "") -> dict:
         return res
 
     hits: dict[str, int] = {}
+    phone_blob = ISO8601_RX.sub(b" ", UUID_RX.sub(b" ", blob))
     for name, rx in PII_PATTERNS:
-        n = len(rx.findall(blob))
+        n = len(rx.findall(phone_blob if name == "phone" else blob))
         if n:
             hits[name] = n
 

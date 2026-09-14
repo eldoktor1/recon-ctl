@@ -20,9 +20,15 @@ ES_URL="${ES_URL:-http://127.0.0.1:9200}"; INDEX_NAME="${INDEX_NAME:-recon_alive
 V3_DB="${V3_DB:-$BASE_DIR/v3/findings.db}"
 WORKLIST="${IDOR_WORKLIST:-$BASE_DIR/idor_worklist.jsonl}"
 BRIEF_FILTER="${BRIEF_FILTER:-$REPO_DIR/tools/brief_filter.py}"
+BRIEF_SURFACED="${BRIEF_SURFACED:-$REPO_DIR/tools/brief_surfaced.py}"
 BRIEF_DIR="${BRIEF_DIR:-$BASE_DIR/briefings}"
 BRIEFING_HOUR="${BRIEFING_HOUR:-18}"     # local hour to deliver (default 6pm)
 FORCE="${BRIEFING_FORCE:-0}"
+# A lead shown this many nights without being worked stops being printed and collapses into a
+# counted "parked" line. Measured 2026-09-13: the card was 7 hosts, all 7 repeats of the night
+# before, zero new — a card that cannot say "you have seen this five times" trains you to skip it.
+PARK_AFTER="${PARK_AFTER:-5}"
+NEW_N=0; REPEAT_N=0; PARKED_N=0
 
 mkdir -p "$STATE_DIR" "$BRIEF_DIR"
 exec 9>"$STATE_DIR/briefing.lock"; flock -n 9 || exit 0
@@ -77,6 +83,21 @@ render_gate() {   # arg1: JSON array -> stdout filtered JSON array; bumps GATE_S
     after="$(printf '%s' "$gated" | jq 'length' 2>/dev/null || echo 0)"
     [[ "$((before - after))" -gt 0 ]] && GATE_SUPP=$(( GATE_SUPP + before - after ))
     arr="$gated"
+  fi
+  # ---- (3) surfaced ledger: label NEW vs REPEAT, park anything shown PARK_AFTER nights ----
+  # A to-test lead stays to-test until a human works it, so without this it re-renders every
+  # night for the whole 30-day freshness window. Parked leads are NOT deleted: they stay in the
+  # ledger and the backlog file. Fails OPEN (tools/brief_surfaced.py hands input back on error).
+  if [[ -f "$BRIEF_SURFACED" ]]; then
+    local sf; sf="$(printf '%s' "$arr" | PARK_AFTER="$PARK_AFTER" \
+      SURFACED_LEDGER="$STATE_DIR/briefing_surfaced.jsonl" \
+      python3 "$BRIEF_SURFACED" --annotate 2>/dev/null || echo '')"
+    if [[ -n "$sf" ]] && printf '%s' "$sf" | jq -e '.keep' >/dev/null 2>&1; then
+      NEW_N=$(( NEW_N + $(printf '%s' "$sf" | jq -r '.new_count // 0') ))
+      REPEAT_N=$(( REPEAT_N + $(printf '%s' "$sf" | jq -r '.repeat_count // 0') ))
+      PARKED_N=$(( PARKED_N + $(printf '%s' "$sf" | jq -r '.parked_count // 0') ))
+      arr="$(printf '%s' "$sf" | jq -c '.keep')"
+    fi
   fi
   printf '%s' "$arr"
 }
@@ -277,7 +298,7 @@ fi
 # day-mode banner (emphasis only — see docs/OPERATING.md; matches the 2IC routine modes)
 case "$(date '+%u')" in
   1|2|3) mode_banner=" · UNAUTH night (lead: SUBMIT + DIG)" ;;
-  4|6)   mode_banner=" · AUTHED night (ENGIE DCP / TOTO — your 2 accounts)" ;;
+  4|6)   mode_banner=" · UNAUTH night (lead: SUBMIT + DIG)" ;;   # authed nights retired 2026-09-13
   5)     mode_banner=" · CLEANUP night" ;;
   7)     mode_banner=" · light" ;;
   *)     mode_banner="" ;;
@@ -286,6 +307,32 @@ esac
 md="$BRIEF_DIR/tonight_$today.md"
 {
   printf '# 🌙 TONIGHT — %s%s\n\n' "$today" "$mode_banner"
+
+  # --- 📡 PIPELINE STATE, first thing on the card. An empty or repetitive card has to read as
+  #     "the scanners are off", not as "there is nothing out there". The failure this fixes:
+  #     vpn_down stayed set for days after a manual hunt while the card kept re-printing the
+  #     same backlog, which LOOKS like a working routine and is not. ---
+  printf '## 📡 Pipeline state\n'
+  if [[ -e "$STATE_DIR/vpn_down" ]]; then
+    printf -- '- ⛔ **SCANNERS PAUSED** — `state/vpn_down` is set, so every target-traffic lane is fail-closed. Nothing below is new surface. Bring Mullvad up, then clear it.\n'
+  else
+    printf -- '- ✅ scanners armed (no `vpn_down`)\n'
+  fi
+  _fresh_n="$(wc -l < "$STATE_DIR/true_fresh.jsonl" 2>/dev/null | tr -d ' ' || echo 0)"
+  if [[ -n "$(find "$STATE_DIR/alive_hosts.txt" -mmin +1440 2>/dev/null)" ]]; then
+    _alive_state='STALE (>24h — nothing probed since)'
+  elif [[ -s "$STATE_DIR/alive_hosts.txt" ]]; then
+    _alive_state='fresh (<24h)'
+  else
+    _alive_state='missing'
+  fi
+  printf -- '- surface: %s fresh CT host(s) queued · alive_hosts %s\n' "${_fresh_n:-0}" "$_alive_state"
+  printf -- '- tonight: **%s new** · %s repeat · %s parked (shown %s+ nights — `state/briefing_surfaced.jsonl`)\n' \
+    "$NEW_N" "$REPEAT_N" "$PARKED_N" "$PARK_AFTER"
+  if [[ "$NEW_N" -eq 0 ]]; then
+    printf -- '- ⚠️ **nothing new since the last card.** Do not grind the repeats: either the scanners are paused, or the funnel needs fresh surface (`recon-mood fresh`, `recon-uncover`, `recon-permute`).\n'
+  fi
+  printf '\n'
 
   # --- 🎯 HUNT THESE: the Under-Hunted Target Board — the selection layer at the mouth of the
   #     funnel. Point your DEPTH at fresh, low-saturation, authed-app programs (be unique, not
@@ -321,8 +368,13 @@ md="$BRIEF_DIR/tonight_$today.md"
 
   # --- 🔮 GraphQL worklist (introspection-on; sensitive ops + IDOR/injectable args — human 2-acct test) ---
   if [[ "${ngql:-0}" -gt 0 ]]; then
-    printf '\n\n## 🔮 GraphQL (schema exposed — human 2-account / injection test) — %s\n' "$ngql"
-    printf '%s' "$gql" | jq -r '.[] | "- **`\(.host)`** `\(.endpoint)` — \(if .recovery=="field-suggestion" then "RECOVERED (introspection off)" else "introspection ON" end) · \(.n_sensitive) sensitive op(s) [\(.program // "?")]\n" + ([.candidates[]? | select(.sensitive or (.idor_args|length>0) or (.injectable_args|length>0)) | "  - [\(.score)] \(.op_type) **\(.name)** — \(.reason)"] | .[0:5] | join("\n"))' 2>/dev/null
+    # DEMOTED with the authed lane (operator, 2026-09-13). What this lane can print without
+    # accounts is "introspection is on", which doctrine already calls the #1 GraphQL duplicate,
+    # plus IDOR/injectable ARGS that need two owned accounts to prove. That is program-walk work.
+    # Kept as a counted pointer so the schema harvest is not lost, just not the nightly headline.
+    printf '\n\n## 🔮 GraphQL — %s host(s) with a harvested schema, not tonight\n' "$ngql"
+    printf -- '- Schema exposure alone is a duplicate; the payable part (sensitive unauth op, IDOR args, injection) needs a program walk: `/program <key>`\n'
+    printf -- '- Full ranked list: `briefings/graphql_candidates_%s.md`\n' "$today"
   fi
 
   # --- ☁️ Web-cache deception/poisoning LEADs (detect-only; impact = owned account) ---
@@ -340,19 +392,15 @@ md="$BRIEF_DIR/tonight_$today.md"
     printf '_Confirm:_ `recon-params confirm xss <host>` _(dalfox, executes — reflection≠XSS)_ · `recon-params confirm sqli <host>` _(SAFE `'"'"'`vs`'"'"''"'"'` diff)._\n'
   fi
 
-  # --- 🔑 AUTHED lane: BAC/IDOR (your 2 accounts; led on AUTHED nights) ---
+  # --- 🔑 AUTHED / BAC-IDOR: DEMOTED OFF THE NIGHTLY CARD (operator, 2026-09-13).
+  #     "I don't want to focus on idors or authed stuff, I will do authed and idor stuff when I
+  #     work individual programs." Those tests need two owned accounts and a program committed to
+  #     for hours, which is the /program walk, not a weeknight card. The worklist is still built
+  #     and still ranked — it is one pointer line here instead of the longest section on the card.
   if [[ "${nidor:-0}" -gt 0 ]]; then
-    printf '\n\n## 🔑 Authed lane — BAC/IDOR (your two accounts) — %s\n' "$nidor"
-    printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
-      def loc: if ((.endpoint//"")|startswith("http")) then .endpoint elif ((.endpoint//"")|startswith("/")) then (.host+.endpoint) elif ((.endpoint//"")=="") then .host else (.host+" · "+.endpoint) end;
-      def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
-      def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
-      .[] |
-      "\n### " + mark + "[\(.impact|ascii_upcase) · conf \(.confidence)] \(.vuln_type) — `\(.host)`"
-      + (if (.route_count // 1) > 1
-           then "\n- **routes to test (\(.route_count)):** " + ((.routes // []) | map("`"+.+"`") | join(", "))
-           else "\n- **endpoint:** `\(loc)`" end)
-      + "\n- **why:** \(.why)\n- **test:** \(.test)\n- program: \(.program // "?")"' 2>/dev/null
+    printf '\n\n## 🔑 Authed / BAC-IDOR — %s lead(s), not tonight\n' "$nidor"
+    printf -- '- These need your two owned accounts, so they belong to a program walk: `/program <key>`\n'
+    printf -- '- Full ranked list: `briefings/idor_candidates_%s.md`\n' "$today"
   fi
 
   # --- 🟡 If time (medium dup-risk) ---
@@ -379,43 +427,15 @@ md="$BRIEF_DIR/tonight_$today.md"
   fi
 
   printf '\n\n_Deep-check any lead before you spend time on it:_ `recon-verify <host>` _(Claude + safe probes)._\n'
-  printf '_SUBMIT = a confirm primitive fired. DIG = work it tonight. Authed/IDOR uses your own two accounts. Submission is always your call._\n'
+  printf '_SUBMIT = a confirm primitive fired. DIG = unauth work you can finish tonight, no accounts needed. Authed/IDOR/GraphQL-arg testing is program-walk work (`/program <key>`), deliberately not on this card. Submission is always your call._\n'
 } > "$md" 2>/dev/null
 
 log "🌙 briefing compiled · 🎯 $nidor host-lead(s) ($nshow pre-collapse) · 🟡 $nheld hold · 🔕 $nsupp dup + $GATE_SUPP render-gated · ✅ $nsub to-submit · 🔍 $nneed needs-human · 🧪 $nvln vuln-leads → $md"
 
-# --- deliver to Discord (#digest — the single nightly card) ---
-# NOTIFICATION POLICY (2026-07-23): the nightly card is UI-FIRST — it lives in the
-# recon-ui "Tonight" worklist (parsed from the durable .md written above). Discord
-# is reserved for immediate-attention signals only, so #digest is off the allowlist
-# by default and this resolves empty (the block is skipped). No fallback to #review —
-# the big card must NEVER leak into the live-confirmed channel. Re-enable the ping
-# with RECON_DISCORD_ALLOW="review takeovers ops digest".
-rh="$(discord_hook digest 2>/dev/null || true)"
-if [[ -n "$rh" ]]; then
-  card="$(printf '🌙 **TONIGHT — %s%s**\n\n✅ **Ready to submit (%s):**\n' "$today" "$mode_banner" "$nsub")"
-  card+="$(printf '%s' "$subs" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 350)"
-  [[ "${nnday:-0}" -gt 0 ]] && { card+="$(printf '\n\n⚡ **n-day CVE candidates (%s):**\n' "$nnday")"; card+="$(printf '%s' "$show_nday" | jq -r '.[] | "• **\(.impact)** `\(.host)` — \(.cve // .endpoint) (c\(.confidence))"' 2>/dev/null | head -c 400)"; }
-  [[ "${nvln:-0}" -gt 0 ]] && { card+="$(printf '\n\n🧪 **Vuln leads (verify before trusting) (%s):**\n' "$nvln")"; card+="$(printf '%s' "$vleads" | jq -r '.[] | (if ._noise_action=="downgrade" then "LEAD·ver-unconf " else "" end) as $t | "• \($t)\(.cls) `\(.host)` — \(.check)"' 2>/dev/null | head -c 500)"; }
-  [[ "${nbkt:-0}" -gt 0 ]] && { card+="$(printf '\n\n☁️ **Cloud-bucket leads (verify content / not by-design) (%s):**\n' "$nbkt")"; card+="$(printf '%s' "$bkts" | jq -r '.[] | "• [\(.severity)] \(.kind) `\(.bucket)` (\(.provider)) ← \(.host // .source_host)"' 2>/dev/null | head -c 500)"; }
-  [[ "${ngql:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔮 **GraphQL (introspection ON — 2-acct/injection test) (%s):**\n' "$ngql")"; card+="$(printf '%s' "$gql" | jq -r '.[] | "• `\(.host)` — \(.n_sensitive) sensitive op(s)"' 2>/dev/null | head -c 500)"; }
-  [[ "${nwcd:-0}" -gt 0 ]] && { card+="$(printf '\n\n☁️ **Web-cache deception/poison LEADs (%s):**\n' "$nwcd")"; card+="$(printf '%s' "$wcd" | jq -r '.[] | "• [\(.severity)] \(.kind) `\(.host)`"' 2>/dev/null | head -c 400)"; }
-  if [[ -n "$XSS_CAND_LINE$SQLI_CAND_LINE" ]]; then
-    card+="$(printf '\n\n💉 **XSS/SQLi (unauth — confirm to promote):**')"
-    [[ -n "$XSS_CAND_LINE" ]]  && card+="$(printf '\n• %s'  "${XSS_CAND_LINE#\[xss\] }")"
-    [[ -n "$SQLI_CAND_LINE" ]] && card+="$(printf '\n• %s' "${SQLI_CAND_LINE#\[sqli\] }")"
-    card+="$(printf '\n_see xss/sqli_candidates_%s.md · confirm: recon-params confirm xss|sqli <host>_' "$today")"
-  fi
-  if [[ "${nidor:-0}" -gt 0 ]]; then
-    card+="$(printf '\n\n🔑 **Authed — BAC/IDOR (your 2 accounts) (%s):**\n' "$nidor")"
-    card+="$(printf '%s' "$show_idor" | jq -r --argjson noted "$NOTED" '
-      def rd: (.host|split(".")| if length>=2 then (.[-2]+"."+.[-1]) else .host end);
-      def mark: . as $o | (if (($noted|index($o.host)) or ($noted|index($o|rd))) then "📝 " else "" end);
-      .[] | "• " + mark + "**\(.impact)** \(.vuln_type) `\(.host)`" + (if (.route_count // 1) > 1 then " (\(.route_count) routes)" else "" end) + " (c\(.confidence))\n   test: \(.test)"' 2>/dev/null | head -c 1000)"
-  fi
-  [[ "${nneed:-0}" -gt 0 ]] && { card+="$(printf '\n\n🔍 **Needs a human eye (%s):**\n' "$nneed")"; card+="$(printf '%s' "$needh" | jq -r '.[] | "• \(.vuln_class) `\(.host)` (c\(.cf))"' 2>/dev/null | head -c 300)"; }
-  [[ "$(( ${nsupp:-0} + GATE_SUPP ))" -gt 0 ]] && card+="$(printf '\n\n🔕 _%s lead(s) suppressed (%s noise-class/dup, %s adjudicated-FP at render)_' "$(( ${nsupp:-0} + GATE_SUPP ))" "${nsupp:-0}" "$GATE_SUPP")"
-  discord_post "$rh" "$(jq -nc --arg c "${card:0:1950}" '{content:$c}')" >/dev/null 2>&1 \
-    && log "🌙 briefing posted to #digest" || log "discord post failed (card saved to $md)"
-fi
+# --- Discord card: REMOVED 2026-09-13 --------------------------------------------------
+# The operator deleted the #digest channel ("digest is now just a noise factory") after 421
+# rounds of cards produced zero confirmed findings. The nightly card is UI-ONLY now: it lives
+# in the durable .md above, which the recon-ui worklist parses. Discord carries three channels
+# and all three are action-only: #review (a confirmed find), #takeovers (a claimable takeover),
+# #ops (egress/burn/halt). A ranked list of maybes is not a notification, it is a file.
 touch "$sent"

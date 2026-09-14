@@ -183,10 +183,16 @@ run_scanner() {
   # exit IPs = anti-ban throughput. Localhost/ES excluded so ingest stays direct.
   # Fail-closed (gluetun FIREWALL=on) and the containers sit behind the host Mullvad,
   # so the worst case is a Mullvad IP, never the real ISP. Flag off => behaviour unchanged.
-  # SMART-SCOPED: only the CONFIRM + UNIQUE lanes get the proxy pool (MT_LANES) — the commodity
-  # validate/portscan bulk drain stays on the single host exit, so the scarce IPs buy findings
-  # (confirm throughput on dup-proof leads), not raw fps over commodity hosts.
-  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql}"
+  # SMART-SCOPED: only the CONFIRM + UNIQUE + IMPACT-CHAIN lanes get the proxy pool (MT_LANES) —
+  # the commodity validate/portscan bulk drain stays on the single host exit, so the scarce IPs
+  # buy findings (confirm throughput on dup-proof leads), not raw fps over commodity hosts.
+  # 2026-08-22: the IMPACT CHAINS were added. They were excluded when the pool was scoped to the
+  # param/XSS lanes, which left every chain that actually recovers credentials — actuator/env,
+  # bucket loot, port-proto, leak-chain, freshchain, gql-chain, cognito, n-day — sharing ONE exit
+  # and ONE rate budget with the ai-hunter's safe probes. That shared budget is what armed the
+  # host cooldowns behind the `blocked` hypotheses. These are precisely the lanes worth spending
+  # scarce IPs on under the CHAIN-TO-IMPACT law. safe_probe_worker.py rotates the same pool.
+  local _mtlanes="${MT_LANES:-recon_params|recon_param_confirm|recon_xss_confirm|recon_domxss_confirm|recon_dast|recon_ssrf_oob|recon_kr|recon_graphql|recon_actuator_chain|recon_port_proto|recon_leak_chain|recon_freshchain|recon_graphql_chain|recon_bucket_scanner|recon_cognito|recon_authdiff|recon_nday|recon_ndayrace|recon_wcd|recon_jsintel|recon_autoswagger|recon_panel_chain}"
   if [[ "${MULTITUNNEL:-0}" == "1" && "${2##*/}" =~ ^(${_mtlanes}) ]]; then
     local _mtlist="${MT_PROXY_LIST:-$STATE_DIR/egress_proxies.txt}"
     local _mtrr="${MT_RR_FILE:-$STATE_DIR/egress_rr.idx}"
@@ -736,6 +742,16 @@ FEED_INTERVAL="${FEED_INTERVAL:-21600}"          # 6h — cheap, keeps every lan
 run_feed() { v21_killed feed && return 0; [[ -f "$FEED_SCRIPT" ]] && \
   python3 "$FEED_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
 
+# recon_meta — compiles what the pipeline has LEARNED (outcome ledger + recent research digests
+# + FP patterns + the KB index) into state/current_meta.md, which the ai-hunter injects into every
+# hypothesis prompt. Before this, research output landed in docs/ and NOTHING read it at runtime:
+# the hunt could not know what was discovered yesterday or which classes have never once produced
+# a real verdict. Pure local file/DB reads — no network at all → d0k. Killswitch: v2_meta.
+META_SCRIPT="${META_SCRIPT:-$(script_path recon_meta.py)}"
+META_INTERVAL="${META_INTERVAL:-21600}"          # 6h — cheap; research/outcomes move slowly
+run_meta() { v21_killed meta && return 0; [[ -f "$META_SCRIPT" ]] && \
+  python3 "$META_SCRIPT" >>"$LOG_FILE" 2>&1 || true; }
+
 # recon_actuator_chain — exposed actuator → /env + /configprops + streamed /heapdump →
 # ACTUALLY recovered credentials. Read-only endpoints only (never /shutdown, /restart,
 # /jolokia). Target-facing → run_scanner. Killswitch: v2_actchain.
@@ -752,9 +768,17 @@ run_actchain() { v21_killed actchain && return 0
 PORTPROTO_SCRIPT="${PORTPROTO_SCRIPT:-$(script_path recon_port_proto.py)}"
 PORTPROTO_INTERVAL="${PORTPROTO_INTERVAL:-21600}"  # 6h
 run_portproto() { v21_killed portproto && return 0
-  local f="$STATE_DIR/feed_ports.txt"
-  [[ -f "$PORTPROTO_SCRIPT" && -s "$f" ]] || return 0
-  run_scanner python3 "$PORTPROTO_SCRIPT" $(head -60 "$f" | tr '\n' ' ') || true; }
+  local f="$STATE_DIR/feed_ports.txt" q="$STATE_DIR/portproto_queue.txt" list
+  [[ -f "$PORTPROTO_SCRIPT" ]] || return 0
+  # Two sources now. The ES feed is the standing estate sweep; the QUEUE is what portscan just
+  # found — since 2026-08-22 portscan no longer mints `critical-port` itself (102 minted, 0 real)
+  # and instead hands the host straight here, so a newly-opened port gets its protocol spoken
+  # within one cycle instead of waiting for the next 6h feed rebuild. Queue drains as it is read.
+  list="$( { [[ -s "$q" ]] && cat "$q"; [[ -s "$f" ]] && cat "$f"; } 2>/dev/null \
+           | awk 'NF && !s[$0]++' | head -60 | tr '\n' ' ')"
+  [[ -n "${list// /}" ]] || return 0
+  : > "$q" 2>/dev/null || true
+  run_scanner python3 "$PORTPROTO_SCRIPT" $list || true; }
 
 # recon_graphql_chain — introspection → a sensitive query with NO required args → EXECUTE ONE
 # read-only query. "Introspection enabled" alone is the #1 GraphQL duplicate; the finding is
@@ -891,6 +915,25 @@ run_research_detect()  { v21_killed research && return 0; [[ -f "$RESEARCH_SCRIP
 
 TARGETS_INTERVAL="${TARGETS_INTERVAL:-86400}"        # daily
 run_targets() { v21_killed targets && return 0; [[ -f "$TARGETS_SCRIPT" ]] && bash "$TARGETS_SCRIPT" score >>"$LOG_FILE" 2>&1 || true; }
+# recon_program_map — standing PROGRAM-MAP routine for the COMMITTED program (the workspace marked
+# current). Automates the two techniques that produced the most material during the walk: response-
+# signature clustering (collapses an estate into commodity classes + a short distinct worklist) and
+# bundle mining (recovers API surface, GraphQL operations and identity wiring from the app's own JS).
+# TRANSITION-GATED: first sighting is a silent baseline, thereafter only NEW hosts, MOVED signatures
+# and newly-mined surface are reported — and a quiet cycle records nothing at all. Every delta is
+# written into the workspace as a note, so it reaches the walk artifact rather than dying in a file.
+# Programs whose policy bans automated scanning (booking.com) are NO_PROBE in program_map.py: zero
+# requests to the application, index reads plus public CDN assets only. Not target-app traffic → d0k;
+# the script re-checks vpn_down fail-closed. Killswitch: state/kill/v2_progmap.
+PROGMAP_SCRIPT="${PROGMAP_SCRIPT:-$(script_path recon_program_map.sh)}"
+PROGMAP_INTERVAL="${PROGMAP_INTERVAL:-21600}"   # 6h — 8 hosts mined per cycle slides through the pool
+run_progmap() { v21_killed progmap && return 0; [[ -f "$PROGMAP_SCRIPT" ]] && bash "$PROGMAP_SCRIPT" map >>"$LOG_FILE" 2>&1 || true; }
+# ...and the DISCOVERY half, so the estate list grows instead of ageing: passive subdomain sources
+# scoped to the committed program's own roots → public-resolver check → NEW hosts to the validator
+# queue (capped per cycle with a sliding window, so a 12k-name passive pass cannot flood the prober).
+# Passive sources + public resolvers = NOT target traffic. Same killswitch: state/kill/v2_progmap.
+PROGMAP_ENUM_INTERVAL="${PROGMAP_ENUM_INTERVAL:-43200}"   # 12h — CT/passive sources move slowly
+run_progmap_enum() { v21_killed progmap && return 0; [[ -f "$PROGMAP_SCRIPT" ]] && bash "$PROGMAP_SCRIPT" enum >>"$LOG_FILE" 2>&1 || true; }
 # recon_dangling_dns — dangling-NS subdomain takeover (audit #10b; the 2025 Hazy-Hawk class the
 # CNAME-only takeover hunter misses). DNS-only (queries public resolvers about the zone, never the
 # target) -> runs as d0k, not run_scanner. Killswitch: state/kill/v2_dangling_dns.
@@ -1090,31 +1133,14 @@ run_hot_seed()        { bash "$HOT_SEED";                                   }
 run_scope_watch()     { run_scanner bash "$SCOPE_WATCH";                    }
 VALIDATE_FAST_SLEEP="${VALIDATE_FAST_SLEEP:-120}"
 
-# Takeover watch is long-running; supervise differently
-# v2.2: throttled — only log launches when state actually changes (avoid spam
-# on benign lock-contention loops). Subsequent attempts are quiet until either
-# the script stays up >60s (=actually running) or fails for a new reason.
-TAKEOVER_LAST_STATE="${TAKEOVER_LAST_STATE:-unknown}"
-run_takeover_watch() {
-  local started=0 finished=0 dur state
-  started="$(date +%s)"
-  if run_scanner bash "$TAKEOVER" watch >/dev/null 2>&1; then
-    finished="$(date +%s)"; dur=$(( finished - started ))
-    if [[ "$dur" -ge 60 ]]; then
-      state="ran-${dur}s"
-    else
-      state="lock-contention"
-    fi
-  else
-    finished="$(date +%s)"; dur=$(( finished - started ))
-    state="failed-${dur}s"
-  fi
-  if [[ "$state" != "$TAKEOVER_LAST_STATE" ]]; then
-    log "[takeover-watch] state=$state"
-    TAKEOVER_LAST_STATE="$state"
-  fi
-  return 0
-}
+# NOTE (2026-09-13): the long-running `takeover_hunter` watcher was REMOVED, not fixed.
+# It called `bash "$TAKEOVER" watch`, and all three parts of that were wrong: $TAKEOVER was
+# never defined (the variable is TAKEOVER_SCRIPT), the only takeover script is Python, and it
+# has no `watch` subcommand — it takes hosts positionally. So under `set -u` it threw
+# "TAKEOVER: unbound variable" on every 5-minute retry and the lane never ran at all.
+# The real takeover lane is alive and correct above: supervise_loop "takeover" ->
+# run_takeover -> python3 recon_takeover.py on feed_hosts, every 8h, claimability-verified.
+# Debloat doctrine: retire the dead path rather than leave a loop that only logs errors.
 
 BOT_SCRIPT="${BOT_SCRIPT:-$(script_path recon_discord_bot.sh)}"
 run_discord_bot() {
@@ -1175,6 +1201,7 @@ run_discord_bot() {
   # --- the reworked unauth pipeline -----------------------------------------
   supervise_loop "targetsel"      "TARGETSEL_INTERVAL"     run_targetsel      &
   supervise_loop "feed"           "FEED_INTERVAL"          run_feed           &
+  supervise_loop "meta"           "META_INTERVAL"          run_meta           &
   supervise_loop "enumtargets"    "ENUMTARGETS_INTERVAL"   run_enumtargets    &
   # off-target: no traffic to the target, so these run hot
   supervise_loop "depconf"        "DEPCONF_INTERVAL"       run_depconf        &
@@ -1196,6 +1223,8 @@ run_discord_bot() {
   supervise_loop "research-tooling" "RESEARCH_TOOLING_INTERVAL" run_research_tooling &
   supervise_loop "research-kb"      "RESEARCH_KB_INTERVAL"      run_research_kb      &
   supervise_loop "research-detect"  "RESEARCH_DETECT_INTERVAL"  run_research_detect  &
+  supervise_loop "progmap"        "PROGMAP_INTERVAL"       run_progmap        &
+  supervise_loop "progmap-enum"   "PROGMAP_ENUM_INTERVAL"  run_progmap_enum   &
   supervise_loop "permute"        "PERMUTE_INTERVAL"       run_permute        &
   supervise_loop "uncover"        "UNCOVER_INTERVAL"       run_uncover        &
   supervise_loop "ssrf-oob"       "SSRF_OOB_INTERVAL"      run_ssrf_oob       &
@@ -1212,15 +1241,8 @@ run_discord_bot() {
   supervise_loop "nuclei-update"  "NUCLEI_UPDATE_INTERVAL" run_nuclei_update  &
 
     # Long-running — supervised with simple restart loops
-  (
-    # v2.2: 5-min retry interval (was 30s) — takeover_hunter holds its own
-    # lock so a stuck/duplicate instance doesn't need fast-restart, and the
-    # tighter cadence was burying real signal in the daemon log.
-    while [[ "$SHUTDOWN" -eq 0 ]]; do
-      run_takeover_watch || true
-      sleep 300
-    done
-  ) &
+  # (the takeover_hunter restart loop lived here and was removed 2026-09-13 — see the note by
+  #  BOT_SCRIPT. The takeover lane runs on its own supervise_loop like every other lane.)
   (
     while [[ "$SHUTDOWN" -eq 0 ]]; do
       # Bot egresses to Discord — also pause it while VPN is down.

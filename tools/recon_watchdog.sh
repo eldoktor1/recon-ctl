@@ -283,4 +283,25 @@ else
   log "recon-audit OK (selfaudit_latest.json ${sa_age_h}h old)"
 fi
 
+# ── 7. Multitunnel pool health ─────────────────────────────────────────────
+# The round-robin in run_scanner used to hand out DEAD gluetun proxies indefinitely —
+# on 2026-08-22 one tunnel sat unhealthy for 4h and silently ate 1-in-3 scans while this
+# watchdog logged nothing but "multitunnel: ON". recon_multitunnel.sh probes each exit for
+# real (Mullvad IP returned, not "container is up"). `autoheal` goes further: a dead exit is
+# restarted, then if still dead SWAPPED to a random working config from the operator's all-exits
+# folder, and the pool is topped back up to target — then the live pool is rewritten to the
+# verified-healthy subset (fail-safe: zero healthy => live list untouched + its own cooled-down
+# #ops alert). Only runs when the pool is in use, and never while VPN is down (every probe
+# would fail for the wrong reason).
+MTUN="/home/d0k/recon-ctl/scripts/recon_multitunnel.sh"
+if [[ -f "$STATE_DIR/multitunnel_on" && -x "$MTUN" && ! -f "$STATE_DIR/vpn_down" ]]; then
+  if bash "$MTUN" autoheal --quiet >>"$WDOG_LOG" 2>&1; then
+    log "multitunnel pool OK ($(wc -l < "$STATE_DIR/egress_proxies.txt" 2>/dev/null | tr -d ' ') exit(s) live)"
+  else
+    log "multitunnel pool DEGRADED — see MTUN lines above (#ops alerted by the checker)"
+  fi
+elif [[ -f "$STATE_DIR/multitunnel_on" ]]; then
+  log "multitunnel: ON, health check skipped (vpn_down or checker missing)"
+fi
+
 log "=== watchdog done ==="

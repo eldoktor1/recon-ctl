@@ -80,6 +80,22 @@ def killed_host_classes() -> dict[str, set[str]]:
         return {}
 
 
+def lead_classes(text: str) -> set[str]:
+    """Vuln classes named in a LEAD's text (same taxonomy note_verdict applies to notes).
+
+    Lets a CLASS-SCOPED FP note suppress only the matching lead — the briefing worklist
+    previously honoured host-wide kills only, so every class-scoped dismiss (including the
+    UI's own "Mark FP" button, which writes a class-scoped note) left its row on screen.
+    """
+    nv = _note_verdict()
+    if not nv:
+        return set()
+    try:
+        return set(nv.note_classes(text or ""))
+    except Exception:
+        return set()
+
+
 def benched_host_set() -> set[str]:
     """Hosts currently benched (active 7-day ignore) — hide until the TTL lapses."""
     return {(r.get("host") or "").lower() for r in active_ignores() if r.get("host")}
@@ -368,6 +384,27 @@ def _make_item(block: list[str]) -> dict[str, Any] | None:
 
 _ORDERED_RE = re.compile(r"^\d+[.)]\s")
 
+# Section titles that mean "this needs a login or two owned accounts" — withheld from the UI
+# worklist (see parse_briefing). Deliberately matches the historical card wording too:
+#   "🔑 Authed lane — BAC/IDOR (your two accounts)"
+#   "🔮 GraphQL (schema exposed — human 2-account / injection test)"
+_AUTHED_SECTION_RE = re.compile(
+    r"authed|auth\s+lane|\bBAC\b|\bIDOR\b|\bBOLA\b|\bBFLA\b|two\s+accounts?|2-?\s?account",
+    re.IGNORECASE)
+
+# Same test applied to INDIVIDUAL leads, because authed items hide inside unauth sections. Real
+# examples off the operator's worklist (2026-09-13), all sitting in a "DIG" section:
+#   "business-s101.monzo.com [high · authed — untested by design] bfla-privilege-escalation"
+#   "netzwerkanlass-0926.event.sbb.ch [high · authed …] IDOR / BOLA — invitation-token enumeration"
+#   "www.blockchain.com [high · authed — untested by design] stored-xss"
+# "untested by design" is the tell: the producer knew it could not be machine-confirmed. These are
+# program-walk work, so they get suppressed into the collapsed group rather than deleted, which
+# keeps them one click away under "show" instead of gone.
+_AUTHED_ITEM_RE = re.compile(
+    r"authed|untested\s+by\s+design|\bIDOR\b|\bBOLA\b|\bBFLA\b|\bBAC\b"
+    r"|two\s+owned\s+accounts?|two\s+accounts?|2-?\s?account|privilege-escalation",
+    re.IGNORECASE)
+
 
 def _is_item_start(ls: str) -> bool:
     return ls.startswith("- ") or ls.startswith("* ") or bool(_ORDERED_RE.match(ls))
@@ -458,14 +495,33 @@ def parse_briefing(name: str) -> dict[str, Any] | None:
             if not implicit["title"]:
                 implicit["title"] = title or "worklist"
             sections.insert(0, implicit)
+
+        # --- AUTHED WORK IS NOT WORKLIST WORK (operator, 2026-09-13) -------------------------
+        # "I don't want to focus on idors or authed stuff, I will do authed and idor stuff when
+        # I work individual programs." Anything needing a login or two owned accounts cannot be
+        # finished in an evening off a card, so it is dropped from the UI worklist here as well
+        # as from the nightly card. This also cleans HISTORICAL briefings, which still carry the
+        # old "Authed lane — BAC/IDOR" and "2-account" sections. Not silent: the titles are
+        # returned in `hidden_sections` so the UI can say what it withheld and why.
+        hidden_sections = [s["title"] for s in sections if _AUTHED_SECTION_RE.search(s["title"] or "")]
+        sections = [s for s in sections if not _AUTHED_SECTION_RE.search(s["title"] or "")]
+
         killed, benched = killed_host_set(), benched_host_set()
+        killed_cls = killed_host_classes()
         for i, s in enumerate(sections):
             items = _segment_items(s.pop("_lines"))
             live = 0
             for it in items:
                 hs = [h.lower() for h in it["hosts"]]
-                if any(h in killed for h in hs):
+                icls = lead_classes(it.get("raw") or "")
+                if _AUTHED_ITEM_RE.search(it.get("raw") or ""):
+                    # checked FIRST: an authed lead is not the operator's work at all, so it never
+                    # reaches the live list no matter what else is true about the host
+                    it["suppressed"], it["suppress_reason"] = True, "authed (program-walk work)"
+                elif any(h in killed for h in hs):
                     it["suppressed"], it["suppress_reason"] = True, "not-actionable"
+                elif icls and any(icls & killed_cls.get(h, set()) for h in hs):
+                    it["suppressed"], it["suppress_reason"] = True, "class-fp"
                 elif any(h in benched for h in hs):
                     it["suppressed"], it["suppress_reason"] = True, "benched"
                 else:
@@ -478,6 +534,9 @@ def parse_briefing(name: str) -> dict[str, Any] | None:
         return {
             "name": meta["name"], "kind": meta.get("kind"), "date": meta.get("date"),
             "mtime": meta.get("mtime"), "title": title, "sections": sections,
+            "hidden_sections": hidden_sections,
+            "hidden_reason": ("needs a login or two owned accounts — do it in a program walk "
+                              "(/program <key>)") if hidden_sections else None,
         }
     except Exception as e:
         return {
