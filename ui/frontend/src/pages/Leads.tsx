@@ -28,6 +28,16 @@ const SOURCE_ORDER = [
   "sqli_candidates", "graphql_candidates", "fresh", "targets",
 ];
 
+// Sources that are RAW INPUT, not leads. They stay selectable by their own chip, but they are
+// excluded from the default "all sources" board (operator 2026-09-13: "all of these hosts are
+// trash", "it looks so messy" — the board was bingo.com/jobsdb/indeed/soundcloud/jwt.io, i.e.
+// unconfirmed param-catalog rows on saturated programs, which is the duplicate trap by doctrine).
+//   *_candidates* = a param or schema GUESS, nothing confirmed, needs a confirm run first
+//   targets*      = program selection, not a host lead
+//   progmap/mobmap= estate maps for one committed program
+// ACTIONABLE means a primitive fired or a chain recovered impact. Keep the board that short.
+const RAW_INPUT_KIND = /_candidates|^targets|^progmap|^mobmap|^tonight_authed/i;
+
 // hosts that aren't real TARGETS — bug-bounty platform / infra domains that leak into the
 // worklist from program-header bullets (e.g. an engagement URL `https://bugcrowd.com/...`).
 const NON_TARGET_HOSTS = new Set([
@@ -46,6 +56,7 @@ interface ULead {
   summary: string;
   sources: string[];
   suppressed: boolean;
+  authed: boolean;   // needs a login or two owned accounts => program-walk work, never the worklist
   raws: { source: string; raw: string }[];
 }
 
@@ -137,6 +148,8 @@ export default function Leads() {
     const map = new Map<string, ULead>();
     for (const [kind, parsed] of Object.entries(parsedByKind)) {
       if (!parsed || (source !== "all" && kind !== source)) continue;
+      // on the default board, skip raw-input sources; pick their chip to see them deliberately
+      if (source === "all" && RAW_INPUT_KIND.test(kind)) continue;
       for (const sec of parsed.sections || []) {
         const cls = classFromSection(sec.title);
         for (const it of sec.items) {
@@ -144,12 +157,19 @@ export default function Leads() {
           const key = h ? h.toLowerCase() : `∅:${it.label}`;
           const summary = (it.label || it.raw.split("\n")[0] || "").replace(/[*_`]/g, "").trim();
           const ex = map.get(key);
+          // Authed-ness is a property of the LEAD, not of one source, so it must survive the
+          // merge. Without this, sbb.ch and blockchain.com stayed on the board: each appears in
+          // the authed `hunter` source AND in a candidates source, and "actionable in ANY source"
+          // un-hid them while still displaying the authed text. Worked-and-killed stays OR-ed
+          // (a kill in one source must not bury a live lead in another); authed is AND-proof.
+          const itAuthed = (it.suppress_reason || "").startsWith("authed");
           if (!ex) {
             map.set(key, {
               key, host: h, vulnClass: cls, severity: it.severity || null,
               score: h ? scoreByHost[h.toLowerCase()] ?? null : null,
               program: it.program || null, summary,
               sources: [kind.replace(/_candidates$/, "")], suppressed: !!it.suppressed,
+              authed: itAuthed,
               raws: [{ source: kind, raw: it.raw }],
             });
           } else {
@@ -158,6 +178,7 @@ export default function Leads() {
             if (!ex.vulnClass && cls) ex.vulnClass = cls;
             if (!ex.program && it.program) ex.program = it.program;
             ex.suppressed = ex.suppressed && !!it.suppressed; // shown if actionable in ANY source
+            ex.authed = ex.authed || itAuthed;                // authed anywhere = authed, period
             ex.raws.push({ source: kind, raw: it.raw });
           }
         }
@@ -168,7 +189,7 @@ export default function Leads() {
       // worklist = actionable TARGET rows only: must have a real host, and not a bug-bounty
       // platform/infra host (program-header + metadata-bullet leaks are hostless or platform hosts)
       .filter((l) => l.host && !NON_TARGET_HOSTS.has(l.host.toLowerCase()))
-      .filter((l) => showHidden || !l.suppressed)
+      .filter((l) => showHidden || (!l.suppressed && !l.authed))
       .filter((l) => !unseenOnly || !notedSet.has((l.host || "").toLowerCase()))
       .filter((l) => !f || (l.host || "").toLowerCase().includes(f) || l.summary.toLowerCase().includes(f) || (l.program || "").toLowerCase().includes(f) || l.sources.join(" ").includes(f))
       .sort((a, b) => (severityRank(b.severity) - severityRank(a.severity)) || ((b.score ?? 0) - (a.score ?? 0)));
