@@ -532,3 +532,86 @@ Clairvoyance suggestion-mining (all read-only, no mutations, safe):
 All three are still schema-DISCLOSURE, not exploitation — same LEAD tier as standard
 introspection-enabled; do not upgrade severity, just widens what we can enumerate before
 handing a human the ranked mutation/IDOR worklist.
+
+---
+
+## Error-oracle schema recovery beyond Clairvoyance (Chime, 2026-09)
+
+Clairvoyance is usually described as "harvest `Did you mean` suggestions". On a **graphql-ruby**
+target the error surface is far richer, and the whole unauthenticated schema can be reconstructed
+from it without a single introspection query. Each message type yields a different fact:
+
+| Error text | What it gives you |
+|---|---|
+| `Field 'x' doesn't exist on type 'T' (Did you mean \`y\`?)` | the parent TYPE NAME plus near-miss field names |
+| `Field must have selections (field 'f' returns TYPE but has no selections...)` | the exact RETURN TYPE of a field |
+| `Field 'f' is missing required arguments: input` | which args are mandatory |
+| `Argument 'a' on InputObject 'I' is required. Expected type T!` | full INPUT OBJECT shape, one required field per error, all at once |
+| `InputObject 'I' doesn't accept argument 'k'` | negative confirmation for optional-field discovery |
+| `Selections can't be made directly on unions (see selections on U)` | the UNION name behind a field |
+| `Fragment on T can't be spread inside U` | union MEMBERSHIP (T is not a member of U) |
+| `No such type X, so it can't be a fragment condition (Did you mean \`Y\`?)` | type-name near-misses |
+
+Method that worked: probe a root with a wordlist, read `returns TYPE` to walk down a level, then
+send `field(input: {})` to dump every required argument in ONE response, then send
+`field(input: {bogus: "x"})` to test candidate optional keys. Recursion over that recovered the
+complete unauthenticated surface.
+
+**Do not trust the error surface to be identical across environments.** On the same target QA
+returned the full suggestion set while production answered any unknown field with
+`undefined method 'dynamic_introspection' for nil` (and a bare HTTP 500 without a session cookie).
+So: enumerate on the permissive environment, verify behaviour on the one that pays.
+
+### Root-namespace gates, and what does NOT bypass them
+A gateway that requires every root selection to be a specific field (e.g. `unauthenticated`) and
+returns a bare 401 otherwise is a real control, not a speed bump. Vectors tried and ALL failed on a
+production-grade implementation: fragment spread on the query root, inline fragment on the query
+root, a two-operation document with `operationName` selecting either operation, JSON-array batching,
+`@skip(if: true)` on the extra root field, aliasing the permitted root alongside a second one, GET
+(405), `Content-Type: application/graphql`, and **APQ** in all three phases (hash-only, register,
+replay). Note the APQ result specifically: attaching `extensions.persistedQuery` made an otherwise
+**allowed** query start failing, i.e. the router refused persisted queries for anonymous callers
+rather than trusting a cache hit. Check it, but do not assume it is a hole.
+
+### graphql-ruby returns nil for unauthorized, not an error
+A null field inside an otherwise-successful response can mean "denied", not "absent". Do not read
+nulls as emptiness when testing authorization.
+
+## The unauthenticated-namespace mirror (Chime, 2026-09-16)
+
+A schema can expose the SAME object under an authenticated root and an unauthenticated one. Chime's
+`Mutation.unauthenticated` returns an `UnauthenticatedMutation` whose `step_up` field returns the
+**full `StepUpMutation`** — all 20 mutations, the identical object the authenticated root exposes.
+The gate is on the namespace, not on the operations, so every mutation underneath executes anonymously.
+
+**How to find it:** do not read the unauthenticated root's field list and stop. Resolve what each
+field RETURNS and compare it to the authenticated tree. If the same type name appears under both,
+every operation on that type is anonymously reachable.
+
+```python
+# byname = {t["name"]: t for t in schema["types"]}
+unauth = byname["UnauthenticatedMutation"]
+for f in unauth["fields"]:
+    print(f["name"], "->", base_type_name(f["type"]))   # a type also reachable from Mutation = mirror
+```
+
+## Sweep for decision-override inputs, not just object references
+
+The IDOR sweep looks for id-shaped arguments. A different and rarer class is a client-supplied field
+that **overrides a server decision**. On Chime, `StepUpAuthenticatePassThruInput.force_result:
+StepUpStatus` lets the caller name the outcome of an MFA challenge.
+
+Match input-object field names against
+`force|override|skip|bypass|mock|fake|stub|simulate|test_|debug|sandbox|non_prod|internal_only|impersonat`
+then **triage the hits by what they govern** — this is the step that matters. Across 13,380 fields the
+sweep returned a dozen matches and only one touched a security decision; the rest were cache control
+(`force_refresh`), analytics (`skip_logging`), UI flow (`skip_amount`) and device self-reports
+(`is_debug_mode`, `is_gps_mocked` — inputs TO fraud scoring, not overrides OF it).
+
+That triage is worth doing even when you already have the finding: being able to say "this is the only
+parameter in the schema that overrides a security decision" pre-empts the works-as-designed response.
+
+**Reaching the resolver.** Impossible-id probes prove nothing here — every authenticate mutation
+returns the same generic error for an unknown id. Build a real object you own first
+(`create_step_up_challenge_context` → `create_step_up`), then attack that. The status changing on
+read-back is the proof; an unchanged status after a rejected call is the control.

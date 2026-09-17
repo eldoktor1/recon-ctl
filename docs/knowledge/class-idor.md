@@ -360,3 +360,29 @@ ranking, also flag pairs: an IDOR-candidate endpoint + any other endpoint on the
 returns a list of IDs of the same shape, since that pairing is the actual high-severity chain.
 Source: https://escape.tech/blog/idor-in-graphql/ ,
 https://infosecwriteups.com/graphql-security-how-i-found-and-exploited-critical-idor-and-authorization-bypass-in-a-42ab78e13642
+
+---
+
+## Two patterns worth internalising (Chime, 2026-09)
+
+### 1. The sibling-authz differential — a finding with its own control
+When one operation in a namespace enforces a gate and a sibling in the SAME namespace does not,
+that is broken function-level authorization with the control built into the evidence. Example: every
+operation under an internal `dogfood` root returned `Access denied: employee access required`
+except `build_metadata`, which returned data to an ordinary member. The siblings prove the gate
+exists and is enforced elsewhere, so "it was never meant to be protected" is not available as a
+rebuttal. Always probe the WHOLE namespace, not just the interesting field — the boring siblings are
+what make the report credible.
+
+### 2. Bucketing is not a lookup — the impossible-id control
+An endpoint that returns *different* data for *different* ids looks like an object lookup and is
+often a hash-bucketing service (experiments, feature flags, A/B assignment). The discriminating test
+is an id that **cannot exist**: a random string, an absurd number, a uuid. If it resolves exactly
+like a real id, there is no lookup and there is no disclosure — the differing output is a hash
+artefact.
+
+Concretely: an experiment endpoint accepted `unit_type: "UNIT_TYPE_USER"` with a raw member id and
+returned ~960 per-member assignments that genuinely differed between two real accounts, including
+security-relevant keys. It looked like per-member security-posture disclosure by enumerable id. Then
+`"zzzz-not-a-member-zzzz"` returned the same 1,445 rows as the real ids, and the finding evaporated.
+Run the impossible-id control BEFORE writing anything up.
