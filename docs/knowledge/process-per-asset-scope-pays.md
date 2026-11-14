@@ -1,6 +1,7 @@
 # Per-asset bounty eligibility — how `pays` is really derived
 
-**Status:** fixed 2026-09-05. Read this before touching `recon_scope_db.sh`,
+**Status:** per-asset `pays` fixed 2026-09-05; mid-label globs fixed
+2026-09-06. Read this before touching `recon_scope_db.sh`,
 `recon_scope_check.sh`, or anything that gates on `pays` / `triage_pays`.
 
 ## The rule
@@ -31,7 +32,7 @@ Reference case — `hackerone/logitech`:
 | `*.logitech.com` | `eligible_for_bounty: false` |
 | `*.streamlabs.com` | `eligible_for_bounty: true` |
 | ES `recon_alive` hosts on the program | 717 |
-| hosts on payable surface | 122 (106 reachable — see the glob gap below) |
+| hosts on payable surface | 122 (106 until the glob fix below) |
 | ES hosts gated `triage_pays: true` | **717** |
 
 `pays` is the money gate on essentially every lane — `recon_jsintel.sh`
@@ -173,20 +174,163 @@ all 717 still `triage_in_scope:true`.
 spends the whole discovery budget on unpayable surface. Paying wildcard roots
 982 → 896, direct hosts 3,167 → 3,062. `--all` is unchanged.
 
-## Known gap: mid-label glob patterns (pre-existing, NOT introduced here)
+## Mid-label glob patterns
 
-The matcher only understands a leading `*.`. Patterns with a glob anywhere else
-never match anything:
+**Status:** fixed 2026-09-06 (`recon_scope_check.sh` v2.4). Was the "known gap"
+left by the per-asset fix above.
 
-- `*vc.logitech.com` (eligible) — 16 live logitech hosts sit under it and are
-  reported `pays:false`. This is the whole 106-vs-122 difference.
-- `analytics-*.8x8.com`, `api*.netflix.com`, `*.logitechg.com*`, `*-api-*.acronis.com`
+Both hash buckets index a pattern by an exact hostname or by a wildcard APEX, so
+the matcher only ever understood a clean leading `*.`. 258 of 41,100 in-scope
+patterns — **139 of them bounty-eligible** — carry a `*` somewhere else and
+matched nothing at all. `*vc.logitech.com` alone is the whole 106-vs-122
+difference on logitech.
 
-258 of 41,100 TSV patterns, **139 of them on paying assets**. The failure is
-conservative — hosts are under-reported as non-paying, never over-reported as
-paying — so it costs opportunity, not compliance. Fixing it needs a real glob
-matcher, which is a different change from this one: the current design is an
-O(labels) hash lookup and a glob pass cannot use it.
+### Glob semantics: leading `*` spans dots, every other `*` does not
+
+```
+*  at position 1   ->  .*        may span dots
+*  anywhere else   ->  [^.]*     stays inside one label, never crosses a dot
+```
+
+Decided against the live feed, not from first principles, and the two halves are
+chosen for opposite reasons.
+
+The **leading** `*` has to span dots. All 16 live hosts under `*vc.logitech.com`
+are multi-label — `raiden.vc.logitech.com`,
+`hub.raidenapp-qa2.test.vc.logitech.com`, `wss-dev-api.dev.vc.logitech.com` — so
+a label-local `[^.]*` there recovers exactly **zero** of them. It is also the
+safe place to be permissive: whatever the leading `.*` swallows, the host still
+has to END with the literal rest of the pattern, and that rest always carries the
+program's own domain.
+
+**Everywhere else** the label-local reading is both the intended one and the safe
+one. `ab-api-cf.*.aws.indriverapp.com` means exactly one label. And a mid or
+trailing `.*` would run PAST a registrable boundary and mark a THIRD PARTY
+paying: `*.arubanetworks.com*` compiled with `.*` swallows
+`x.arubanetworks.com.attacker.net`. `[^.]*` cannot, because it cannot cross a
+dot. The old behaviour under-reported paying surface, which costs money but never
+compliance — that asymmetry is what picks `[^.]*` wherever there is doubt.
+
+Audited on the full ledger: of 5,785,318 known hosts, 7,144 match an in-scope
+glob, and **0** of those matches leave the pattern's registrable domain. (Two
+`*53.com` hits on `newline53.com` look like crossings by last-two-labels, but
+Fifth Third lists `newline53.com` and `sandbox.newline53.com` as explicit assets
+on the same program, so the glob never decides them.)
+
+There is one residual the semantics cannot resolve, recorded so nobody re-opens
+it: `*53.com` legitimately covers `info53.com` (a Fifth Third domain, matched
+partial-label) and would equally cover a stranger's `xyz53.com`. No syntactic
+rule separates the two — requiring a dot boundary would drop `info53.com`, which
+is real. The asset is `pays:false`, so no lane acts on it.
+
+### It stays an O(hosts × labels) hash lookup
+
+The glob pass is a THIRD bucket; the two hash buckets and their suffix walk are
+untouched. The gate is CANDIDATE-level rather than result-level:
+
+- a glob whose run after the last `*` starts at a dot (`analytics-*.8x8.com` →
+  `8x8.com`) is **anchored**, and found by the same suffix walk the wildcards
+  use — a hash lookup, not a regex;
+- the rest (`*vc.logitech.com`, `www.amazon.*`) are gated by one `index()` on
+  the pattern's longest literal run before any regex runs.
+
+A host with no candidate — 99%+ of them — costs a handful of hash misses.
+Measured on 60,263 hosts: 0.6s → 2.8s wall for the whole `--batch` pipeline.
+
+The pass cannot be skipped on the hash OUTCOME: `consider()` resolves per
+PROGRAM and stage 2 across programs, so a glob can be the more specific asset on
+the very program the hash already matched (exactly `*vc.logitech.com` beating
+`*.logitech.com`, spec 14 vs 12), or the only match on a better-paying one. Glob
+specificity is on the same scale as the wildcard path — `length(pattern)` minus
+the stars minus one, so a hypothetical `*.logitech.com` scores 12 either way.
+
+**The out-of-scope table gets the same pass, and that is not optional.**
+Teaching IN about `*vc.logitech.com` while OUT still ignored `*dev*.krisp.ai` and
+`*us.tiktokv.com` would widen paying surface without honouring the matching
+exclusions.
+
+### Normalize, then filter (`recon_scope_db.sh`)
+
+The asset field is free text a program typed and the feeds pass it through
+verbatim, so `sub(scheme) | sub(path)` alone left rows that are not hostname
+patterns at all — prose (`3rd party services hosted at *.sophos.com`), regex
+alternations (`*.doctolib.(fr|de|it)`), `###` placeholders, runs of block
+characters where a private program redacted an asset. Inert in a hash, but not
+something to hand to a regex compiler.
+
+The normalize half comes first, because it is what makes the filter safe — each
+step turns a row the filter WOULD drop into the asset it was always meant to be:
+
+| step | recovers |
+|---|---|
+| `split(",")` | `*.gocardless.io,*.gocardless-banking.io`, `*.trainpal.com,*.mytrainpal.com` |
+| `gsub("\\t")` | a literal backslash-t the program typed: `*.chimebank.com\t`, `auth0.com\t` |
+| trim | ` *.rivian.com` — a leading space alone stopped this being read as a wildcard |
+| `:port` | `api.cbre.com:443`, `mtn1app.mtncameroon.net:9443` |
+| leading/trailing dots | a trailing FQDN dot, and the `.com`/`.uk` fragments from splitting `*.nymhair.co.uk,.com,.uk` |
+
+Only then does the filter drop what is still not a hostname. It is a **denylist,
+not an ASCII allow-list** — that distinction cost a real asset in review:
+`^[a-z0-9.*_-]+$` reads as the obvious thing to write and silently discarded
+`vœux.vinci.com`, a live host on a paying YesWeHack program. So: reject
+whitespace and prose punctuation and regex metacharacters, then require a dot and
+at least one ASCII alphanumeric (which is what kills the block-character runs).
+No apostrophe appears in the denylist — the jq program is a shell single-quoted
+string, and an apostrophe only ever turns up in prose, which the whitespace test
+already rejects.
+
+Net on the feed: **449 junk rows dropped, 66 real assets recovered, and not one
+of the dropped rows had ever matched a host.** `gl_usable()` in the matcher
+applies the same denylist independently, so an old or hand-edited TSV still
+cannot inject a regex — and a bare `*` in `outscope_patterns.tsv`, which would
+otherwise compile to `^.*$` and put the entire internet out of scope, is
+rejected by both gates.
+
+### Verification
+
+```bash
+bash scripts/recon_scope_check.sh raiden.vc.logitech.com    # pays:true  via *vc.logitech.com
+bash scripts/recon_scope_check.sh vcc-ca1.8x8.com           # pays:true  via vcc-*.8x8.com
+bash scripts/recon_scope_check.sh ab-api-cf.x.aws.indriverapp.com     # the glob
+bash scripts/recon_scope_check.sh ab-api-cf.a.b.aws.indriverapp.com   # falls back — [^.]* is label-local
+bash scripts/recon_scope_check.sh vœux.vinci.com            # pays:true  — IDN survives the filter
+```
+
+Old matcher+TSV vs new, over the **529,678 hosts in `recon_alive_v3`** (same
+`programs.json` both sides, so this is the change and nothing else):
+
+| | |
+|---|---|
+| `pays` false → true | **202** (186 `vcc-*.8x8.com`, 16 `*vc.logitech.com`) |
+| `pays` true → false | 139 — every one an out-of-scope glob that now fires |
+| `in_scope` true → false | 139 — the same hosts, exactly |
+| `in_scope` lost to a DROPPED pattern | **0** |
+
+The last row is the one that matters for the normalize/filter change: nothing
+went out of scope because a pattern was filtered away. Over a 60,263-host sample
+of `known_hosts.txt` (`awk NR%96==0`) the same shape holds — 76 pays gains, all
+via `*.buddypress.org`, `*.hicloudcam.com`, `*dev*.arlo.com`, `*qa*.arlo.com`,
+`*.hikops.com`, `*.chimebank.com`, `vcc-*.8x8.com`; 4 losses, all exclusions.
+
+**Backfill applied 2026-09-06:** 2,592 of 529,678 docs. `logitech` went from
+106/717 `triage_pays:true` to **122/717**, closing the 106-vs-122 gap this
+section used to describe.
+
+### Open: out-of-scope is resolved GLOBALLY, across programs
+
+Surfaced by this change, NOT introduced by it — `out_exact` / `out_wild` were
+already program-agnostic, and making 91 dead out-scope globs live is what gave it
+teeth. Of the 139 hosts that lost `pays`, **37 are `*.skybet.com` hosts that
+`flutteruki` pays for, excluded by Sky DACH's `*skybet.com`** — a different
+program, on a different platform, saying "not ours, do not report skybet here".
+Across the whole `known_hosts` ledger it is 513 paying hosts, 351 of them that
+one pattern. Everything else is a program excluding its own surface
+(`*us.tiktokv.com`, `*dev*.krisp.ai`, `status.*.coinbase.com`) and is correct.
+
+Left as-is deliberately: making out-of-scope program-scoped changes resolution
+for the hash path too, on thousands of hosts, and needs its own regression. The
+current behaviour errs toward not testing, which is the cheap direction to be
+wrong in.
 
 ## Rules
 

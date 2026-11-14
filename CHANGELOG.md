@@ -1,5 +1,50 @@
 # Changelog — Autonomous Bug Bounty Recon Pipeline
 
+## v3.13 - 2026-09-06 - Mid-label glob patterns — the rest of the paying surface
+
+The per-asset fix in v3.12 left a known gap: both pattern buckets index by an exact hostname or a
+wildcard APEX, so the matcher only ever understood a clean leading `*.`. 258 of 41,100 in-scope
+patterns — 139 of them bounty-eligible — carry a `*` somewhere else and matched nothing at all.
+`*vc.logitech.com` alone was the whole 106-vs-122 difference on logitech. The failure was
+conservative (surface under-reported as non-paying, never over-reported as paying), so this is
+recovered money, not a compliance fix.
+
+- **`recon_scope_check.sh` v2.4 — a third, glob bucket.** `*` at position 1 compiles to `.*`, every
+  other `*` to `[^.]*`. The leading case HAS to span dots: all 16 live hosts under `*vc.logitech.com`
+  are multi-label (`hub.raidenapp-qa2.test.vc.logitech.com`), so a label-local read recovers zero of
+  them. Everywhere else label-local is both the intended reading (`ab-api-cf.*.aws.indriverapp.com`
+  means one label) and the safe one — a trailing `.*` on `*.arubanetworks.com*` would swallow
+  `x.arubanetworks.com.attacker.net` and mark a third party paying. Audited over all 5,785,318 known
+  hosts: 7,144 match a glob, **0** matches leave the pattern's registrable domain.
+- **The two hash buckets are untouched.** Globs whose tail is dot-aligned ride the same O(labels)
+  suffix walk as the wildcards; the rest are gated by one `index()` on their longest literal run
+  before any regex. 60,263 hosts: 0.6s → 2.8s. The pass cannot be skipped on the hash outcome —
+  resolution is per-program then across programs, and a glob can be the more specific asset on the
+  program the hash already matched (`*vc.logitech.com` spec 14 beats `*.logitech.com` spec 12).
+- **The out-of-scope table gets the same pass** — teaching IN about `*vc.logitech.com` while OUT
+  still ignored `*dev*.krisp.ai` would widen paying surface without honouring the exclusions.
+- **`recon_scope_db.sh` normalizes THEN filters.** The asset field is free text: prose
+  (`3rd party services hosted at *.sophos.com`), regex alternations, `###` placeholders, redacted
+  block runs. Normalize first so the filter cannot eat real assets — split on `,`, strip a literal
+  `\t`, trim, strip `:port` and stray dots — then drop what is still not a hostname. It is a
+  DENYLIST, not an ASCII allow-list: `^[a-z0-9.*_-]+$` silently discarded `vœux.vinci.com`, a live
+  host on a paying YesWeHack program. Net: 449 junk rows dropped, 66 real assets recovered
+  (`*.rivian.com`, `*.chimebank.com`, `auth0.com`, `*.gocardless.io`, `*.trainpal.com`), and not one
+  dropped row had ever matched a host. `gl_usable()` applies the same denylist independently, so a
+  bare `*` in `outscope_patterns.tsv` — which would compile to `^.*$` and put the whole internet out
+  of scope — is rejected by both gates.
+- **Regression, old vs new over all 529,678 `recon_alive_v3` hosts** (same `programs.json` both
+  sides): `pays` false→true **202** (186 `vcc-*.8x8.com`, 16 `*vc.logitech.com`), true→false 139 —
+  every one an out-of-scope glob that now fires — and `in_scope` lost to a dropped pattern: **0**.
+  Backfilled with `scope-resync`: 2,592 docs corrected; `logitech` 106/717 → **122/717** paying.
+- **Surfaced, not introduced — out-of-scope resolves GLOBALLY across programs.** 37 of the 139
+  losses are `*.skybet.com` hosts `flutteruki` pays for, excluded by Sky DACH's `*skybet.com` on
+  another platform (513 hosts ledger-wide, 351 from that one pattern). `out_exact`/`out_wild` were
+  always program-agnostic; making 91 dead out-scope globs live is what gave it teeth. Left as-is —
+  scoping it per program changes the hash path on thousands of hosts and needs its own regression,
+  and the current behaviour errs toward not testing, which is the cheap direction to be wrong in.
+
+
 ## v3.12 - 2026-09-05 - Per-asset bounty eligibility — `pays` stops lying
 
 `pays` is the money gate on every lane (jsintel `in_scope_now`, safe_probe, xss/sqli confirm, the

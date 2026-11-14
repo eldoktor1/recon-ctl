@@ -342,21 +342,71 @@ log "Building pattern tables"
 # recon_true_fresh paying-roots, recon_scope_check) inherits the fix for free.
 # Columns 6-7 are appended, so 4- and 5-column readers still work.
 # Falls back to the flat `in_scope` list for any record written by an older build.
-jq -r '.[] |
+#
+# NORMALIZE, THEN FILTER (2026-09-05). The asset field is free text a program
+# typed, and the feeds pass it through verbatim, so `sub(scheme)|sub(path)` alone
+# left rows that are not hostname patterns at all. Two things go wrong with that:
+# a row like `3rd party services hosted at *.sophos.com` or `*.doctolib.(fr|de)`
+# sits inertly in the exact-match hash forever, AND recon_scope_check.sh now
+# compiles glob patterns into regexes, where feed-controlled punctuation is
+# something to keep out of the engine rather than merely useless.
+#
+# The normalize half comes first because it is what makes the filter safe to
+# apply — every step below turns a row the filter WOULD drop into the real asset
+# it was always meant to be:
+#   split(",")   one field carrying several assets, `*.gocardless.io,*.gocardless-banking.io`
+#   gsub(\\t)    a literal backslash-t the program typed, `*.chimebank.com\t`, `auth0.com\t`
+#   trim         leading/trailing spaces, ` *.rivian.com` (a leading space alone
+#                stopped this being recognised as a wildcard at all)
+#   :port        `api.cbre.com:443`, `mtn1app.mtncameroon.net:9443`
+#   .dots        a trailing FQDN dot, and the `.com` / `.uk` fragments that fall
+#                out of splitting `*.nymhair.co.uk,.com,.uk`
+# and only then does the filter drop what is still not a hostname: prose (space),
+# regex alternations and ### placeholders (charset), redacted block runs and bare
+# words like `all` / `gardener` (no dot). Net on the live feed: 449 junk rows
+# dropped, 66 real assets recovered, none of the dropped rows had ever matched a
+# host. Anything dropped here is ALSO rejected by gl_usable() in the matcher —
+# two independent gates, so an old or hand-edited TSV still cannot inject a regex.
+jq -r 'def looks_like_host:
+    # DENYLIST, not an ASCII allow-list. An allow-list of [a-z0-9.*_-] reads as
+    # the obvious thing to write and is wrong: it discards IDN assets, and
+    # vœux.vinci.com is a real live host on a paying yeswehack program. So
+    # reject only what a hostname can never contain — whitespace and prose
+    # punctuation, regex metacharacters, the <placeholder> and ### forms — then
+    # require a dot and at least one ASCII alphanumeric, which is what kills the
+    # runs of block characters the private programs use to redact an asset.
+    # No apostrophe appears in the denylist: this jq program is a shell
+    # single-quoted string, so a literal one would end it. Nothing is lost —
+    # an apostrophe only ever turns up in prose, which the whitespace test
+    # already rejects, and it is not a regex metacharacter.
+    (test("[\\s()\\[\\]{}|?+^$\\\\<>!,;:\"#%&=~@/`]") | not)
+    and test("\\.") and test("[a-z0-9]");
+  .[] |
   . as $p |
   (
     if ($p.in_scope_assets | type) == "array" then $p.in_scope_assets
     else [ ($p.in_scope // [])[] | {asset: ., pays: ($p.pays // false), submit: true, max_severity: null} ]
     end
-  )[] |
-  select((.asset // "") != "") |
+  )[] as $a |
+  ($a.asset // ""
+    | ascii_downcase
+    | sub("^https?://"; "")
+    | sub("/.*$"; "")
+  )
+  | split(",")[]
+  | gsub("\\\\t"; "")
+  | sub("^\\s+"; "") | sub("\\s+$"; "")
+  | sub(":[0-9]+$"; "")
+  | sub("^\\.+"; "") | sub("\\.+$"; "")
+  as $pat |
+  select($pat | looks_like_host) |
   [
-    (.asset | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
+    $pat,
     $p.handle, $p.platform,
-    (.pays | tostring),
-    (if .pays then ($p.payout_tier // "mid") else "none" end),
-    (.max_severity // ""),
-    ((.submit // true) | tostring)
+    ($a.pays | tostring),
+    (if $a.pays then ($p.payout_tier // "mid") else "none" end),
+    ($a.max_severity // ""),
+    (($a.submit // true) | tostring)
   ] | @tsv
 ' "$PROGRAMS_JSON" | sort -u > "$INSCOPE_TSV.tmp" && mv -f "$INSCOPE_TSV.tmp" "$INSCOPE_TSV"
 # ^ atomic publish: 4 loops (discovery/scope_check/true_fresh/triage) read this
@@ -364,14 +414,40 @@ jq -r '.[] |
 #   it mid-write would see EMPTY/partial scope → every host wrongly out-of-scope.
 #   tmp+rename makes readers always see a complete old-or-new file.
 
-jq -r '.[] |
+# Same normalize-then-filter as the in-scope table above. Dropping an EXCLUSION
+# is the unsafe direction, so it is worth being explicit that this cannot lose
+# one: every row the filter drops is a row that never matched a host in the first
+# place (prose, `gisacc(*).water-link.be`, a bare `*`), while every normalize step
+# only ADDS exclusions that were being missed. It matters more here than above —
+# recon_scope_check.sh runs its glob pass over BOTH tables, and a bare `*` in this
+# file compiled as a regex would put the entire internet out of scope.
+jq -r 'def looks_like_host:
+    # DENYLIST, not an ASCII allow-list. An allow-list of [a-z0-9.*_-] reads as
+    # the obvious thing to write and is wrong: it discards IDN assets, and
+    # vœux.vinci.com is a real live host on a paying yeswehack program. So
+    # reject only what a hostname can never contain — whitespace and prose
+    # punctuation, regex metacharacters, the <placeholder> and ### forms — then
+    # require a dot and at least one ASCII alphanumeric, which is what kills the
+    # runs of block characters the private programs use to redact an asset.
+    # No apostrophe appears in the denylist: this jq program is a shell
+    # single-quoted string, so a literal one would end it. Nothing is lost —
+    # an apostrophe only ever turns up in prose, which the whitespace test
+    # already rejects, and it is not a regex metacharacter.
+    (test("[\\s()\\[\\]{}|?+^$\\\\<>!,;:\"#%&=~@/`]") | not)
+    and test("\\.") and test("[a-z0-9]");
+  .[] |
   . as $p |
   ($p.out_scope // [])[] |
   select(. != null and . != "") |
-  [
-    (. | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; "")),
-    $p.handle, $p.platform
-  ] | @tsv
+  (. | ascii_downcase | sub("^https?://"; "") | sub("/.*$"; ""))
+  | split(",")[]
+  | gsub("\\\\t"; "")
+  | sub("^\\s+"; "") | sub("\\s+$"; "")
+  | sub(":[0-9]+$"; "")
+  | sub("^\\.+"; "") | sub("\\.+$"; "")
+  as $pat |
+  select($pat | looks_like_host) |
+  [ $pat, $p.handle, $p.platform ] | @tsv
 ' "$PROGRAMS_JSON" | sort -u > "$OUTSCOPE_TSV.tmp" && mv -f "$OUTSCOPE_TSV.tmp" "$OUTSCOPE_TSV"
 
 log "Patterns: in_scope=$(wc -l < "$INSCOPE_TSV") out_scope=$(wc -l < "$OUTSCOPE_TSV")"

@@ -55,6 +55,15 @@ fi
 #     2. ACROSS programs the best payout tier wins (a host in scope on both a
 #        paying program and a VDP is still worth money), tie-broken by file order.
 #   Pre-v2.3 TSVs (5 columns) still load: cols 6-7 default to "" / "true".
+# v2.4 (2026-09-05): MID-LABEL GLOBS. Everything above indexes a pattern by an
+#   exact hostname or by a wildcard APEX, so it only ever understood a clean
+#   leading `*.`. 258 of 41,100 in-scope patterns (139 of them bounty-eligible)
+#   carry a `*` somewhere else and matched nothing at all — `*vc.logitech.com`
+#   alone covers 16 live logitech hosts that were every one reported pays:false.
+#   Those patterns now go to a THIRD bucket that is regex-matched; the two hash
+#   buckets and their O(hosts x labels) walk are untouched. See the gl_*
+#   functions for the glob semantics and the candidate gate that keeps the pass
+#   close to free.
 # =============================================================================
 batch_match() {
   # Optimized 2026-06-05: hash exact patterns + check only the host's own
@@ -62,10 +71,107 @@ batch_match() {
   # 2026-09-05: each IN bucket now holds EVERY row for that pattern (SUBSEP-
   # joined) rather than only the first. One pattern can legitimately repeat —
   # different programs, or two assets that normalize to the same hostname
-  # (`www.logitech.com` eligible + `https://www.logitech.com/blog` not) — and
+  # (www.logitech.com eligible + https://www.logitech.com/blog not) — and
   # keeping only the first silently decided `pays` by file order.
   awk -v out_tsv="$OUTSCOPE_TSV" -v in_tsv="$INSCOPE_TSV" '
     function rank(t) { return (t=="elite"?0:(t=="high"?1:(t=="mid"?2:(t=="low"?3:4)))) }
+
+    # ==== glob patterns (v2.4) ==============================================
+    # Reached only by a pattern the hash index cannot hold: one carrying a * that
+    # is not a clean leading "*.".
+    #
+    # SEMANTICS, decided against the live feed rather than from first principles:
+    #   * at position 1  -> ".*"      may span dots
+    #   * anywhere else  -> "[^.]*"   stays inside one label, never crosses a dot
+    #
+    # The leading * HAS to span dots. *vc.logitech.com is a bounty-eligible
+    # logitech asset and all 16 of its live hosts are multi-label
+    # (raiden.vc.logitech.com, hub.raidenapp-qa2.test.vc.logitech.com,
+    # wss-dev-api.dev.vc.logitech.com) — a label-local [^.]* there recovers
+    # exactly zero of them. It is also the safe place to be permissive: whatever
+    # a leading .* swallows, the host still has to END with the literal rest of
+    # the pattern, and that rest always carries the program own domain.
+    #
+    # Everywhere else the label-local reading is both the intended one and the
+    # safe one. ab-api-cf.*.aws.indriverapp.com means exactly one label; and a
+    # mid or trailing ".*" would run PAST a registrable boundary and mark a THIRD
+    # PARTY paying — *.arubanetworks.com* compiled with ".*" swallows
+    # x.arubanetworks.com.attacker.net. [^.]* cannot, because it cannot cross a
+    # dot. The old behaviour under-reported paying surface, which costs money but
+    # never compliance; that asymmetry is what picks [^.]* wherever there is any
+    # doubt.
+    function gl_compile(p,   i, ch, rx) {
+      rx = "^"
+      for (i = 1; i <= length(p); i++) {
+        ch = substr(p, i, 1)
+        if (ch == "*")      rx = rx (i == 1 ? ".*" : "[^.]*")
+        else if (ch == ".") rx = rx "\\."
+        else                rx = rx ch
+      }
+      return rx "$"
+    }
+    # Longest run of literal characters in the pattern — a cheap index()
+    # prefilter to run before the regex for globs that have no dot-aligned tail.
+    function gl_literal(p,   q, t, seg, best) {
+      q = p; best = ""
+      while (1) {
+        t = index(q, "*")
+        if (t == 0) { seg = q; q = "" } else { seg = substr(q, 1, t-1); q = substr(q, t+1) }
+        if (length(seg) > length(best)) best = seg
+        if (t == 0) break
+      }
+      return best
+    }
+    # The dot-aligned suffix a matching host MUST end with, when the run after
+    # the last * starts at a dot (analytics-*.8x8.com -> 8x8.com). Those globs
+    # ride the SAME O(labels) suffix walk the wildcards use, so finding them is a
+    # hash lookup, not a regex. "" => no such anchor, fall back to the prefilter.
+    function gl_anchor(p,   q, t) {
+      q = p
+      while ((t = index(q, "*")) > 0) q = substr(q, t+1)
+      if (substr(q, 1, 1) != ".") return ""
+      q = substr(q, 2)
+      if (q == "" || index(q, ".") == 0) return ""
+      return q
+    }
+    # Specificity on the SAME scale as the wildcard path, which uses
+    # length(apex): drop the stars and one character, so a hypothetical
+    # "*.logitech.com" scores 12 here exactly as it does there, and
+    # "*vc.logitech.com" scores 14 and correctly outranks it.
+    function gl_speclen(p,   i, n) {
+      n = 0
+      for (i = 1; i <= length(p); i++) if (substr(p, i, 1) == "*") n++
+      return length(p) - n - 1
+    }
+    # Is this a pattern the glob pass should own? Rejects the two hash-owned
+    # shapes, and rejects anything that is not a hostname pattern at all — the
+    # feeds put prose in the asset field ("3rd party services hosted at
+    # *.sophos.com", "open redirect at *.epam.com"), regex alternations
+    # (*.doctolib.(fr|de|it)), ### placeholders and redacted block runs. Those
+    # stay in the exact bucket as the inert rows they already were; compiling
+    # them would hand feed-controlled text to the regex engine, and one bare "*"
+    # in outscope_patterns.tsv would then exclude the entire internet.
+    # recon_scope_db.sh drops them at normalize time too — this is the belt for
+    # those braces, so an old or hand-edited TSV cannot inject a regex here.
+    function gl_usable(p) {
+      if (index(p, "*") == 0) return 0
+      if (substr(p, 1, 2) == "*." && index(substr(p, 3), "*") == 0) return 0
+      # Same denylist as looks_like_host in recon_scope_db.sh, and a denylist
+      # rather than an ASCII allow-list for the same reason: an allow-list
+      # silently discards IDN assets (vœux.vinci.com is a live host on a paying
+      # program). Reject what a hostname can never contain, then require a dot
+      # and one ASCII alphanumeric.
+      if (p ~ /[ \t\r\n]/) return 0
+      if (p ~ /[(){}|?+^$<>!,;:"#%&=~@]/) return 0
+      if (index(p, "[") > 0 || index(p, "]") > 0) return 0
+      if (index(p, "\\") > 0 || index(p, "/") > 0) return 0
+      if (index(p, APOS) > 0 || index(p, "`") > 0) return 0
+      if (index(p, ".") == 0) return 0
+      if (p !~ /[a-z0-9]/) return 0
+      if (gl_literal(p) == "") return 0
+      return 1
+    }
+
     # Fold every row of one matched pattern into the per-program best-so-far.
     # spec = how specific the matched pattern is (exact host >> long apex >
     # short apex). More specific always wins; on a tie the better payout tier
@@ -93,8 +199,14 @@ batch_match() {
       # shifted every field of that entry. Note: no apostrophes may appear inside
       # this awk program — it is a shell single-quoted string, so one would end it.
       GS = sprintf("%c", 29)
-      # Load OUT patterns -> exact/wildcard hashes. Keep the LOWEST file index per key
+      # No apostrophe may appear in this awk source (it is a shell single-quoted
+      # string), so gl_usable tests for one by code point instead.
+      APOS = sprintf("%c", 39)
+      # Load OUT patterns -> exact/wildcard/glob. Keep the LOWEST file index per key
       # so "first match in file order" (the original loop semantics) is preserved.
+      # OUT gets the glob pass too, and that is not optional: teaching IN about
+      # *vc.logitech.com while OUT still ignored *dev.ibotta.com and *kohls.com
+      # would widen paying surface without honouring the matching exclusions.
       oi = 0
       while ((getline line < out_tsv) > 0) {
         n = split(line, f, "\t")
@@ -102,7 +214,16 @@ batch_match() {
         oi++
         pat = f[1]
         meta = oi SUBSEP pat SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"")
-        if (substr(pat,1,2) == "*.") {
+        if (gl_usable(pat)) {
+          if (!(pat in og_meta)) {
+            og_meta[pat] = meta
+            og_rx[pat]   = gl_compile(pat)
+            og_lit[pat]  = gl_literal(pat)
+            ganc = gl_anchor(pat)
+            if (ganc != "") og_anch[ganc] = ((ganc in og_anch) ? og_anch[ganc] GS pat : pat)
+            else            og_freestr    = (og_freestr == "" ? pat : og_freestr GS pat)
+          }
+        } else if (substr(pat,1,2) == "*.") {
           apex = substr(pat,3)
           if (!(apex in out_wild)) out_wild[apex] = meta
         } else {
@@ -123,7 +244,17 @@ batch_match() {
         # entry := idx SUBSEP handle SUBSEP platform SUBSEP pays SUBSEP tier
         #          SUBSEP max_severity SUBSEP submit
         entry = ii SUBSEP (n>=2?f[2]:"") SUBSEP (n>=3?f[3]:"") SUBSEP pays SUBSEP tier SUBSEP sev SUBSEP submit
-        if (substr(pat,1,2) == "*.") {
+        if (gl_usable(pat)) {
+          if (!(pat in gl_rx)) {
+            gl_rx[pat]   = gl_compile(pat)
+            gl_spec[pat] = gl_speclen(pat)
+            gl_lit[pat]  = gl_literal(pat)
+            ganc = gl_anchor(pat)
+            if (ganc != "") gl_anch[ganc] = ((ganc in gl_anch) ? gl_anch[ganc] GS pat : pat)
+            else            gl_freestr    = (gl_freestr == "" ? pat : gl_freestr GS pat)
+          }
+          gl_ent[pat] = ((pat in gl_ent) ? gl_ent[pat] GS entry : entry)
+        } else if (substr(pat,1,2) == "*.") {
           apex = substr(pat,3)
           in_wild[apex] = ((apex in in_wild) ? in_wild[apex] GS entry : entry)
         } else {
@@ -131,6 +262,11 @@ batch_match() {
         }
       }
       close(in_tsv)
+      # Split the unanchored lists ONCE — they are walked once per host.
+      gl_fn = (gl_freestr == "" ? 0 : split(gl_freestr, gl_free, GS))
+      og_fn = (og_freestr == "" ? 0 : split(og_freestr, og_free, GS))
+      for (k in gl_rx) gl_n++
+      for (k in og_rx) og_n++
       FS = "\n"
     }
     {
@@ -155,6 +291,21 @@ batch_match() {
         if (c in out_wild) { split(out_wild[c], m, SUBSEP); if (out_idx < 0 || (m[1]+0) < out_idx) { out_idx = m[1]+0; out_meta = out_wild[c] } }
         p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
       }
+      # ---- OUT globs: same lowest-file-index rule ----------------------------
+      if (og_n > 0) {
+        delete ocand
+        gc = host
+        while (1) {
+          if (gc in og_anch) { gn = split(og_anch[gc], gcl, GS); for (gi=1; gi<=gn; gi++) ocand[gcl[gi]] = 1 }
+          gt = index(gc, "."); if (gt == 0) break; gc = substr(gc, gt+1)
+        }
+        for (gi = 1; gi <= og_fn; gi++) if (index(host, og_lit[og_free[gi]]) > 0) ocand[og_free[gi]] = 1
+        for (gp in ocand) {
+          if (host !~ og_rx[gp]) continue
+          split(og_meta[gp], m, SUBSEP)
+          if (out_idx < 0 || (m[1]+0) < out_idx) { out_idx = m[1]+0; out_meta = og_meta[gp] }
+        }
+      }
 
       # ---- IN stage 1: per program, the most specific matching asset ---------
       delete gspec; delete grank; delete gentry; delete gpat
@@ -163,6 +314,26 @@ batch_match() {
       while (1) {
         if (c in in_wild) consider(in_wild[c], length(c), "*." c)
         p = index(c, "."); if (p == 0) break; c = substr(c, p+1)
+      }
+      # ---- IN stage 1b: the globs the hash index cannot hold ------------------
+      # The gate the two hash buckets earn is CANDIDATE-level, not result-level:
+      # an anchored glob is found by the same suffix walk as above, an unanchored
+      # one by a single index() per pattern, and only survivors are regex-tested.
+      # A host with no candidate — 99%+ of them — costs a handful of hash misses.
+      # It has to stay unconditional on the hash OUTCOME, because consider()
+      # resolves per PROGRAM and stage 2 resolves across programs: a glob can be
+      # the more specific asset on the very program the hash already matched
+      # (exactly the *vc.logitech.com case, beating *.logitech.com), or the only
+      # match on a better-paying one.
+      if (gl_n > 0) {
+        delete gcand
+        gc = host
+        while (1) {
+          if (gc in gl_anch) { gn = split(gl_anch[gc], gcl, GS); for (gi=1; gi<=gn; gi++) gcand[gcl[gi]] = 1 }
+          gt = index(gc, "."); if (gt == 0) break; gc = substr(gc, gt+1)
+        }
+        for (gi = 1; gi <= gl_fn; gi++) if (index(host, gl_lit[gl_free[gi]]) > 0) gcand[gl_free[gi]] = 1
+        for (gp in gcand) if (host ~ gl_rx[gp]) consider(gl_ent[gp], gl_spec[gp], gp)
       }
 
       # ---- IN stage 2: across programs, best payout tier then file order -----
