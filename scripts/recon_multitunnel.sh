@@ -33,10 +33,16 @@ REALERT_H="${MT_REALERT_H:-6}"
 PROBE_URL="${MT_PROBE_URL:-https://am.i.mullvad.net/json}"
 PROBE_TIMEOUT="${MT_PROBE_TIMEOUT:-15}"
 CONF_DIR="${MT_CONF_DIR:-$HOME/.config/mullvad-tunnels}"
-# self-heal pool: the operator's folder of ALL Mullvad exit .conf files. When a tunnel's exit
-# dies, autoheal draws a RANDOM working config from here (never the same dead exit). Read-only —
-# this folder is NEVER written to. Falls back to CONF_DIR if the folder is not mounted.
-HEAL_POOL="${MT_HEAL_POOL:-/mnt/c/Users/mhabs/Downloads/VPN configs}"
+# self-heal pool: the operator's folder of Mullvad exit .conf files, one subfolder per city
+# (mullvad_wireguard_windows_us_{sjc,sfo,lax}/). When a tunnel's exit dies, autoheal draws a
+# RANDOM working config from here (never the same dead exit). Read-only: this folder is NEVER
+# written to. Falls back to CONF_DIR if it is missing.
+# 2026-11-14: moved from "/mnt/c/Users/mhabs/Downloads/VPN configs". Every one of its 553 configs
+# carried the same Mullvad device key, which was revoked, so all 3 tunnels died and autoheal had
+# nothing alive to swap in. The new folder holds the operator's current keys. It sits inside the
+# repo checkout and is excluded via .git/info/exclude: it holds private keys and must never be
+# committed. Files are 600, folders 700.
+HEAL_POOL="${MT_HEAL_POOL:-$HOME/recon-ctl/vpn_config}"
 HEAL_MAX_TRIES="${MT_HEAL_MAX_TRIES:-6}"     # random configs to try per dead port before giving up
 POOL_TARGET="${MT_POOL_TARGET:-3}"           # desired number of healthy exits in the pool
 HEAL_BASE_PORT="${MT_HEAL_BASE_PORT:-8888}"  # base host port when adding a brand-new tunnel
@@ -265,7 +271,9 @@ cmd_autoheal() {
   local POOL_SRC="$HEAL_POOL"
   [[ -d "$POOL_SRC" ]] || POOL_SRC="$CONF_DIR"
   local -a POOL=()
-  [[ -d "$POOL_SRC" ]] && mapfile -t POOL < <(find "$POOL_SRC" -maxdepth 1 -type f -name '*.conf' 2>/dev/null | shuf)
+  # depth 2: the pool is split into per-city subfolders. `-name '*.conf'` already skips the
+  # `*.conf:Zone.Identifier` streams a Windows download leaves next to each file.
+  [[ -d "$POOL_SRC" ]] && mapfile -t POOL < <(find "$POOL_SRC" -maxdepth 2 -type f -name '*.conf' 2>/dev/null | shuf)
   log "autoheal: pool source $POOL_SRC (${#POOL[@]} configs)"
 
   declare -A USED=()   # exit hostnames/basenames already in play -> keep exits distinct
