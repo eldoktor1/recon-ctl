@@ -119,7 +119,7 @@ function Select({ label, value, opts, onChange }:
   );
 }
 
-function FindingDrawer({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
+export function FindingDrawer({ id, onClose, onChanged }: { id: number; onClose: () => void; onChanged: () => void }) {
   const { data, loading, refetch } = useFetch<any>(`/api/findings/${id}`);
   const toast = useToast();
   const [confirm, setConfirm] = useState<null | { title: string; body: string; run: () => Promise<any> }>(null);

@@ -36,7 +36,7 @@ const NAV: NavItem[] = [
   { to: "/hunter", label: "Hunter · Class", icon: "☣" },
   { to: "/findings", label: "Findings", icon: "◆" },
   { to: "/assets", label: "Asset Explorer", icon: "❑" },
-  { to: "/leads", label: "Leads", icon: "✦" },
+  { to: "/leads", label: "Worklist", icon: "✦" },
   { to: "/notes", label: "Notes", icon: "✎" },
   { to: "/targets", label: "Target Board", icon: "◈" },
   { to: "/hunt", label: "Hunt Control", icon: "➤" },

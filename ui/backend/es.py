@@ -143,59 +143,6 @@ async def search(
         return {"error": str(e), "total": 0, "items": []}
 
 
-_LEAD_BUCKETS = [
-    ("takeover", "confirmed subdomain takeover", {"term": {"takeover_confirmed": True}}, None),
-    ("takeover_lead", "dangling CNAME (takeover lead)", {"exists": {"field": "takeover_cname"}},
-     {"term": {"takeover_confirmed": True}}),
-    ("secrets", "leaked JS secret (verified)", {"term": {"js_secret_hit": True}}, None),
-    ("kev", "KEV / n-day tech match", {"term": {"triage_kev_match": True}}, None),
-    ("fresh", "fresh blood (newly CT-surfaced)", {"term": {"triage_true_fresh": True}}, None),
-]
-
-
-async def active_leads(
-    include_oos: bool = False, include_nopay: bool = False, per_bucket: int = 10,
-) -> dict[str, Any]:
-    """Active (non-benched) actionable leads, bucketed by signal type.
-
-    Default surface is in-scope + paying; `include_oos`/`include_nopay` widen it.
-    """
-    base_must: list[dict] = []
-    if not include_nopay:
-        base_must.append({"term": {"triage_pays": True}})
-    if not include_oos:
-        base_must.append({"term": {"triage_in_scope": True}})
-    base_must_not = [{"range": {"ignore_expires_at": {"gt": "now"}}}]
-
-    async def one(key, label, sig, exclude):
-        must = base_must + [sig]
-        mnot = list(base_must_not) + ([exclude] if exclude else [])
-        body = {
-            "query": {"bool": {"must": must, "must_not": mnot}},
-            "_source": SOURCE_FIELDS,
-            "size": per_bucket,
-            "track_total_hits": True,
-            "sort": [{"triage_score": {"order": "desc", "unmapped_type": "long"}}],
-        }
-        try:
-            async with _client() as cl:
-                r = await cl.post(f"/{config.ES_INDEX}/_search", json=body)
-                data = r.json()
-                hits = data.get("hits", {})
-                total = hits.get("total", {})
-                return {
-                    "key": key, "label": label,
-                    "count": total.get("value") if isinstance(total, dict) else total,
-                    "hosts": [h["_source"] for h in hits.get("hits", [])],
-                }
-        except Exception as e:
-            return {"key": key, "label": label, "count": 0, "hosts": [], "error": str(e)}
-
-    import asyncio
-    results = await asyncio.gather(*[one(k, l, s, e) for k, l, s, e in _LEAD_BUCKETS])
-    return {"buckets": results, "pays_only": not include_nopay, "in_scope_only": not include_oos}
-
-
 async def facets() -> dict[str, Any]:
     """Terms aggregations for filter dropdowns (over the actionable, non-benched surface)."""
     body = {

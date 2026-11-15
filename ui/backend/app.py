@@ -23,7 +23,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import actions, claude_console, config, daemon, es, files, findings, safety, workspace
+from . import (actions, claude_console, config, daemon, es, files, findings, safety, workspace,
+               worklist)
 from .runner import run_observability, run_recon, run_state
 from .tasks import LANES, manager
 
@@ -157,49 +158,12 @@ async def api_asset_facets():
     return await es.facets()
 
 
-# Each live-signal lead bucket maps to the vuln CLASS a class-scoped FP note would refute
-# (matching tools/note_verdict.CLASS_PATTERNS keys). A host FP'd for that class drops from the
-# bucket even without a host-wide kill. `fresh` is multi-class (newly-surfaced surface, no single
-# class) → only a host-wide kill removes it.
-_BUCKET_CLASS: dict[str, str | None] = {
-    "takeover": "takeover", "takeover_lead": "takeover",
-    "secrets": "secret", "kev": "nday", "fresh": None,
-}
-
-
-@app.get("/api/leads")
-async def api_leads(pays_only: bool = True, include_dismissed: bool = False,
-                    include_oos: bool = False, include_nopay: bool = False):
-    # `pays_only` stays for back-compat: pays_only=False is the same as include_nopay=True.
-    data = await es.active_leads(include_oos=include_oos,
-                                 include_nopay=(include_nopay or not pays_only))
-    if not include_dismissed:
-        killed = files.killed_host_set()          # host-wide DEAD
-        killed_cls = files.killed_host_classes()  # {host -> {class,…}} class-scoped FP
-        for b in data.get("buckets", []):
-            bcls = _BUCKET_CLASS.get(b.get("key"))
-            hosts = b.get("hosts", [])
-
-            def _dropped(h: dict) -> bool:
-                hn = (h.get("host") or "").lower()
-                if hn in killed:
-                    return True  # host-wide kill
-                # class-scoped FP on THIS bucket's class → drop (a just-FP'd host must not reappear)
-                return bool(bcls) and bcls in killed_cls.get(hn, set())
-
-            kept = [h for h in hosts if not _dropped(h)]
-            drop = len(hosts) - len(kept)
-            if drop:
-                b["hosts"] = kept
-                b["suppressed"] = drop
-                if isinstance(b.get("count"), int):
-                    b["count"] = max(0, b["count"] - drop)
-    # hosts already worked (have a note) → powers the "drain rubbish / unseen only" worklist filter
-    try:
-        data["noted_hosts"] = sorted(files.noted_host_set())
-    except Exception:
-        data["noted_hosts"] = []
-    return data
+@app.get("/api/worklist")
+async def api_worklist():
+    """Confirmed vulns only, behind the FP gate in worklist.py. Replaced /api/leads (live ES
+    signal buckets) and /api/tonight (parsed briefing prose), which put notes like "SECURE" and
+    "leakchain clean" on the board as leads."""
+    return await asyncio.to_thread(worklist.build)
 
 
 # NOTE: keep this AFTER /api/assets/facets so "facets" isn't captured as a host
@@ -236,23 +200,6 @@ async def api_briefing(name: str):
     return {"name": name, "body": body}
 
 
-@app.get("/api/briefings/{name}/parsed")
-async def api_briefing_parsed(name: str):
-    """Structured sections+items (host chips, commands, severity) for the
-    interactive worklist. Falls back to a raw section on parse failure."""
-    p = files.parse_briefing(name)
-    if p is None:
-        raise HTTPException(404, "briefing not found")
-    return p
-
-
-@app.get("/api/tonight")
-async def api_tonight():
-    """The latest tonight_* briefing, parsed — powers the worklist + home widget."""
-    p = files.latest_tonight_parsed()
-    return p or {"error": "no tonight briefing generated yet", "sections": []}
-
-
 @app.get("/api/telemetry/ai-accuracy")
 async def api_ai_accuracy():
     res = await run_state("ai-accuracy")
@@ -279,6 +226,18 @@ async def api_logs(tail: int = 200):
 async def api_outcome(fid: int, body: dict = Depends(safety.require_confirm)):
     res = body.get("resolution", "")
     return await actions.outcome(fid, res, float(body.get("bounty", 0) or 0))
+
+
+@app.post("/api/findings/{fid}/reject")
+async def api_reject(fid: int, body: dict = Depends(safety.require_confirm)):
+    """The worklist's "Not real": dismiss a minted finding and record its FP signature
+    (state.py ai-verdict fp), so the worklist gate holds back the same pattern from now on.
+    The reason is prefixed "operator:" so the audit log tells it apart from Claude's verdicts."""
+    reason = (body.get("reason") or "").strip() or "operator: not real"
+    if not reason.startswith("operator"):
+        reason = f"operator: {reason}"
+    r = await run_state("ai-verdict", str(fid), "fp", "1.0", reason)
+    return {"ok": r.ok, "error": None if r.ok else (r.stderr or r.stdout).strip()[:300]}
 
 
 @app.post("/api/hosts/{host}/note")

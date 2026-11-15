@@ -91,25 +91,23 @@ const HOST_ACTIONS = [
   { action: "wcd", target: true, desc: "web-cache deception detect (unique cache-buster)" },
 ];
 
-const LEAD_BUCKETS = {
-  buckets: [
-    { key: "takeover", label: "dangling / takeover leads", count: 2, hosts: [
-      { host: "legacy.umbrella-demo.example.com", triage_priority: "P2", triage_score: 58, triage_pays: true, triage_in_scope: true },
-      { host: "old-cdn.hooli-demo.example.com", triage_priority: "P3", triage_score: 44, triage_pays: true, triage_in_scope: true },
-    ] },
-    { key: "secrets", label: "live leaked secrets (verified)", count: 1, hosts: [
-      { host: "app.initech-demo.example.com", triage_priority: "P1", triage_score: 77, triage_pays: true, triage_in_scope: true },
-    ] },
-    { key: "kev", label: "KEV / n-day candidates", count: 1, hosts: [
-      { host: "gw.acme-demo.example.com", triage_priority: "P2", triage_score: 66, triage_pays: true, triage_in_scope: true },
-    ] },
-    { key: "fresh", label: "fresh CT-surfaced hosts", count: 3, hosts: [
-      { host: "new1.globex-demo.example.com", triage_priority: "P2", triage_score: 62, triage_pays: true, triage_in_scope: true },
-      { host: "new2.globex-demo.example.com", triage_priority: "P3", triage_score: 51, triage_pays: true, triage_in_scope: true },
-      { host: "beta.acme-demo.example.com", triage_priority: "P3", triage_score: 49, triage_pays: true, triage_in_scope: true },
-    ] },
+const WORKLIST = {
+  ready: [
+    { id: 9001, host: "app.initech-demo.example.com", url: "https://app.initech-demo.example.com/static/js/main.js.map",
+      program: "Initech (demo)", vuln_class: "secret-in-sourcemap", score: 20, severity: "critical", verdict: "real",
+      confidence: 0.95, impact: "unauthenticated recovery of cloud credentials (aws-access-key-id, aws-secret-key)",
+      minted_at: ago(180), age_days: 0 },
   ],
-  suppressed: 7,
+  check: [
+    { id: 9002, host: "legacy.umbrella-demo.example.com", url: "https://legacy.umbrella-demo.example.com/",
+      program: "Umbrella (demo)", vuln_class: "takeover", score: 15, severity: "high", verdict: null,
+      confidence: null, impact: "dangling CNAME to an unclaimed bucket, NXDOMAIN verified", minted_at: ago(900), age_days: 0 },
+  ],
+  held: { "matches a dismissed FP": 4, "below the serious-impact floor": 2 },
+  held_total: 6,
+  filed: 3,
+  newest_mint: ago(180),
+  gate: { serious_min_score: 10, stale_days: 14, fanout_max: 5 },
 };
 
 const BRIEFINGS = [
@@ -117,38 +115,6 @@ const BRIEFINGS = [
   { name: "idor_candidates_2026-07-25.md", kind: "idor_candidates", date: "2026-07-25", mtime: now / 1000 - 2000 },
   { name: "xss_candidates_2026-07-25.md", kind: "xss_candidates", date: "2026-07-25", mtime: now / 1000 - 2100 },
 ];
-
-function parsedBriefing(name: string) {
-  const kind = name.split("_")[0];
-  if (kind === "idor") {
-    return { name, kind: "idor_candidates", date: "2026-07-25", title: "IDOR candidates", sections: [
-      { id: 1, emoji: "🎯", title: "IDOR / BOLA — ranked", count: 2, items: [
-        { raw: "**api.acme-demo.example.com** `/v2/orders/{id}` — numeric object-ref, financial, enumerable. 2-account swap.", label: "/v2/orders/{id} numeric object-ref, financial — 2-account swap", hosts: ["api.acme-demo.example.com"], commands: [], program: "Acme (demo)", severity: "high" },
-        { raw: "**app.initech-demo.example.com** `/api/users/{uuid}/profile` — uuid harvestable via JS endpoint list.", label: "/api/users/{uuid}/profile — uuid harvestable", hosts: ["app.initech-demo.example.com"], commands: [], program: "Initech (demo)", severity: "medium" },
-      ] },
-    ] };
-  }
-  if (kind === "xss") {
-    return { name, kind: "xss_candidates", date: "2026-07-25", title: "XSS candidates", sections: [
-      { id: 1, emoji: "⚡", title: "XSS — top unique lanes", count: 2, items: [
-        { raw: "**shop.globex-demo.example.com** `?q=` reflects unencoded in HTML context — dalfox confirm.", label: "?q= reflects unencoded — dalfox confirm", hosts: ["shop.globex-demo.example.com"], commands: ["recon-params confirm xss shop.globex-demo.example.com"], program: "Globex (demo)", severity: "high" },
-        { raw: "**api.acme-demo.example.com** `?redirect=` open-redirect + reflection candidate.", label: "?redirect= open-redirect + reflection candidate", hosts: ["api.acme-demo.example.com"], commands: [], program: "Acme (demo)", severity: "medium" },
-      ] },
-    ] };
-  }
-  return { name, kind: "tonight", date: "2026-07-25", title: "Tonight", sections: [
-    { id: 1, emoji: "🎯", title: "BAC / IDOR to test", count: 2, items: [
-      { raw: "**api.acme-demo.example.com** `/v2/orders/{id}` — numeric object-ref, financial. Own two accounts → swap.", label: "/v2/orders/{id} — numeric object-ref, financial", hosts: ["api.acme-demo.example.com"], commands: [], program: "Acme (demo)", severity: "high" },
-      { raw: "**gql.initech-demo.example.com** unauth GraphQL mutation `deleteInvoice` reachable — human confirm.", label: "unauth GraphQL mutation deleteInvoice reachable", hosts: ["gql.initech-demo.example.com"], commands: ["recon-graphql gql.initech-demo.example.com"], program: "Initech (demo)", severity: "elite" },
-    ] },
-    { id: 2, emoji: "⚡", title: "XSS / SQLi reflected-param", count: 1, items: [
-      { raw: "**shop.globex-demo.example.com** `?q=` reflects unencoded — dalfox confirm.", label: "?q= reflects unencoded — dalfox confirm", hosts: ["shop.globex-demo.example.com"], commands: ["recon-params confirm xss shop.globex-demo.example.com"], program: "Globex (demo)", severity: "high" },
-    ] },
-    { id: 3, emoji: "📦", title: "cloud-bucket exposure", count: 1, items: [
-      { raw: "**assets.hooli-demo.example.com** references `hooli-demo-uploads` — public-read, verify sensitivity.", label: "hooli-demo-uploads public-read — verify content sensitivity", hosts: ["assets.hooli-demo.example.com"], commands: [], program: "Hooli (demo)", severity: "lead" },
-    ] },
-  ] };
-}
 
 const CLAUDE_CONFIG = {
   provider: "anthropic",
@@ -278,13 +244,8 @@ export function demoGet(path: string): unknown | undefined {
   const p = path.split("?")[0];
   if (p === "/api/status") return STATUS;
   if (p === "/api/overview") return { ...STATUS, recent_confirmed: FINDINGS.filter((f) => f.state === "confirmed" || f.state === "reported"), tonight: { name: BRIEFINGS[0].name, date: "2026-07-25", preview: [], line_count: 24 } };
-  if (p === "/api/leads") return LEAD_BUCKETS;
+  if (p === "/api/worklist") return WORKLIST;
   if (p === "/api/briefings") return BRIEFINGS;
-  if (p === "/api/tonight") return parsedBriefing("tonight");
-  if (p.startsWith("/api/briefings/") && p.endsWith("/parsed")) {
-    const name = decodeURIComponent(p.slice("/api/briefings/".length, -"/parsed".length));
-    return parsedBriefing(name);
-  }
   if (p.startsWith("/api/briefings/")) return { body: "# demo briefing\n\nSynthetic briefing content for demo mode." };
   if (p === "/api/assets/facets") return { programs: [{ value: "Acme (demo)", count: 6 }, { value: "Globex (demo)", count: 6 }, { value: "Initech (demo)", count: 6 }, { value: "Hooli (demo)", count: 6 }], classes: [{ value: "idor", count: 6 }, { value: "xss", count: 6 }, { value: "graphql", count: 6 }], priorities: [{ value: "P1", count: 5 }, { value: "P2", count: 9 }, { value: "P3", count: 10 }] };
   if (p === "/api/assets") return { total: ASSETS.length, items: ASSETS };

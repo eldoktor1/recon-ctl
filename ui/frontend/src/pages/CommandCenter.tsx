@@ -1,22 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api";
 import { useFetch } from "../hooks";
 import type { Overview } from "../api";
 import { Panel, Stat, Badge, Dot, Empty, Spinner } from "../components/ui";
-import { useToast } from "../components/controls";
 import { HostDrawer } from "../components/HostDrawer";
-import { TaskConsole } from "../components/TaskConsole";
-import { CompactLeadRow } from "../components/CompactLeadRow";
-import type { Parsed, WLItem, WLSection } from "../components/Worklist";
-import { fmtDuration, fmtNum, stateColor, verdictColor, priorityColor, classFromSection } from "../format";
+import type { WorklistData } from "./Leads";
+import { fmtAgo, fmtDuration, fmtNum, stateColor, verdictColor, priorityColor, severityColor } from "../format";
 
 const STATE_ORDER = ["confirmed", "reported", "submitted", "verifying", "scored", "discovered", "dismissed", "lead_exhausted"];
 
 export default function CommandCenter() {
   const { data, loading, refetch } = useFetch<Overview>("/api/overview");
   const [host, setHost] = useState<string | null>(null);
-  const [openTask, setOpenTask] = useState<number | null>(null);
 
   useEffect(() => {
     const t = setInterval(refetch, 10000);
@@ -117,63 +112,43 @@ export default function CommandCenter() {
           )}
         </Panel>
 
-        {/* tonight's worklist — compact + interactive */}
-        <TonightWidget onHost={setHost} onTask={setOpenTask} />
+        {/* the worklist: confirmed vulns only (same feed and gate as /leads) */}
+        <WorklistWidget onHost={setHost} />
       </div>
 
       {host && <HostDrawer host={host} onClose={() => setHost(null)} />}
-      {openTask != null && <TaskConsole tid={openTask} onClose={() => setOpenTask(null)} />}
     </div>
   );
 }
 
-function TonightWidget({ onHost, onTask }: { onHost: (h: string) => void; onTask: (id: number) => void }) {
-  const { data } = useFetch<Parsed>("/api/tonight");
-  const toast = useToast();
-
-  const verify = async (h: string) => {
-    try { const t = await api.action<any>("/api/verify", { host: h }); toast("ok", `verify #${t.id} started — streaming below`); onTask(t.id); }
-    catch (e: any) { toast("err", e.message); }
-  };
-
-  // flatten the top actionable items across sections into a compact list
-  const rows: { it: WLItem; s: WLSection }[] = [];
-  for (const s of data?.sections || []) {
-    for (const it of s.items) {
-      if (it.hosts.length || it.severity) rows.push({ it, s });
-    }
-  }
-  const shown = rows.slice(0, 8);
+function WorklistWidget({ onHost }: { onHost: (h: string) => void }) {
+  const { data } = useFetch<WorklistData>("/api/worklist");
+  const items = data ? [...data.ready, ...data.check] : [];
+  const shown = items.slice(0, 8);
 
   return (
     <Panel
-      title="Tonight"
-      right={
-        <div className="flex items-center gap-2">
-          {data?.date && <Badge>{data.date}</Badge>}
-          <Link to="/leads" className="text-[10px] text-[var(--color-accent)] hover:underline">full worklist →</Link>
-        </div>
-      }
+      title="Worklist"
+      right={<Link to="/leads" className="text-[10px] text-[var(--color-accent)] hover:underline">open →</Link>}
     >
       {!data ? <Spinner /> : !shown.length ? (
-        <Empty hint="the 6:30pm briefing hasn't run yet — open the full worklist">no briefing generated yet</Empty>
+        <Empty hint={data.newest_mint ? `newest mint ${fmtAgo(data.newest_mint)}` : "nothing minted yet"}>
+          nothing real to work on
+        </Empty>
       ) : (
-        <div className="max-h-80 space-y-1.5 overflow-auto">
-          {shown.map(({ it, s }, i) => (
-            <CompactLeadRow key={i} emoji={s.emoji} severity={it.severity} host={it.hosts[0] || null}
-              vulnClass={classFromSection(s.title)} summary={it.label}
-              onHost={onHost}
-              right={it.hosts[0] ? (
-                <button onClick={() => verify(it.hosts[0])} title="run Claude verify"
-                  className="shrink-0 rounded border border-[var(--color-accent)]/40 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/10">
-                  ⚡ verify
-                </button>
-              ) : undefined}
-            />
+        <div className="max-h-80 space-y-1 overflow-auto">
+          {shown.map((w) => (
+            <div key={w.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-panel-2)]">
+              <Badge color={severityColor[w.severity]} filled>{w.severity.toUpperCase()}</Badge>
+              <button onClick={() => onHost(w.host)}
+                className="mono truncate text-xs text-[var(--color-ink)] hover:text-[var(--color-accent)]">{w.host}</button>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-ink-faint)]" title={w.impact}>{w.impact}</span>
+              {w.verdict === "real" && <Badge color="var(--color-good)">ready</Badge>}
+            </div>
           ))}
-          {rows.length > shown.length && (
+          {items.length > shown.length && (
             <Link to="/leads" className="block px-2 pt-1 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-accent)]">
-              +{rows.length - shown.length} more items · open full worklist →
+              +{items.length - shown.length} more · open the worklist →
             </Link>
           )}
         </div>
