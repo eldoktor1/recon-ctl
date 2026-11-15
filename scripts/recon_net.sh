@@ -47,11 +47,13 @@ discord_post() {
 # the recon-ui worklist instead of pinging. This is enforced HERE, at the single
 # choke point, so no call site needs to change: any channel not on the allowlist
 # resolves to an EMPTY hook and therefore stays silent.
-#   ALLOWED (immediate): review (Claude-confirmed real finding),
-#                        takeovers (confirmed takeover),
-#                        ops (VPN down / burn / halt / killswitch).
-# Override the policy with RECON_DISCORD_ALLOW="review takeovers ops digest ...".
-RECON_DISCORD_ALLOW="${RECON_DISCORD_ALLOW:-review takeovers ops}"
+#   ALLOWED (immediate), TWO channels only (operator 2026-09-13, #digest and #takeovers
+#   deleted): review (a CONFIRMED find, any class, any severity, phone push ON)
+#            ops    (machine state you must act on: egress/vpn, burn, halt, killswitch)
+#   The test for either: "would you act on this within the hour?" If not, it is a FILE
+#   the operator pulls (briefings/, docs/research/), not a notification.
+# Override with RECON_DISCORD_ALLOW="review ops ...".
+RECON_DISCORD_ALLOW="${RECON_DISCORD_ALLOW:-review ops}"
 
 # Resolve the webhook for a named channel from its dedicated file ONLY.
 # Channels: fresh | takeovers | vulns | cve | health
@@ -64,6 +66,15 @@ discord_hook() {
   # per-user file (back-compat) -> $RECON_DISCORD_DIR -> the shared state dir.
   # v3 channels: review | takeovers | ops | digest. Absent file => channel silent.
   local ch="$1" f
+  # Channel consolidation 2026-09-13. Two channels survive; legacy names are folded here
+  # rather than edited at every call site. A finding is a finding, so takeovers and vulns
+  # land in #review (with their class in the message, not in the channel name). Surface and
+  # intel feeds go silent: fresh CT and CVE digests are not actionable within the hour, so
+  # they belong in files (briefings/, docs/research/), which is where they already are.
+  case "$ch" in
+    takeovers|vulns) ch="review" ;;
+    fresh|cve|health|digest) return 0 ;;
+  esac
   # Policy gate: a channel off the allowlist is silent regardless of its file.
   case " ${RECON_DISCORD_ALLOW} " in
     *" ${ch} "*) : ;;

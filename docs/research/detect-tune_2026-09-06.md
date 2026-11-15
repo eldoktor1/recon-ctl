@@ -1,0 +1,23 @@
+# Research digest — detect-tune — 2026-09-06
+
+# Research digest — detect-tune — 2026-09-06
+
+## 1. CVE-2026-27944 — Nginx UI unauthenticated backup download + encryption-key disclosure (CVSS 9.8) — new n-day confirm primitive that chains straight to CHAIN-TO-IMPACT LAW (HIGH PRIORITY, feeds `tech-nginx.md`)
+
+**Nginx UI** (`0xJacky/nginx-ui`) is a distinct self-hosted admin dashboard for managing an Nginx server — NOT vanilla Nginx itself, so it's a separate fingerprint on hosts that already show up in our top-tech Nginx data. Versions **< 2.3.3** expose `GET /api/backup` **without authentication**; the response includes an `X-Backup-Security` header containing the AES-256 key + IV (base64, `key:iv` format) used to encrypt the returned backup archive. The backup contains user credentials, session tokens, SSL private keys, and the box's Nginx configs.
+
+- **Fingerprint**: default admin port **9000**; login page/title references "Nginx UI" (repo: `0xJacky/nginx-ui`) — worth grabbing a real favicon hash empirically against a known instance and adding it to a Shodan/Censys query (`http.favicon.hash:<value>`) once we have one, since none is published yet.
+- **Confirm primitive (single unauthenticated GET, non-destructive)**: `GET /api/backup` → if `200` and the `X-Backup-Security` header is present, that alone is a **CONFIRMED unauthenticated backup exposure** (structural — no download needed to prove the primitive, same discipline as the bucket lane's list-only check).
+- **Chain-to-impact step (minimal, once)**: download the backup once, decrypt locally with the disclosed `key:iv` (AES-256-CBC), then run `engine/impact.py scan_secrets`/`classify_data` over the decrypted contents and REDACT before minting — this is exactly the actuator/bucket pattern (recover real credentials, never report a raw dump). Fixed in 2.3.3; version-gate before treating an old-version match as more than a LEAD, per the KEV-tech-class-without-version-check FP doctrine.
+- **Sources**: [github.com/0xJacky/nginx-ui/security/advisories/GHSA-g9w5-qffc-6762](https://github.com/0xJacky/nginx-ui/security/advisories/GHSA-g9w5-qffc-6762), [ionix.io/threat-center/cve-2026-27944](https://www.ionix.io/threat-center/cve-2026-27944/), [runzero.com/blog/nginx-ui](https://www.runzero.com/blog/nginx-ui/)
+
+
+
+## 2. Subdomain-takeover fingerprint refresh: new AWS Elastic Beanstalk primitive + a WordPress.com FP that will now misfire on legacy tooling (feeds `class-takeover.md`)
+
+`can-i-take-over-xyz` picked up new fingerprints (readthedocs.io, agilecrm.com, tilda.cc, elasticbeanstalk.com) and a WordPress.com status change worth folding into our takeover confirm logic — AWS is our heaviest-weighted top-tech entry, so the Elastic Beanstalk one is directly relevant.
+
+- **NEW: AWS Elastic Beanstalk dangling-CNAME primitive** — a CNAME pointing at `<env>.<region>.elasticbeanstalk.com` that now returns **NXDOMAIN** means the EB environment name is unclaimed in that AWS region and can be **re-created by anyone** with an AWS account (EB environment names are globally-unique-per-region, first-come-first-served) — matches our existing NXDOMAIN-first-then-provider-claimability discipline (`feedback_takeover_claimability_primitive`), just a new provider entry to check against.
+- **FP UPDATE: WordPress.com takeover is now harder to actually claim** — the classic fingerprint (`Do you want to register .*.wordpress.com?`) still *fires*, but as of the platform's current flow, claiming now additionally requires a **domain-authorization code from the domain's registrar**, not just a paid WordPress.com plan. Tools still shipping the old fingerprint (subjack et al.) will flag it as straightforwardly claimable when it isn't anymore — treat a WordPress.com CNAME-lead as needing the registrar-auth-code check before calling it more than a LEAD; don't let it auto-escalate past `takeover:cname-lead`.
+- Other new fingerprints for completeness (lower priority, no AWS/GCP/Cloudflare overlap with our top-tech): `readthedocs.io` → `"The link you have followed or the URL that you entered does not exist."`; `agilecrm.com` → `"Sorry, this page is no longer available."`; `tilda.cc` → `"Please renew your subscription"` (edge case, verify manually — subscription-lapse pages can also mean an active-but-unpaid tenant, not truly unclaimed).
+- **Sources**: [github.com/EdOverflow/can-i-take-over-xyz](https://github.com/EdOverflow/can-i-take-over-xyz), [github.com/EdOverflow/can-i-take-over-xyz/pull/176](https://github.com/EdOverflow/can-i-take-over-xyz/pull/176), [github.com/haccer/subjack/pull/64](https://github.com/haccer/subjack/pull/64)

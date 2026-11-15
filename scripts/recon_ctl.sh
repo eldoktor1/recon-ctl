@@ -2507,6 +2507,7 @@ usage() {
   printf "  ${G}recon-blindxss${R} [status|test <host>|collector|correlate|plant]  Blind/stored-XSS lane (persistent interactsh + XSS Hunter; fires days later → gated #review)\n"
   printf "  ${G}recon-research${R} <tooling|vulns|kb-enrich|detect-tune|all>  Claude research routine → digest + KB (auto-commit; keeps the system updated)\n"
   printf "  ${G}recon-research program <name>${R}                           On-demand pre-hunt brief: disclosed reports, tech stack, top attack classes for a specific target\n"
+  printf "  ${G}recon-progmap${R} [workspace-key]                           Program map: signature-cluster the estate + mine bundles → workspace note + artifact (transition-gated)\n"
   printf "  ${G}recon-account${R} create <name> --url <signup> --platform <bc|h1|ywh|gmail> [--label a]  Semi-auto test-account provisioner (you solve CAPTCHA+submit)\n\n"
 
   printf "${B}── PORT SCAN ────────────────────────────────────────────────────────${R}\n"
@@ -2744,6 +2745,10 @@ case "${1:-}" in
   research)     # standing Claude research routine. Web research (not target traffic) → runs as d0k.
                 shift
                 bash "$SCRIPT_DIR/recon_research.sh" "${@:-vulns}" ;;
+  progmap)      # standing PROGRAM-MAP routine for the committed program: signature clustering +
+                # bundle mining, transition-gated, recorded into the workspace. Index reads and
+                # public CDN assets only on no-probe programs → d0k.
+                shift; bash "$SCRIPT_DIR/recon_program_map.sh" "$@" ;;
   backup)       # ES snapshot backup (recon_alive corpus). Local ES admin, not target traffic → d0k.
                 shift; bash "$SCRIPT_DIR/recon_es_backup.sh" "${@:-status}" ;;
   account)      shift; python3 "$SCRIPT_DIR/recon_account.py" "$@" ;;

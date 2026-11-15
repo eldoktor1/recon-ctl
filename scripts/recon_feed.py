@@ -31,7 +31,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 BASE_DIR = os.environ.get("BASE_DIR", os.path.expanduser("~/recon"))
 STATE_DIR = os.environ.get("STATE_DIR", os.path.join(BASE_DIR, "state"))
@@ -357,10 +357,79 @@ FEEDS = {"buckets": feed_buckets, "actuator": feed_actuator,
          "hosts": feed_hosts}
 
 
+# --- SERVED LEDGER + ROTATION (2026-08-22) ---------------------------------------------
+# Only `hosts` ever rotated. Every other feed was a deterministic ES query piped through
+# sorted(), so it emitted a BYTE-IDENTICAL candidate set on every 6h run — for actuator, the
+# same 43 hosts, forever. The 2IC logged the consequence for eight consecutive rounds:
+# "Static feeds (actuator x43/gql x6/bucket x17/ports x50) re-produce r311-r318 identical
+# sets = skipped as dup." Those hosts were cleared weeks ago; the lanes kept re-probing them
+# three times a day, spending rate budget to re-learn the same negative, while the operator's
+# read was that the lanes were "covering" the estate.
+#
+# The fix is a served ledger per feed: hosts NEVER served come first (that is genuinely new
+# surface and the whole point of being early), then — only to fill the batch — the
+# longest-unchecked hosts, so re-verification still happens but on a 7-day rhythm instead of
+# every cycle. When a feed has nothing new AND nothing cooled, it emits an empty list on
+# purpose: doing nothing is the correct action, and the yield audit can see it honestly.
+SERVED_COOLDOWN_H = int(os.environ.get("FEED_COOLDOWN_H", "168"))   # 7d re-check rhythm
+SERVED_ROTATE_N = int(os.environ.get("FEED_ROTATE_N", "25"))        # filler cap per run
+
+
+def _served_path(lane: str) -> str:
+    return os.path.join(STATE_DIR, f"feed_served_{lane}.json")
+
+
+def rotate(lane: str, names: list[str]) -> tuple[list[str], dict]:
+    """Fresh-first ordering against the served ledger. Returns (names, stats)."""
+    if os.environ.get("FEED_ROTATE", "1") == "0":
+        return names, {"rotation": "disabled"}
+    path = _served_path(lane)
+    try:
+        served = json.load(open(path))
+        if not isinstance(served, dict):
+            served = {}
+    except Exception:
+        served = {}
+
+    now = datetime.now()
+    cutoff = now - timedelta(hours=SERVED_COOLDOWN_H)
+    fresh, cooled = [], []
+    for h in names:
+        ts = served.get(h)
+        if not ts:
+            fresh.append(h)
+            continue
+        try:
+            seen = datetime.fromisoformat(ts)
+        except Exception:
+            fresh.append(h)
+            continue
+        if seen < cutoff:
+            cooled.append((seen, h))
+    cooled.sort()                                    # longest-unchecked first
+    filler = [h for _s, h in cooled][:max(0, SERVED_ROTATE_N - len(fresh))]
+    out = fresh + filler
+
+    stamp = now.isoformat(timespec="seconds")
+    for h in out:
+        served[h] = stamp
+    # keep the ledger bounded to what the feed still knows about, plus recent history
+    if len(served) > 50000:
+        served = dict(sorted(served.items(), key=lambda kv: kv[1])[-50000:])
+    try:
+        json.dump(served, open(path, "w"))
+    except Exception as e:
+        log(f"{lane}: could not write served ledger ({e})")
+    return out, {"candidates": len(names), "new": len(fresh),
+                 "rotated_in": len(filler), "suppressed_recent": len(names) - len(out)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Mine ES for impact-lane targets. No target traffic.")
     ap.add_argument("lane", nargs="*", choices=sorted(FEEDS) + [], default=None)
     ap.add_argument("--out-dir", default=STATE_DIR)
+    ap.add_argument("--no-rotate", action="store_true",
+                    help="emit the raw ES candidate set, ignoring the served ledger")
     a = ap.parse_args()
     lanes = a.lane or sorted(FEEDS)
 
@@ -368,10 +437,17 @@ def main() -> int:
     summary = {}
     for lane in lanes:
         names, prov = FEEDS[lane]()
+        # `hosts` already rotates through its own offset cursor; the rest were static.
+        if lane != "hosts" and not a.no_rotate:
+            names, rstats = rotate(lane, names)
+            log(f"{lane}: {rstats.get('candidates', 0)} candidate(s) -> "
+                f"{rstats.get('new', 0)} new + {rstats.get('rotated_in', 0)} re-check "
+                f"({rstats.get('suppressed_recent', 0)} suppressed as checked-recently)")
         txt = os.path.join(a.out_dir, f"feed_{lane}.txt")
         js = os.path.join(a.out_dir, f"feed_{lane}.json")
         open(txt, "w").write("\n".join(names) + ("\n" if names else ""))
-        json.dump(prov, open(js, "w"), indent=2)
+        json.dump({k: v for k, v in prov.items() if k in set(names)} or prov,
+                  open(js, "w"), indent=2)
         summary[lane] = len(names)
         log(f"{lane}: -> {txt}")
 

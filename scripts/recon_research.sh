@@ -31,7 +31,8 @@ cli_error_alert() {
   local topic="$1" errline="$2" stamp="$STATE_DIR/research_cli_error.alerted"
   [[ -f "$stamp" && "$(find "$stamp" -mmin -1440 2>/dev/null)" ]] && return 0
   local hook; hook="$(discord_hook ops 2>/dev/null || true)"
-  [[ -n "$hook" ]] || hook="$(discord_hook digest 2>/dev/null || true)"
+  # digest fallback removed 2026-09-13: that channel is deleted. Research digests are files
+  # (docs/research/), not notifications — nothing here is actionable within the hour.
   if [[ -n "$hook" ]]; then
     discord_post "$hook" "$(jq -nc --arg c "⚠️ **recon-research halted** — headless Claude CLI: \`${errline:0:120}\`. Research digests are paused until you re-auth: run \`~/.local/bin/claude\` → \`/login\`. (No junk committed.)" '{content:$c}')" >/dev/null 2>&1 || true
   fi
@@ -235,14 +236,25 @@ run_topic() {
     --permission-mode dontAsk --allowedTools "WebSearch WebFetch" > "$raw" 2>/dev/null || true
   if [[ ! -s "$raw" ]]; then warn "$topic — no research output (auth/timeout?)"; return 0; fi
 
-  # GUARD: the headless CLI emits a short meta-error (logged out / rate-limited) to stdout instead of
-  # research. That is NOT a digest — never commit/push it (it poisoned git history Jun 28–Jul 09).
-  # A real digest is multi-KB and starts with content; an error stub is one short line. Gate on both.
-  if [[ "$(wc -c < "$raw")" -lt 1000 ]] && grep -qiE \
-       'not logged in|please run /login|hit your (weekly|usage) limit|invalid api key|authentication_error|credit balance is too low' \
-       "$raw"; then
-    local errline; errline="$(head -1 "$raw" | tr -d '\r')"
-    warn "$topic — CLI auth/limit error, skipping commit: ${errline}"
+  # GUARD: the headless CLI emits a short meta-error (logged out, rate-limited, OAuth expired) to
+  # stdout INSTEAD of research. That is not a digest and must never be committed.
+  #
+  # This guard already failed once. It used to blacklist known error strings
+  # ('not logged in', 'please run /login', 'authentication_error', ...) and on 2026-09-14/15 the CLI
+  # said "Failed to authenticate: OAuth session expired and could not be refreshed" — which matched
+  # none of them. So the error was routed as a digest and became the COMMIT HEADLINE, twice, on main.
+  # (It had already poisoned history once before, Jun 28 to Jul 09.)
+  #
+  # The lesson: enumerating known-bad output is always one unknown error behind. The test is now
+  # POSITIVE — prove it IS a digest, or refuse it. A real digest is multi-KB and has markdown
+  # headings; an error stub is one short line. Anything failing that is skipped no matter what it
+  # says, so a brand-new error message cannot reach git.
+  local rawbytes headings errline
+  rawbytes="$(wc -c < "$raw" 2>/dev/null || echo 0)"
+  headings="$(grep -cE '^#{1,3} ' "$raw" 2>/dev/null || true)"; headings="${headings:-0}"
+  if [[ "$rawbytes" -lt 1000 || "$headings" -lt 2 ]]; then
+    errline="$(head -1 "$raw" | tr -d '\r')"
+    warn "$topic — not a digest (${rawbytes}B, ${headings} heading(s)), skipping commit: ${errline}"
     cli_error_alert "$topic" "$errline"
     return 0
   fi

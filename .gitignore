@@ -71,3 +71,6 @@ engine/__pycache__/
 
 # Claude Code local settings (machine-specific: permission allowlist, MCP approvals)
 .claude/settings.local.json
+
+# Test-account evidence captures (own accounts; never committed)
+evidence/

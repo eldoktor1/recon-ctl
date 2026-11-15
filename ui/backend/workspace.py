@@ -820,7 +820,10 @@ def update_wstg(key: str, wid: str, status: str, note: str | None = None) -> dic
         raise KeyError(wid)
     item["status"] = status
     if note is not None:
-        item["note"] = str(note)[:2000]
+        # 2000 silently truncated seven of this program's test records MID-SENTENCE, which is
+        # worse than rejecting the write: the document looked complete and was not. A WSTG note
+        # is the worked-knowledge record for a whole test, so it needs room for the evidence.
+        item["note"] = str(note)[:8000]
     item["updated_at"] = _now()
     ws["history"].append({"ts": item["updated_at"], "event": f"{wid} → {status}"})
     return save(ws)
@@ -847,9 +850,12 @@ def update_stride(key: str, cat: str, threat: str, sid: str | None = None,
         ws["history"].append({"ts": ts, "event": f"STRIDE {cat} threat added"})
     else:
         ws["history"].append({"ts": ts, "event": f"STRIDE {row['id']} updated"})
-    row["threat"] = str(threat)[:500]
+    # 500 was too tight for a threat stated as a broken ASSUMPTION plus its test, which is the
+    # form this doctrine asks for - it cut sixteen of this program's rows off mid-word. The
+    # rationale belongs in `note`, but a silently-severed `threat` is a corrupted record.
+    row["threat"] = str(threat)[:1600]
     if note is not None:
-        row["note"] = str(note)[:2000]
+        row["note"] = str(note)[:8000]
     if status is not None:
         row["status"] = str(status)[:40]
     if hosts is not None:

@@ -3,7 +3,14 @@
 Reference for every session. Established through a full session of manual
 verification. Keep it tight; update it when a principle changes.
 
-## THE MOTTO: be UNIQUE, or get duplicated (v3.7)
+## REPLY LENGTH — HARD RULE, EVERY SESSION (operator 2026-09-07)
+**Keep every reply to a few lines.** The operator has an attention difficulty and zones out on
+long text, so this is an accessibility requirement, not a style preference — it was asked for
+four times before being made standing. Lead with the answer or the decision; no preamble, no
+recap, no "here's the structure of the problem". One question at a time. Do not explain
+reasoning unless asked. **The detail belongs in `host_notes` / the workspace, which is the
+record anyway — the reply is only the signal.** A short table or a few bullets is fine;
+paragraphs are not. Applies to ALL sessions and lanes, not just the program walk.
 The operator is part-time (evenings) vs full-time hunters. Running what everyone runs —
 `subfinder | httpx | nuclei-defaults` on saturated programs — finds what everyone finds =
 **duplicates = 0 reward** (proven: our only submission was a real P2 marked dup). Research
@@ -399,7 +406,24 @@ triage_score). And we **measure** it: `state.py ai-accuracy` / `recon-ai accurac
 human-decided precision of `real` verdicts (accepted vs dismissed) — the only ground truth.
 Never pass `--bare` (forces API-key auth, bypasses the Max OAuth login).
 
-## Notification policy (a 9-5 hunter reads ONE card, not a live drip)
+## Notification policy — THREE CHANNELS, ALL ACTION-ONLY (operator 2026-09-13)
+The operator DELETED #digest ("digest is now just a noise factory") after 421 2IC rounds of cards
+produced zero confirmed findings. Discord now carries exactly three channels, and the test for every
+one of them is: **would you act on this within the hour?** If not, it is a file, not a notification.
+- **#review** — a CONFIRMED find, any severity. The 2IC posts the moment a chain recovers impact
+  (creds, data, a primitive), not batched at end of round. Also the reporter's ready-to-submit items.
+  Never the big card; that channel stays clean enough that a message in it always means "look now".
+- **#takeovers** — a claimability-confirmed takeover (NXDOMAIN / NoSuchBucket / unclaimed
+  fingerprint). Separate because it is time-critical: first to claim wins.
+- **#ops** — action-only machine state: egress/`vpn_down` transitions, burn (cooldowns, circuit
+  breaker), daemon halt, killswitch, self-audit HIGHs. No health spam, no hourly heartbeat.
+Everything non-urgent is a FILE the operator pulls when they choose: the recon-ui "Tonight" worklist
+(parsed from `briefings/tonight_<date>.md`), `briefings/*_candidates_*.md`, `docs/research/`.
+Dead code removed the same day: the briefing's Discord card block, `recon_research.sh`'s digest
+fallback, and the `state/discord/digest` webhook (moved to `state/discord/retired/`).
+`recon_digest.sh` was already unwired from the daemon.
+
+## Legacy notification note (pre-2026-09-13, kept for context)
 Real-time pings are **CONFIRMED only** — a Claude-`real` finding (`#review`) or a confirmed
 takeover (`#takeovers`). `fp`/`needs-human` and speculative IDOR/n-day LEADS never interrupt.
 Everything speculative is filtered (`tools/brief_filter.py`: product-class-dup + shared-tenant
@@ -408,6 +432,26 @@ BAC/IDOR to test + n-day CVE candidates + ready-to-submit + needs-human + verifi
 absorbs the old 5:30 lead-digest). `#ops` = action-only (VPN / burn / halt / killswitch).
 On demand, **`recon-verify list|<#>|<host>`** runs the full Claude verify (multimodal + safe
 probes) on any digest lead so the operator can deep-check before spending an evening on it.
+
+**THE NIGHTLY CARD IS UNAUTH-ONLY, AND IT TELLS THE TRUTH ABOUT ITS INPUTS (operator 2026-09-13).**
+Two failures, both measured: (1) the card re-served the SAME leads nightly — on 2026-09-13 it was
+7 hosts, all 7 repeats of the night before, zero new, because a `to-test` lead re-renders every
+night for the whole 30-day freshness window until a human works it or a note kills it; (2) it kept
+printing that backlog while every scanner had been paused for days (`state/vpn_down` left set after
+a manual hunt), so a dead pipeline still produced a card that LOOKED like a working routine. Fixes,
+both in `recon_briefing.sh`: a **surfaced ledger** (`tools/brief_surfaced.py`, wired into
+`render_gate` so every stream inherits it) stamps each lead with how many nights it has been shown,
+labels NEW vs REPEAT, resets the count when the lead's SUBSTANCE changes (score/severity/route-count
+— the transition-gate idea applied to rendering), and after `PARK_AFTER` (5) nights collapses it
+into a counted `parked` line instead of reprinting it; nothing is deleted, and it FAILS OPEN because
+an empty card is a worse failure than one stale line. And a **`## 📡 Pipeline state`** block is now
+the first thing on the card: vpn_down status, fresh-CT count, alive_hosts staleness, and
+`N new · N repeat · N parked`, with an explicit "nothing new since the last card" warning.
+**Authed/BAC-IDOR and GraphQL-arg leads are DEMOTED off the card to one pointer line each** — they
+need two owned accounts and hours on one program, which is the `/program` walk, not a weeknight.
+The worklists are still built and ranked (`idor_candidates_*.md`, `graphql_candidates_*.md`).
+Nightly = what can be proven with NO accounts: confirm-fired submits, chain-to-impact recoveries
+(creds/data/primitive), version-confirmed n-days, executed XSS/SQLi, bucket exposure, fresh surface.
 
 ## Documented false-positive patterns (never score as CONFIRMED)
 - **KEV tech-class match without a confirmed in-range version** (Spring actuator,

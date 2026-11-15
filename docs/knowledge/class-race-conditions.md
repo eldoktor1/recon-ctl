@@ -30,3 +30,26 @@ def queueRequests(target, wordlists):
 def handleResponse(req, interesting):
     if '200' in req.response or 'success' in req.response:
         table.add(req)
+
+---
+
+## Idempotency-gap mapping: a targeted double-spend worklist (Chime, 2026-09)
+
+Rather than racing money endpoints at random, diff the schema for which ones carry an idempotency
+key and which do not. The protected ones are a **built-in positive control**: if a shop uses
+`idempotency_key` on six money mutations, its absence on a seventh is an anomaly rather than a house
+style, and that is the one to race.
+
+Method (offline, from an introspection dump):
+1. Collect every mutation whose name or arguments look like money movement.
+2. Flatten each argument's input object (recursively) into a flat field list.
+3. Flag fields matching `idempot|request_id|client_reference|dedup|nonce|correlation|..._session_id`.
+4. Flag fields matching `amount|amount_cents|total|..._amount|..._cents`.
+5. The worklist is: **takes an amount, carries no idempotency key**.
+
+On the target this produced 14 protected vs 17 unprotected-with-an-amount out of 100 money
+mutations, and the sharpest pair sat side by side — one transfer path with `idempotency_key` and
+another with none taking `amount` + `source_id` + `destination_id`.
+
+**Report the LEDGER DELTA, not the response.** N concurrent identical requests returning `200`
+proves nothing; the finding is a measured balance discrepancy against the expected single debit.

@@ -32,6 +32,48 @@ UA = os.environ.get("PROBE_UA",
 METHODS = {"GET", "HEAD", "OPTIONS"}
 _CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mode = ssl.CERT_NONE
 
+# --- multi-egress rotation (2026-08-22) ------------------------------------------------
+# Every probe used to leave from the single host Mullvad exit, so the ai-hunter and the
+# VERIFY gate shared one IP and one rate-limit budget with each other. A cooldown armed by
+# one lane blinded the others, and blocked probes became `evidence_state: blocked`
+# hypotheses — the mechanism behind the 19 [UNVERIFIED] entries on the 2026-08-22 card.
+# Rotating across the gluetun pool gives each probe a fresh exit and multiplies the budget.
+#
+# SAFETY: the pool file holds ONLY tunnels recon_multitunnel.sh verified as live Mullvad
+# exits; gluetun runs FIREWALL=on behind the host tunnel, so a proxied request can never
+# egress on the real ISP. The SSRF/metadata guard below still resolves and validates the
+# TARGET locally before any connection, so proxying cannot be used to reach internal infra.
+# Absent/empty pool, or SAFE_PROBE_PROXY=0, => direct (unchanged behaviour).
+_PROXY_LIST = os.environ.get("SAFE_PROBE_PROXY_LIST",
+                             os.path.expanduser("~/recon/state/egress_proxies.txt"))
+_PROXY_RR   = os.environ.get("SAFE_PROBE_PROXY_RR",
+                             os.path.expanduser("~/recon/state/safe_probe_rr.idx"))
+_PROXY_ON   = os.environ.get("SAFE_PROBE_PROXY", "1") != "0"
+
+
+def _pick_proxy():
+    """Round-robin the next healthy exit. Returns None to go direct (always safe)."""
+    if not _PROXY_ON:
+        return None
+    try:
+        with open(_PROXY_LIST) as fh:
+            pool = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
+        if not pool:
+            return None
+        try:
+            i = int(open(_PROXY_RR).read().strip() or 0)
+        except Exception:
+            i = 0
+        i %= len(pool)
+        try:
+            with open(_PROXY_RR, "w") as fh:
+                fh.write(str((i + 1) % len(pool)))
+        except Exception:
+            pass          # a read-only state dir must not break probing
+        return pool[i]
+    except Exception:
+        return None       # any pool problem => direct, never a failed probe
+
 # --- edge/WAF vs application block classification --------------------------------------
 # A 403 is not one thing. An EDGE (CDN/WAF) 403 is a path/rule refusal: the application never
 # saw the request and the host is NOT asking us to slow down. An APPLICATION 403 is the target
@@ -132,20 +174,39 @@ def probe(url, method="GET"):
     if not ok:
         return _err(f"blocked-target:{detail}", host=host)   # internal/metadata/SSRF guard
 
-    op = ur.build_opener(ur.HTTPSHandler(context=_CTX), _NoRedirect())
-    req = ur.Request(url, method=method, headers={"User-Agent": UA, "Accept": "*/*"})
-    try:
-        r = op.open(req, timeout=TIMEOUT)
-        status = r.status
-        headers = {k.lower(): v for k, v in r.headers.items()}
-        raw = b"" if method == "HEAD" else r.read(MAX_BODY)
-    except ur.HTTPError as e:
-        status = e.code
-        headers = {k.lower(): v for k, v in (e.headers or {}).items()}
-        try: raw = e.read(MAX_BODY)
-        except Exception: raw = b""
-    except Exception as e:
-        return _err(f"fetch-fail:{e.__class__.__name__}", host=host)
+    # Attempt through a rotated exit first, then fall back DIRECT once. The fallback matters:
+    # a flaky tunnel must never turn into a `blocked` evidence_state, because the hunter reads
+    # that as "the target refused us" and either withholds a real lead or reasons over nothing.
+    proxy = _pick_proxy()
+    egress = proxy or "direct"
+    attempts = [proxy, None] if proxy else [None]
+    last_exc = None
+    for attempt_proxy in attempts:
+        handlers = [ur.HTTPSHandler(context=_CTX), _NoRedirect()]
+        handlers.append(ur.ProxyHandler({"http": attempt_proxy, "https": attempt_proxy}
+                                        if attempt_proxy else {}))
+        op = ur.build_opener(*handlers)
+        req = ur.Request(url, method=method, headers={"User-Agent": UA, "Accept": "*/*"})
+        try:
+            r = op.open(req, timeout=TIMEOUT)
+            status = r.status
+            headers = {k.lower(): v for k, v in r.headers.items()}
+            raw = b"" if method == "HEAD" else r.read(MAX_BODY)
+            egress = attempt_proxy or "direct"
+            break
+        except ur.HTTPError as e:
+            # a real HTTP answer (incl. 403/429) — the exit worked, do NOT retry elsewhere
+            status = e.code
+            headers = {k.lower(): v for k, v in (e.headers or {}).items()}
+            try: raw = e.read(MAX_BODY)
+            except Exception: raw = b""
+            egress = attempt_proxy or "direct"
+            break
+        except Exception as e:
+            last_exc = e          # transport failure — try the next exit
+            continue
+    else:
+        return _err(f"fetch-fail:{last_exc.__class__.__name__}", host=host, egress=egress)
 
     body = raw.decode("utf-8", "replace")
     title = ""
@@ -158,6 +219,7 @@ def probe(url, method="GET"):
             "x-frame-options")
     return {
         "ok": True, "url": url, "method": method, "status": status, "resolved": detail,
+        "egress": egress,          # which exit carried it — audit trail for burn analysis
         "headers": {k: headers[k] for k in keep if k in headers},
         "title": title, "body_snippet": snippet, "body_bytes": len(raw),
         "redirect_location": headers.get("location", ""),
